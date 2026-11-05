@@ -15,26 +15,17 @@ impl AuthService {
         let Some(stored) = self.load_validated()? else {
             return self.local_status();
         };
-        let ha_generation = stored
-            .record
-            .ha_authorization()
-            .map(|authorization| self.ha_generation(authorization))
-            .transpose()?;
-        let mijia_generation = self
-            .store
-            .mijia_generation(&stored.record.uid)?
-            .ok_or(AuthError::Missing("Mijia credentials changed during check"))?;
         let mut report = self.local_status()?;
-        report.mijia = match self.maintain_mijia(&stored.record, &mijia_generation).await {
+        report.mijia = match self.maintain_mijia(&stored.record).await {
             Ok(_) => AuthenticationState::Authenticated,
             Err(error) => state_for_error(error)?,
         };
         report.recovery_stop = self
             .store
-            .load()?
+            .current_snapshot()
+            .record
             .and_then(|record| record.recovery.and_then(|recovery| recovery.stop));
-        self.check_ha_and_certificate(stored, ha_generation, &mut report)
-            .await?;
+        self.check_ha_and_certificate(stored, &mut report).await?;
         report.set_completed_at((self.now)());
         Ok(report)
     }
@@ -42,7 +33,6 @@ impl AuthService {
     pub(super) async fn check_ha_and_certificate(
         &self,
         stored: StoredRecord,
-        ha_generation: Option<String>,
         report: &mut AuthReport,
     ) -> Result<(), AuthError> {
         let record = stored.record;
@@ -55,9 +45,6 @@ impl AuthService {
             tokens: authorization.tokens.clone(),
             refreshed: false,
             refresh_succeeded: false,
-            generation: ha_generation.ok_or(AuthError::Missing(
-                "HA OAuth credentials changed during authorization check",
-            ))?,
         };
         let mut trusted_identity = true;
         let mut maintenance_failure = None;
@@ -129,14 +116,14 @@ impl AuthService {
                 private_key_pem: identity.private_key_pem,
                 certificate_pem: None,
             };
-            self.store.update_hub(&hub)?;
+            self.store.create_hub(&hub)?;
             record.hub = Some(hub);
         }
         let identity = self.client_identity(&record)?;
-        let certificate = match session
+        let response = session
             .request(async |token| self.cloud.get_certificate(token, &identity.csr_pem).await)
-            .await
-        {
+            .await;
+        let certificate = match response {
             Ok(certificate) => certificate,
             Err(error) => {
                 let refresh_failed = matches!(error, RequestFailure::Refresh(_));
@@ -202,25 +189,24 @@ pub(super) struct CheckSession<'a> {
     pub(super) tokens: TokenSet,
     pub(super) refreshed: bool,
     pub(super) refresh_succeeded: bool,
-    pub(super) generation: String,
 }
 impl CheckSession<'_> {
     async fn request<T>(
         &mut self,
         mut request: impl AsyncFnMut(&str) -> Result<T, CloudError>,
     ) -> Result<T, RequestFailure> {
-        self.ensure_current().map_err(RequestFailure::Other)?;
         let result = request(&self.tokens.access_token).await;
-        self.ensure_current().map_err(RequestFailure::Other)?;
         match result {
             Err(error) if error.is_unauthorized() => {
                 if !self.refreshed {
                     self.refresh().await.map_err(RequestFailure::Refresh)?;
                     let result = request(&self.tokens.access_token).await;
-                    self.ensure_current().map_err(RequestFailure::Other)?;
                     match result {
                         Err(error) if error.is_unauthorized() => {
-                            self.stop_current().map_err(RequestFailure::Other)?;
+                            self.auth
+                                .store
+                                .stop_ha_refresh()
+                                .map_err(|error| RequestFailure::Other(error.into()))?;
                             Err(RequestFailure::Other(AuthError::Cloud(error)))
                         }
                         result => {
@@ -228,7 +214,10 @@ impl CheckSession<'_> {
                         }
                     }
                 } else if self.refresh_succeeded {
-                    self.stop_current().map_err(RequestFailure::Other)?;
+                    self.auth
+                        .store
+                        .stop_ha_refresh()
+                        .map_err(|error| RequestFailure::Other(error.into()))?;
                     Err(RequestFailure::Other(AuthError::Cloud(error)))
                 } else {
                     Err(RequestFailure::OldTokenRejected(error))
@@ -238,46 +227,12 @@ impl CheckSession<'_> {
         }
     }
     async fn refresh(&mut self) -> Result<(), AuthError> {
-        self.ensure_current()?;
         self.refreshed = true;
         self.tokens = self
             .auth
             .refresh_tokens_once(self.redirect_uri, &self.tokens, self.auth.now)
             .await?;
-        self.generation = self
-            .auth
-            .store
-            .ha_refresh_generation(self.redirect_uri, &self.tokens)?
-            .ok_or(AuthError::Missing(
-                "HA OAuth credentials changed during refresh",
-            ))?;
         self.refresh_succeeded = true;
-        Ok(())
-    }
-    fn ensure_current(&self) -> Result<(), AuthError> {
-        if self
-            .auth
-            .store
-            .ha_refresh_generation(self.redirect_uri, &self.tokens)?
-            .as_deref()
-            != Some(self.generation.as_str())
-        {
-            return Err(AuthError::Missing(
-                "HA OAuth credentials changed during authorization check",
-            ));
-        }
-        Ok(())
-    }
-    fn stop_current(&self) -> Result<(), AuthError> {
-        if !self
-            .auth
-            .store
-            .stop_ha_refresh_if_current(&self.generation)?
-        {
-            return Err(AuthError::Missing(
-                "HA OAuth credentials changed during authorization check",
-            ));
-        }
         Ok(())
     }
 }

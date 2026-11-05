@@ -2,6 +2,23 @@ use super::support::{cloud_active, with_cloud_peer};
 use super::*;
 
 #[test]
+fn checking_credential_snapshots_does_not_query_storage() {
+    let rig = Rig::new(true, &["one"]);
+    let path = rig.source.context.mijia_path().unwrap();
+    let key = rig.source.context.ha_key().unwrap();
+    // Make a fresh storage lookup fail after the adapter captured credentials.
+    rusqlite::Connection::open(rig.store.path())
+        .unwrap()
+        .execute(
+            "ALTER TABLE xiaomi_account RENAME TO unavailable_account",
+            [],
+        )
+        .unwrap();
+    assert!(rig.source.context.current_mijia(&path));
+    assert!(rig.source.context.current_ha(&key));
+}
+
+#[test]
 fn ha_identity_is_checked_while_mijia_directory_is_unavailable() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().home_status = 503;
@@ -31,21 +48,10 @@ fn ha_rejection_and_refresh_do_not_request_an_extra_mijia_directory_round() {
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let before = c.cloud.lock().unwrap().homes;
-        let token = c
-            .context
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .unwrap()
-            .ha_authorization()
-            .unwrap()
-            .tokens
-            .access_token
-            .clone();
+        let key = c.context.ha_key().unwrap();
         c.context
             .token_rejected(
-                &token,
+                &key,
                 crate::xiaomi::auth::FailureReason::CloudNotification(
                     crate::xiaomi::cloud::NotificationError::Unauthorized,
                 ),
@@ -84,100 +90,8 @@ fn token_deadlines(rig: &Rig, refresh: i64, expiry: i64) {
         .unwrap()
         .tokens
         .expires_at = rig.clock.wall() + expiry;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.live.borrow_mut().credentials = Some(record);
-}
-
-#[test]
-fn a_missing_replacement_certificate_clears_previous_readiness() {
-    let rig = Rig::new(true, &["one"]);
-    assert!(
-        rig.source
-            .context
-            .status
-            .borrow()
-            .auth
-            .certificate
-            .is_some()
-    );
-    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    let certificate = record.hub.as_ref().unwrap().certificate_pem.clone();
-    record.ha.as_mut().unwrap().authorization = None;
-    record.hub.as_mut().unwrap().certificate_pem = None;
-    rig.store.xiaomi().replace(&record).unwrap();
-    block_on(rig.run(|control| async move {
-        until(|| control.context.status.borrow().auth.certificate.is_none()).await;
-        assert!(matches!(
-            control.context.status.borrow().auth.certificate_update,
-            crate::xiaomi::auth::CertificateUpdate::Failed(
-                crate::xiaomi::auth::FailureReason::MissingCertificate
-            )
-        ));
-        record.hub.as_mut().unwrap().certificate_pem = certificate;
-        control.store.xiaomi().replace(&record).unwrap();
-        control.context.changed.notify(usize::MAX);
-        until(|| control.context.status.borrow().auth.certificate.is_some()).await;
-    }));
-}
-
-#[test]
-fn background_distinguishes_missing_invalid_and_repaired_certificates() {
-    let rig = Rig::new(true, &["one"]);
-    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    let original = record.hub.as_ref().unwrap().certificate_pem.clone();
-    record.ha.as_mut().unwrap().authorization = None;
-    record.hub.as_mut().unwrap().certificate_pem = None;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source
-        .context
-        .adopt_credentials(record.clone())
-        .unwrap();
-    block_on(rig.run(|control| async move {
-        until(|| control.context.status.borrow().auth.certificate.is_none()).await;
-        assert_eq!(
-            control.context.status.borrow().auth.certificate_update,
-            crate::xiaomi::auth::CertificateUpdate::Failed(
-                crate::xiaomi::auth::FailureReason::MissingCertificate
-            )
-        );
-
-        record.hub.as_mut().unwrap().certificate_pem = Some("malformed certificate".into());
-        control.store.xiaomi().replace(&record).unwrap();
-        control.context.changed.notify(usize::MAX);
-        until(|| {
-            control
-                .context
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .unwrap()
-                .hub
-                .as_ref()
-                .unwrap()
-                .certificate_pem
-                .as_deref()
-                == Some("malformed certificate")
-        })
-        .await;
-        assert_eq!(
-            control.context.status.borrow().auth.certificate_update,
-            crate::xiaomi::auth::CertificateUpdate::Failed(
-                crate::xiaomi::auth::FailureReason::InvalidCertificate
-            )
-        );
-
-        record.hub.as_mut().unwrap().certificate_pem = original;
-        control.store.xiaomi().replace(&record).unwrap();
-        control.context.changed.notify(usize::MAX);
-        until(|| control.context.status.borrow().auth.certificate.is_some()).await;
-        assert_eq!(
-            control.context.status.borrow().auth.certificate_update,
-            crate::xiaomi::auth::CertificateUpdate::NotNeeded
-        );
-        assert!(control.cloud.lock().unwrap().homes > 0);
-        assert_eq!(control.cloud.lock().unwrap().certs, 0);
-    }));
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
 }
 
 #[test]
@@ -185,8 +99,8 @@ fn saved_hub_control_works_without_ha_authorization() {
     let rig = Rig::new(true, &["one"]);
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
     record.ha.as_mut().unwrap().authorization = None;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record).unwrap();
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
     block_on(rig.run(|control| async move {
         control.announce();
         let peer = Rc::new(Peer::default());
@@ -293,6 +207,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
         .store(false, std::sync::atomic::Ordering::Relaxed);
     token_deadlines(&rig, 5, 20);
     let (cert_release, certificate) = flume::bounded(1);
+    let (new_cert_release, new_certificate) = flume::bounded(1);
     rig.cloud.lock().unwrap().cert_gate = Some(certificate);
     let (_home_release, home) = flume::bounded(1);
     block_on(rig.run(|c| async move {
@@ -301,6 +216,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             c.cloud.lock().unwrap().home_gate = Some(home);
             c.context.request_sync();
             until(|| c.cloud.lock().unwrap().homes >= 2).await;
+            c.cloud.lock().unwrap().cert_gate = Some(new_certificate);
             c.clock.advance(Duration::from_secs(5));
             until(|| peer.state.borrow().connects.len() == 2 && cloud_active(&c, "one")).await;
             assert_eq!(peer.state.borrow().connects[1], "fresh-access");
@@ -333,6 +249,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             assert_eq!(c.cloud.lock().unwrap().tokens, 1);
             c.cloud.lock().unwrap().cert_gate = None;
             cert_release.send(()).unwrap();
+            new_cert_release.send(()).unwrap();
             until(|| {
                 matches!(
                     c.context.status.borrow().auth.certificate_update,
@@ -450,8 +367,8 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 .unwrap()
                 .tokens
                 .expires_at = control.clock.wall() + 10;
-            control.store.xiaomi().replace(&record).unwrap();
-            control.context.adopt_credentials(record).unwrap();
+            control.store.xiaomi().fixture_replace(&record).unwrap();
+            control.context.adopt_credentials(record);
             control.cloud.lock().unwrap().token_status = 503;
             control.clock.advance(Duration::from_secs(5));
             until(|| control.cloud.lock().unwrap().tokens == 1).await;
@@ -589,24 +506,10 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let token = c
-            .store
-            .xiaomi()
-            .load()
-            .unwrap()
-            .unwrap()
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token
-            .clone();
+        let key = c.context.ha_key().unwrap();
         c.context
             .token_rejected(
-                &token,
+                &key,
                 crate::xiaomi::auth::FailureReason::CloudNotification(
                     crate::xiaomi::cloud::NotificationError::Unauthorized,
                 ),
@@ -659,6 +562,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
 #[test]
 fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
     let rig = Rig::new(true, &["one", "two"]);
+    rig.enable_recovery();
     rig.cloud
         .lock()
         .unwrap()
@@ -685,8 +589,14 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         until(|| c.cloud.lock().unwrap().infos == before + 1).await;
         c.cloud.lock().unwrap().info_gate = Some(new_gate);
         let record = c.store.xiaomi().load().unwrap().unwrap();
-        c.store.xiaomi().replace(&record).unwrap();
-        c.context.adopt_credentials(record).unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.as_ref().unwrap().credentials,
+                record.mijia.as_ref().unwrap(),
+            )
+            .unwrap();
+        c.context.adopt_credentials(record);
         until(|| c.cloud.lock().unwrap().infos == before + 2).await;
         c.cloud.lock().unwrap().property_status = 503;
         assert!(
@@ -865,8 +775,15 @@ fn stale_candidate_401_cannot_pause_identical_replacement_session() {
                 cloud.detail_gate = None;
             }
             let record = control.store.xiaomi().load().unwrap().unwrap();
-            control.store.xiaomi().replace(&record).unwrap();
-            control.context.adopt_credentials(record).unwrap();
+            control
+                .store
+                .xiaomi()
+                .update_recovery(
+                    &record.recovery.as_ref().unwrap().credentials,
+                    record.mijia.as_ref().unwrap(),
+                )
+                .unwrap();
+            control.context.adopt_credentials(record);
             release.send(()).unwrap();
             initialized(control, &peer, &["one", "multi"]).await;
             assert_eq!(control.cloud.lock().unwrap().restores, 0);
@@ -996,4 +913,556 @@ fn coalesced_candidate_401s_preserve_the_temporary_recovery_backoff() {
         })
         .await;
     }));
+}
+
+#[test]
+fn background_prepares_missing_hub_identity_before_certificate_request() {
+    let rig = Rig::new(true, &["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    record.hub = None;
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
+    rig.cloud.lock().unwrap().cert_status = 503;
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    block_on(rig.run(|c| async move {
+        async_io::Timer::after(Duration::from_millis(150)).await;
+        assert_eq!(c.cloud.lock().unwrap().certs, 1);
+        let hub = c.store.xiaomi().load().unwrap().unwrap().hub.unwrap();
+        assert!(hub.certificate_pem.is_none());
+        assert!(!hub.virtual_did.is_empty());
+        assert!(!hub.private_key_pem.is_empty());
+    }));
+}
+
+#[test]
+fn initial_certificate_failure_reuses_the_saved_identity_on_retry() {
+    let rig = Rig::new(true, &["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    record.hub = None;
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.cert_status = 503;
+        cloud.cert_sign_csr = true;
+    }
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.cloud.lock().unwrap().certs == 1
+                && matches!(
+                    c.context.status.borrow().auth.certificate_update,
+                    crate::xiaomi::auth::CertificateUpdate::Failed(
+                        crate::xiaomi::auth::FailureReason::Cloud(_)
+                    )
+                )
+        })
+        .await;
+        let identity = c.store.xiaomi().load().unwrap().unwrap().hub.unwrap();
+        assert!(identity.certificate_pem.is_none());
+        c.cloud.lock().unwrap().cert_status = 200;
+        c.clock.advance(Duration::from_secs(1));
+        until(|| {
+            c.store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .hub
+                .unwrap()
+                .certificate_pem
+                .is_some()
+        })
+        .await;
+        let saved = c.store.xiaomi().load().unwrap().unwrap().hub.unwrap();
+        assert_eq!(saved.virtual_did, identity.virtual_did);
+        assert_eq!(saved.private_key_pem, identity.private_key_pem);
+        assert_eq!(c.cloud.lock().unwrap().certs, 2);
+    }));
+}
+
+#[test]
+fn ha_identity_retry_waits_through_unrelated_mijia_changes() {
+    let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    rig.cloud.lock().unwrap().ha_status = 503;
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.cloud.lock().unwrap().ha_homes == 1
+                && matches!(
+                    c.context.status.borrow().auth.ha,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                )
+        })
+        .await;
+        c.cloud.lock().unwrap().ha_status = 200;
+        let record = c.store.xiaomi().load().unwrap().unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.unwrap().credentials,
+                &record.mijia.unwrap(),
+            )
+            .unwrap();
+        c.context.reload_credentials();
+        c.context.request_sync();
+        c.clock.advance(Duration::from_millis(999));
+        async_io::Timer::after(Duration::from_millis(30)).await;
+        assert_eq!(c.cloud.lock().unwrap().ha_homes, 1);
+        assert!(!c.context.token_usable());
+        c.clock.advance(Duration::from_millis(1));
+        until(|| c.context.token_usable()).await;
+        assert_eq!(c.cloud.lock().unwrap().ha_homes, 2);
+        assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+    }));
+}
+
+#[test]
+fn ha_identity_mismatch_or_unknown_blocks_ha_without_blocking_mijia() {
+    for missing in [false, true] {
+        let rig = Rig::new(true, &["one"]);
+        rig.cloud.lock().unwrap().online.insert("one".into());
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.ha_missing_uid = missing;
+            cloud.ha_uid = Some("another-account".into());
+        }
+        block_on(rig.run(|c| async move {
+            until(|| {
+                matches!(
+                    c.context.status.borrow().auth.ha,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(
+                        crate::xiaomi::auth::FailureReason::AccountIdentityMismatch
+                            | crate::xiaomi::auth::FailureReason::CannotDetermineAccountIdentity
+                    )
+                ) && c.context.cloud_candidate("one", true).is_ok()
+            })
+            .await;
+            assert!(!c.context.token_usable());
+            assert_eq!(c.cloud.lock().unwrap().certs, 0);
+            function(&c.context.registry, "one", "outlet:2")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+        }));
+    }
+}
+
+#[test]
+fn old_ha_probe_cannot_confirm_or_reject_identical_new_generation() {
+    for old_status in [200, 401] {
+        let rig = Rig::new(true, &["one"]);
+        let (release, gate) = flume::bounded(1);
+        rig.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.ha_status = old_status;
+            cloud.ha_gate = Some(gate);
+        }
+        block_on(rig.run(|c| async move {
+            until(|| c.cloud.lock().unwrap().ha_homes == 1).await;
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.reload_credentials();
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                cloud.ha_gate = None;
+                cloud.ha_status = 200;
+                cloud.ha_uid = Some("another-account".into());
+            }
+            release.send(()).unwrap();
+            until(|| {
+                c.cloud.lock().unwrap().ha_homes == 2
+                    && matches!(
+                        c.context.status.borrow().auth.ha,
+                        crate::xiaomi::auth::AuthenticationState::Unavailable(
+                            crate::xiaomi::auth::FailureReason::AccountIdentityMismatch
+                        )
+                    )
+            })
+            .await;
+            assert!(!c.context.token_usable());
+            assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+            assert!(
+                !c.store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .ha
+                    .unwrap()
+                    .stopped
+            );
+        }));
+    }
+}
+
+#[test]
+fn temporary_refresh_failure_and_late_unauthorized_do_not_stop_ha() {
+    let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    rig.cloud.lock().unwrap().token_lifetime = 10;
+    block_on(rig.run(|c| async move {
+        until(|| c.context.token_usable()).await;
+        let old = c.context.ha_key().unwrap();
+        c.context
+            .token_rejected(
+                &old,
+                crate::xiaomi::auth::FailureReason::CloudNotification(
+                    crate::xiaomi::cloud::NotificationError::Unauthorized,
+                ),
+            )
+            .unwrap();
+        until(|| c.cloud.lock().unwrap().tokens == 1 && c.context.token_usable()).await;
+        let current = c.context.ha_key().unwrap();
+        c.cloud.lock().unwrap().token_status = 503;
+        c.clock.advance(Duration::from_secs(7));
+        until(|| {
+            c.cloud.lock().unwrap().tokens == 2
+                && matches!(
+                    c.context.status.borrow().auth.ha,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                )
+        })
+        .await;
+        c.context
+            .token_rejected(
+                &current,
+                crate::xiaomi::auth::FailureReason::CloudNotification(
+                    crate::xiaomi::cloud::NotificationError::Unauthorized,
+                ),
+            )
+            .unwrap();
+        assert!(
+            !c.store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .ha
+                .unwrap()
+                .stopped
+        );
+        let record = c.store.xiaomi().load().unwrap().unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.unwrap().credentials,
+                &record.mijia.unwrap(),
+            )
+            .unwrap();
+        c.context.reload_credentials();
+        c.cloud.lock().unwrap().token_status = 200;
+        c.clock.advance(Duration::from_millis(999));
+        async_io::Timer::after(Duration::from_millis(20)).await;
+        assert_eq!(c.cloud.lock().unwrap().tokens, 2);
+        c.clock.advance(Duration::from_millis(1));
+        until(|| c.cloud.lock().unwrap().tokens == 3 && c.context.token_usable()).await;
+        assert!(
+            !c.store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .ha
+                .unwrap()
+                .stopped
+        );
+    }));
+}
+
+#[test]
+fn late_certificate_rejection_cannot_stop_identical_replacement_generation() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.cert_status = 401;
+        cloud.cert_gate = Some(gate);
+    }
+    block_on(rig.run(|c| async move {
+        until(|| c.cloud.lock().unwrap().certs == 1).await;
+        let record = c.store.xiaomi().load().unwrap().unwrap();
+        c.store
+            .xiaomi()
+            .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+            .unwrap();
+        c.context.reload_credentials();
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.cert_status = 200;
+            cloud.cert_gate = None;
+        }
+        release.send(()).unwrap();
+        until(|| {
+            c.cloud.lock().unwrap().certs == 2
+                && matches!(
+                    c.context.status.borrow().auth.certificate_update,
+                    crate::xiaomi::auth::CertificateUpdate::Updated
+                )
+        })
+        .await;
+        assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+        assert!(c.context.token_usable());
+        assert!(
+            !c.store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .ha
+                .unwrap()
+                .stopped
+        );
+    }));
+}
+
+#[test]
+fn stopped_ha_stays_stopped_after_adapter_restart_while_mijia_and_hub_work() {
+    let mut rig = Rig::new(true, &["one"]);
+    rig.cloud.lock().unwrap().online.insert("one".into());
+    rig.store.xiaomi().stop_ha_refresh().unwrap();
+    let (mut restarted, ready) = XiaomiAdapter::build(
+        rig.store.clone(),
+        rig.source.cloud.clone(),
+        rig.discovery.clone(),
+        rig.clock.clone(),
+    )
+    .unwrap();
+    restarted.test_ca = rig.source.test_ca.clone();
+    restarted.request_timeout = rig.source.request_timeout;
+    rig.source = restarted;
+    rig.ready = ready;
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            assert!(matches!(
+                control.context.status.borrow().auth.ha,
+                crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
+            ));
+            assert!(!control.context.token_usable());
+            assert!(control.context.cloud_candidate("one", true).is_ok());
+            function(&control.context.registry, "one", "outlet:2")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
+            control.clock.advance(Duration::from_secs(600));
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(control.cloud.lock().unwrap().ha_homes, 0);
+            assert_eq!(control.cloud.lock().unwrap().tokens, 0);
+            assert_eq!(control.cloud.lock().unwrap().certs, 0);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn background_reports_and_repairs_a_damaged_certificate_without_replacing_identity() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let (release, gate) = flume::bounded(1);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    let identity = record.hub.as_ref().unwrap().clone();
+    record.hub.as_mut().unwrap().certificate_pem = Some("damaged certificate".into());
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.cert_sign_csr = true;
+        cloud.cert_gate = Some(gate);
+    }
+    block_on(rig.run(|c| async move {
+        until(|| c.cloud.lock().unwrap().certs == 1).await;
+        assert_eq!(
+            c.context.status.borrow().auth.certificate_update,
+            crate::xiaomi::auth::CertificateUpdate::Failed(
+                crate::xiaomi::auth::FailureReason::InvalidCertificate
+            )
+        );
+        assert!(c.context.status.borrow().auth.certificate.is_none());
+        release.send(()).unwrap();
+        until(|| {
+            matches!(
+                c.context.status.borrow().auth.certificate_update,
+                crate::xiaomi::auth::CertificateUpdate::Updated
+            )
+        })
+        .await;
+        let repaired = c.store.xiaomi().load().unwrap().unwrap().hub.unwrap();
+        assert_eq!(repaired.virtual_did, identity.virtual_did);
+        assert_eq!(repaired.private_key_pem, identity.private_key_pem);
+        assert!(c.context.status.borrow().auth.certificate.is_some());
+    }));
+}
+
+#[test]
+fn successful_identity_retry_does_not_hide_an_independent_failed_token_refresh() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    token_deadlines(&rig, 0, 100);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.ha_status = 503;
+        cloud.ha_gate = Some(gate);
+        cloud.token_status = 503;
+    }
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.cloud.lock().unwrap().ha_homes == 1
+                && c.cloud.lock().unwrap().tokens == 1
+                && matches!(
+                    c.context.status.borrow().auth.ha,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                )
+        })
+        .await;
+        c.clock.advance(Duration::from_secs(1));
+        until(|| c.cloud.lock().unwrap().tokens == 2).await;
+        c.clock.advance(Duration::from_millis(500));
+        release.send(()).unwrap();
+        let identity_due = c.clock.now() + Duration::from_secs(1);
+        until(|| c.clock.deadlines.lock().unwrap().contains(&identity_due)).await;
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.ha_status = 200;
+            cloud.ha_gate = None;
+        }
+        c.clock.advance(Duration::from_secs(1));
+        until(|| c.cloud.lock().unwrap().ha_homes == 2 && c.context.token_usable()).await;
+        assert!(matches!(
+            c.context.status.borrow().auth.ha,
+            crate::xiaomi::auth::AuthenticationState::Unavailable(
+                crate::xiaomi::auth::FailureReason::Cloud(_)
+            )
+        ));
+        assert_eq!(c.cloud.lock().unwrap().tokens, 2);
+    }));
+}
+
+#[test]
+fn successful_identity_retry_does_not_hide_an_inflight_token_refresh() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    token_deadlines(&rig, 0, 100);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.ha_status = 503;
+        cloud.token_status = 503;
+        cloud.token_gate = Some(gate);
+    }
+    block_on(rig.run(|c| async move {
+        until(|| {
+            c.cloud.lock().unwrap().ha_homes == 1
+                && c.cloud.lock().unwrap().tokens == 1
+                && matches!(
+                    c.context.status.borrow().auth.ha,
+                    crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+                )
+        })
+        .await;
+        c.cloud.lock().unwrap().ha_status = 200;
+        c.clock.advance(Duration::from_secs(1));
+        until(|| c.cloud.lock().unwrap().ha_homes == 2 && c.context.token_usable()).await;
+        assert!(matches!(
+            c.context.status.borrow().auth.ha,
+            crate::xiaomi::auth::AuthenticationState::Refreshing
+        ));
+        release.send(()).unwrap();
+        until(|| {
+            matches!(
+                c.context.status.borrow().auth.ha,
+                crate::xiaomi::auth::AuthenticationState::Unavailable(_)
+            )
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn new_ha_generation_does_not_wait_for_old_probe_or_certificate_response() {
+    for certificate in [false, true] {
+        let rig = Rig::new(true, &["one"]);
+        rig.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let (release, gate) = flume::bounded(1);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            if certificate {
+                cloud.cert_status = 503;
+                cloud.cert_gate = Some(gate);
+            } else {
+                cloud.ha_status = 503;
+                cloud.ha_gate = Some(gate);
+            }
+        }
+        block_on(rig.run(|c| async move {
+            until(|| {
+                let cloud = c.cloud.lock().unwrap();
+                if certificate {
+                    cloud.certs == 1
+                } else {
+                    cloud.ha_homes == 1
+                }
+            })
+            .await;
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.reload_credentials();
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                if certificate {
+                    cloud.cert_gate = None;
+                    cloud.cert_status = 200;
+                } else {
+                    cloud.ha_gate = None;
+                    cloud.ha_status = 200;
+                }
+            }
+            async_io::Timer::after(Duration::from_millis(150)).await;
+            let requests = {
+                let cloud = c.cloud.lock().unwrap();
+                if certificate {
+                    cloud.certs
+                } else {
+                    cloud.ha_homes
+                }
+            };
+            assert_eq!(requests, 2);
+            release.send(()).unwrap();
+        }));
+    }
 }

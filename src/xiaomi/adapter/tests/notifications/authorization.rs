@@ -5,8 +5,8 @@ fn restored_home_receives_ha_notifications_without_a_mijia_session() {
     let (rig, listener, peer) = with_cloud_peer(&["one"]);
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
     record.mijia = None;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record).unwrap();
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
@@ -141,6 +141,7 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
     for rejection in 0..3 {
         let connect_rejection = rejection == 0;
         let (rig, listener, cloud) = with_cloud_peer(&["one"]);
+        let old = rig.source.context.ha_key().unwrap();
         let (release, gate) = flume::bounded(1);
         rig.cloud.lock().unwrap().home_gate = Some(gate);
         if connect_rejection {
@@ -163,7 +164,6 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
             future::or(cloud.run(&listener), async {
                 c.announce();
                 let control = &c;
-                let cloud = &cloud;
                 c.peer(Rc::new(Peer::default()), |local| async move {
                     initialized(control, &local, &["one"]).await;
                     control.cloud.lock().unwrap().home_gate = None;
@@ -210,7 +210,6 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                         assert_eq!(local.count("rpcReq", "one", 2), 1);
                     }
                     until(|| control.context.cloud_candidate("one", true).is_ok()).await;
-                    let old = cloud.state.borrow().connects[0].clone();
                     control
                         .context
                         .token_rejected(
@@ -255,6 +254,204 @@ fn driver_authorization_rejection_rebuilds_with_fresh_token_then_pauses_on_secon
             .await;
             assert_eq!(c.cloud.lock().unwrap().tokens, 1);
             assert!(c.cloud.lock().unwrap().property_writes.is_empty());
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn identical_new_ha_generation_retires_old_connection_and_its_events() {
+    let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| cloud_active(&c, "one")).await;
+            let old_key = c.context.ha_key().unwrap();
+            let old_handle = c
+                .context
+                .notifications
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .handle
+                .clone();
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.reload_credentials();
+            c.context
+                .token_rejected(
+                    &old_key,
+                    crate::xiaomi::auth::FailureReason::CloudNotification(
+                        crate::xiaomi::cloud::NotificationError::Unauthorized,
+                    ),
+                )
+                .unwrap();
+            assert!(
+                !c.store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .ha
+                    .unwrap()
+                    .stopped
+            );
+            assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+            until(|| peer.state.borrow().connects.len() == 2 && cloud_active(&c, "one")).await;
+            assert_eq!(
+                peer.state.borrow().connects[0],
+                peer.state.borrow().connects[1]
+            );
+            let one = function(&c.context.registry, "one", "outlet:2");
+            let before = one.snapshot();
+            c.context.property_value_event(
+                &super::super::super::notifications::NotificationSource::Cloud(old_handle),
+                "one",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                &json!(true),
+                None,
+                false,
+            );
+            assert_eq!(one.snapshot(), before);
+            peer.property("one", 2, true);
+            until(|| one.snapshot().power() == Some(Power::On)).await;
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn refreshed_credentials_reject_old_notification() {
+    let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| cloud_active(&c, "one")).await;
+            let one = function(&c.context.registry, "one", "outlet:2");
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
+            let old_handle = c
+                .context
+                .notifications
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .handle
+                .clone();
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.reload_credentials();
+            c.context.property_value_event(
+                &super::super::super::notifications::NotificationSource::Cloud(old_handle),
+                "one",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                &json!(true),
+                None,
+                false,
+            );
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn delayed_unauthorized_connack_cannot_stop_identical_new_generation() {
+    let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut state = peer.state.borrow_mut();
+        state.connacks.push_back(ConnectReturnCode::NotAuthorized);
+        state.held_connacks.push_back(gate);
+    }
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| peer.state.borrow().connects.len() == 1).await;
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.reload_credentials();
+            release.send(()).unwrap();
+            until(|| peer.state.borrow().connects.len() == 2 && cloud_active(&c, "one")).await;
+            assert_eq!(
+                peer.state.borrow().connects[0],
+                peer.state.borrow().connects[1]
+            );
+            assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+            assert!(
+                !c.store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .ha
+                    .unwrap()
+                    .stopped
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn delayed_unauthorized_suback_cannot_stop_identical_new_generation() {
+    let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    let path = "device/one/up/properties_changed/2/1";
+    peer.state.borrow_mut().hold.insert(path.into());
+    block_on(rig.run(|c| async move {
+        future::or(peer.run(&listener), async {
+            until(|| {
+                peer.state
+                    .borrow()
+                    .held
+                    .iter()
+                    .any(|s| s.filters[0].path == path)
+            })
+            .await;
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.reload_credentials();
+            let subscribe = {
+                let mut state = peer.state.borrow_mut();
+                state.hold.remove(path);
+                let index = state
+                    .held
+                    .iter()
+                    .position(|s| s.filters[0].path == path)
+                    .unwrap();
+                state.held.remove(index)
+            };
+            peer.send(Packet::SubAck(SubAck::new(
+                subscribe.pkid,
+                vec![SubscribeReasonCode::NotAuthorized],
+            )));
+            until(|| {
+                peer.state.borrow().sent.iter().any(
+                    |packet| matches!(packet, Packet::SubAck(ack) if ack.pkid == subscribe.pkid),
+                ) || c.context.notifications.borrow().is_none()
+            })
+            .await;
+            c.context.reload_credentials();
+            until(|| peer.state.borrow().connects.len() == 2 && cloud_active(&c, "one")).await;
+            assert_eq!(c.cloud.lock().unwrap().tokens, 0);
+            assert!(
+                !c.store
+                    .xiaomi()
+                    .load()
+                    .unwrap()
+                    .unwrap()
+                    .ha
+                    .unwrap()
+                    .stopped
+            );
         })
         .await;
     }));

@@ -181,7 +181,7 @@ fn every_login_scans_and_exchanges_a_new_grant_even_when_credentials_exist() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let previous = previous_record();
-    store.xiaomi().replace(&previous).unwrap();
+    store.xiaomi().fixture_replace(&previous).unwrap();
     let peers = make_peers(&store, Failure::None);
     for _ in 0..2 {
         let attempt = block_on(peers.auth.begin_login()).unwrap();
@@ -250,7 +250,7 @@ fn failed_candidate_at_each_stage_preserves_every_old_field_and_stop() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let previous = previous_record();
-        store.xiaomi().replace(&previous).unwrap();
+        store.xiaomi().fixture_replace(&previous).unwrap();
         let peers = make_peers(&store, failure);
         let attempt = block_on(peers.auth.begin_login()).unwrap();
         let report = block_on(peers.auth.complete_login(attempt)).unwrap();
@@ -293,7 +293,7 @@ fn cancelling_a_pending_candidate_preserves_the_old_record() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let previous = previous_record();
-    store.xiaomi().replace(&previous).unwrap();
+    store.xiaomi().fixture_replace(&previous).unwrap();
     let peers = make_peers(&store, Failure::TokenDelay);
     let attempt = block_on(peers.auth.begin_login()).unwrap();
     block_on(future::or(
@@ -335,7 +335,7 @@ fn cancelling_before_commit_reports_local_state_and_preserves_old_credentials() 
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let previous = previous_record();
-    store.xiaomi().replace(&previous).unwrap();
+    store.xiaomi().fixture_replace(&previous).unwrap();
     let peers = make_peers(&store, Failure::TokenDelay);
     let mut output = Vec::new();
     block_on(async {
@@ -499,7 +499,7 @@ fn commit_failure_rolls_back_all_candidate_credentials_and_stop_flags() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let previous = previous_record();
-    store.xiaomi().replace(&previous).unwrap();
+    store.xiaomi().fixture_replace(&previous).unwrap();
     Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER fail_login BEFORE INSERT ON xiaomi_mijia_session BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
     let peers = make_peers(&store, Failure::None);
     let attempt = block_on(peers.auth.begin_login()).unwrap();
@@ -585,7 +585,7 @@ fn terminal_reports_qr_render_failure_with_existing_status() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let previous = previous_record();
-    store.xiaomi().replace(&previous).unwrap();
+    store.xiaomi().fixture_replace(&previous).unwrap();
     let peers = make_peers(&store, Failure::LongQr);
     let mut output = Vec::new();
     let result = block_on(crate::terminal::auth::login(
@@ -610,7 +610,7 @@ fn terminal_identifies_failed_credential_commit_and_shows_old_status() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let previous = previous_record();
-    store.xiaomi().replace(&previous).unwrap();
+    store.xiaomi().fixture_replace(&previous).unwrap();
     Connection::open(store.path()).unwrap().execute_batch(
         "CREATE TRIGGER fail_login BEFORE INSERT ON xiaomi_mijia_session BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
     ).unwrap();

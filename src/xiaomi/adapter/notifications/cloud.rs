@@ -48,11 +48,16 @@ impl Drop for SubscriptionPermit<'_> {
 pub(super) struct ConnectionKey {
     pub(super) uid: String,
     pub(super) token: String,
+    pub(super) generation: u64,
     pub(super) client: String,
     pub(super) home: String,
 }
 pub(super) fn connection_key(context: &Context) -> Option<ConnectionKey> {
     if !context.cloud_authenticated() {
+        return None;
+    }
+    let key = context.ha_key()?;
+    if !context.current_ha(&key) {
         return None;
     }
     let live = context.live.borrow();
@@ -63,6 +68,7 @@ pub(super) fn connection_key(context: &Context) -> Option<ConnectionKey> {
     Some(ConnectionKey {
         uid: credentials.uid.clone(),
         token: authorization.tokens.access_token.clone(),
+        generation: key.generation,
         client: ha.client_uuid.clone(),
         home: scope.home_id.clone(),
     })
@@ -112,7 +118,7 @@ pub(super) fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>)
             context.clone(),
             work,
             session.handle.clone(),
-            session.key.token.clone(),
+            session.key.clone(),
             session.subscriptions.clone(),
             state,
         ));
@@ -123,7 +129,7 @@ async fn prepare_online(
     context: Rc<Context>,
     work: Rc<DeviceWork>,
     handle: NotificationHandle,
-    token: String,
+    key: ConnectionKey,
     subscriptions: Rc<SubscriptionBudget>,
     state: Rc<OnlinePreparation>,
 ) -> Result<(), AdapterError> {
@@ -152,7 +158,10 @@ async fn prepare_online(
             Ok(()) => return Ok(()),
             Err(NotificationError::Unauthorized) => {
                 context.token_rejected(
-                    &token,
+                    &super::super::routing::HaKey {
+                        uid: key.uid.clone(),
+                        generation: key.generation,
+                    },
                     FailureReason::CloudNotification(NotificationError::Unauthorized),
                 )?;
                 break;
@@ -175,7 +184,7 @@ pub(super) async fn prepare_properties(
     context: Rc<Context>,
     work: Rc<DeviceWork>,
     handle: NotificationHandle,
-    token: String,
+    key: ConnectionKey,
     subscriptions: Rc<SubscriptionBudget>,
     preparation: u64,
 ) -> Result<(), AdapterError> {
@@ -232,7 +241,10 @@ pub(super) async fn prepare_properties(
                 Ok(()) => {}
                 Err(NotificationError::Unauthorized) => {
                     context.token_rejected(
-                        &token,
+                        &super::super::routing::HaKey {
+                            uid: key.uid.clone(),
+                            generation: key.generation,
+                        },
                         FailureReason::CloudNotification(NotificationError::Unauthorized),
                     )?;
                     break 'attempts;
@@ -440,7 +452,13 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
         if let Some(error) = result {
             if connection_key(&context).as_ref() == Some(&key) {
                 if error == NotificationError::Unauthorized {
-                    context.token_rejected(&key.token, FailureReason::CloudNotification(error))?;
+                    context.token_rejected(
+                        &super::super::routing::HaKey {
+                            uid: key.uid.clone(),
+                            generation: key.generation,
+                        },
+                        FailureReason::CloudNotification(error),
+                    )?;
                 } else {
                     log::warn!("Cloud notifications unavailable: {error}");
                 }

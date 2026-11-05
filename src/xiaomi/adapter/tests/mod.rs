@@ -42,6 +42,7 @@ use super::{
     observations::{Observation, Origin},
     *,
 };
+use crate::storage::tests::XiaomiTestFixture;
 use support::*;
 
 mod urn_updates;

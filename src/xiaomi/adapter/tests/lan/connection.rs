@@ -122,7 +122,7 @@ fn cached_scope_restarts_with_ha_state(missing_ha: bool) {
     if missing_ha {
         let mut record = rig.store.xiaomi().load().unwrap().unwrap();
         record.ha.as_mut().unwrap().authorization = None;
-        rig.store.xiaomi().replace(&record).unwrap();
+        rig.store.xiaomi().fixture_replace(&record).unwrap();
     } else {
         let mut tokens = rig
             .store
@@ -137,7 +137,7 @@ fn cached_scope_restarts_with_ha_state(missing_ha: bool) {
             .tokens;
         tokens.refresh_at = 1;
         tokens.expires_at = 1;
-        rig.store.xiaomi().update_tokens(&tokens).unwrap();
+        rig.store.xiaomi().fixture_update_tokens(&tokens).unwrap();
     }
     {
         let mut cloud = rig.cloud.lock().unwrap();

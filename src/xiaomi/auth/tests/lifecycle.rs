@@ -19,7 +19,7 @@ fn local_status_distinguishes_missing_invalid_and_repaired_certificates() {
         let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
         let original = record.hub.as_ref().unwrap().certificate_pem.clone();
         record.hub.as_mut().unwrap().certificate_pem = certificate;
-        store.xiaomi().replace(&record).unwrap();
+        store.xiaomi().fixture_replace(&record).unwrap();
         let (auth, requests) = service(&store, vec![]);
         let report = auth.local_status().unwrap();
         assert!(matches!(report.ha, AuthenticationState::Checking));
@@ -29,7 +29,7 @@ fn local_status_distinguishes_missing_invalid_and_repaired_certificates() {
             CertificateUpdate::Failed(expected)
         );
         record.hub.as_mut().unwrap().certificate_pem = original;
-        store.xiaomi().replace(&record).unwrap();
+        store.xiaomi().fixture_replace(&record).unwrap();
         let repaired = auth.local_status().unwrap();
         assert!(repaired.certificate.is_some());
         assert_eq!(repaired.certificate_update, CertificateUpdate::NotNeeded);
@@ -43,7 +43,7 @@ fn invalid_certificate_does_not_hide_account_identity() {
     let store = Store::open(dir.path()).unwrap();
     let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
     record.hub.as_mut().unwrap().certificate_pem = Some("invalid certificate".into());
-    store.xiaomi().replace(&record).unwrap();
+    store.xiaomi().fixture_replace(&record).unwrap();
     let (auth, _) = service(&store, vec![]);
 
     let report = auth.local_status().unwrap();
@@ -64,7 +64,7 @@ fn corrupt_credentials_block_login_and_check_but_logout_does_not_load() {
         let store = Store::open(dir.path()).unwrap();
         let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
         record.mijia = None;
-        store.xiaomi().replace(&record).unwrap();
+        store.xiaomi().fixture_replace(&record).unwrap();
         Connection::open(store.path())
             .unwrap()
             .execute(corruption, [])
@@ -91,7 +91,7 @@ fn certificate_binding_failures_do_not_remove_the_account() {
         let store = Store::open(dir.path()).unwrap();
         let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
         record.mijia = None;
-        store.xiaomi().replace(&record).unwrap();
+        store.xiaomi().fixture_replace(&record).unwrap();
         Connection::open(store.path())
             .unwrap()
             .execute(corruption, [])
@@ -111,7 +111,7 @@ fn dropping_pending_check_keeps_prior_refresh_and_certificate() {
     let store = Store::open(dir.path()).unwrap();
     let old = valid_record("uid", "old", NOW, NOW + 1_000_000);
     let old_certificate = old.hub.as_ref().unwrap().certificate_pem.clone();
-    store.xiaomi().replace(&old).unwrap();
+    store.xiaomi().fixture_replace(&old).unwrap();
     let check_pending = Arc::new(AtomicBool::new(false));
     let check_signal = check_pending.clone();
     let (base, _) = dynamic_mock_server(2, move |request| {

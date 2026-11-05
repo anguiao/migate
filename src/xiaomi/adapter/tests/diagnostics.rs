@@ -355,8 +355,8 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         .unwrap()
         .tokens
         .expires_at = rig.clock.wall() + 10;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.live.borrow_mut().credentials = Some(record);
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
     let (release, gate) = flume::bounded(1);
     {
         let mut cloud = rig.cloud.lock().unwrap();

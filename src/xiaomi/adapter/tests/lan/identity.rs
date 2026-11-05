@@ -214,7 +214,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
         .clone();
     tokens.refresh_at = 1;
     tokens.expires_at = 1;
-    rig.store.xiaomi().update_tokens(&tokens).unwrap();
+    rig.store.xiaomi().fixture_update_tokens(&tokens).unwrap();
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.token_status = 503;

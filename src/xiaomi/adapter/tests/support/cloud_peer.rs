@@ -32,12 +32,14 @@ impl CloudBroker {
             self.frames.push(&bytes[..len]).unwrap();
         }
     }
-    pub(in super::super) async fn send(&mut self, packet: Packet) {
+    async fn try_send(&mut self, packet: &Packet) -> std::io::Result<()> {
         self.stream
-            .write_all(&crate::xiaomi::mqtt::encode_packet(&packet).unwrap())
-            .await
-            .unwrap();
-        self.stream.flush().await.unwrap();
+            .write_all(&crate::xiaomi::mqtt::encode_packet(packet).unwrap())
+            .await?;
+        self.stream.flush().await
+    }
+    pub(in super::super) async fn send(&mut self, packet: Packet) {
+        self.try_send(&packet).await.unwrap();
     }
     pub(in super::super) async fn ack(&mut self, subscribe: Subscribe) {
         self.send(Packet::SubAck(SubAck::new(
@@ -59,7 +61,9 @@ impl CloudBroker {
 pub(in super::super) struct CloudPeerState {
     pub(in super::super) connects: Vec<String>,
     pub(in super::super) connacks: std::collections::VecDeque<ConnectReturnCode>,
+    pub(in super::super) held_connacks: std::collections::VecDeque<flume::Receiver<()>>,
     pub(in super::super) seen: Vec<Packet>,
+    pub(in super::super) sent: Vec<Packet>,
     pub(in super::super) held: Vec<Subscribe>,
     pub(in super::super) peak_held: usize,
     pub(in super::super) hold: BTreeSet<String>,
@@ -151,9 +155,23 @@ impl CloudPeer {
                 .connacks
                 .pop_front()
                 .unwrap_or(ConnectReturnCode::Success);
-            broker
-                .send(Packet::ConnAck(ConnAck::new(code, false)))
-                .await;
+            let gate = self.state.borrow_mut().held_connacks.pop_front();
+            if let Some(gate) = gate {
+                let _ = gate.recv_async().await;
+                let packet = Packet::ConnAck(ConnAck::new(code, false));
+                let _ = broker
+                    .stream
+                    .write_all(&crate::xiaomi::mqtt::encode_packet(&packet).unwrap())
+                    .await;
+                continue;
+            }
+            if broker
+                .try_send(&Packet::ConnAck(ConnAck::new(code, false)))
+                .await
+                .is_err()
+            {
+                continue;
+            }
             if code != ConnectReturnCode::Success {
                 continue;
             }
@@ -163,7 +181,11 @@ impl CloudPeer {
                 let mut disconnect = false;
                 for packet in packets {
                     disconnect |= matches!(packet, Packet::Disconnect(_));
-                    broker.send(packet).await;
+                    if broker.try_send(&packet).await.is_err() {
+                        disconnect = true;
+                        break;
+                    }
+                    self.state.borrow_mut().sent.push(packet);
                 }
                 if disconnect {
                     break;
@@ -195,17 +217,27 @@ impl CloudPeer {
                                 .get(&path)
                                 .copied()
                                 .unwrap_or(SubscribeReasonCode::QoS2);
-                            broker
-                                .send(Packet::SubAck(SubAck::new(subscribe.pkid, vec![reason])))
-                                .await;
+                            if broker
+                                .try_send(&Packet::SubAck(SubAck::new(
+                                    subscribe.pkid,
+                                    vec![reason],
+                                )))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
                     Packet::Unsubscribe(unsubscribe) => {
                         let mut ack = UnsubAck::new(unsubscribe.pkid);
                         ack.reasons = vec![UnsubAckReason::Success; unsubscribe.filters.len()];
-                        broker.send(Packet::UnsubAck(ack)).await;
+                        if broker.try_send(&Packet::UnsubAck(ack)).await.is_err() {
+                            break;
+                        }
                     }
-                    Packet::PingReq => broker.send(Packet::PingResp).await,
+                    Packet::PingReq if broker.try_send(&Packet::PingResp).await.is_err() => break,
+                    Packet::PingReq => {}
                     _ => {}
                 }
             }

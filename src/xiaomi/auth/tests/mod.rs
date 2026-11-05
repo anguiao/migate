@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    storage::tests::XiaomiTestFixture,
     storage::{Store, TokenSet, XiaomiRecord},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity},

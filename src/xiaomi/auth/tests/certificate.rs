@@ -5,7 +5,7 @@ fn certificate_renewal_reuses_key_and_failure_is_independent_from_authentication
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let old = valid_record("uid", "access", NOW + 500, NOW + 60);
-    store.xiaomi().replace(&old).unwrap();
+    store.xiaomi().fixture_replace(&old).unwrap();
     let (base, _) = dynamic_mock_server(2, |request| {
         if request.target.ends_with("gethome") {
             MockResponse::json(200, &home_body(Some("uid"), &[]))
@@ -48,7 +48,7 @@ fn certificate_renewal_reuses_key_and_failure_is_independent_from_authentication
     expiring.hub.as_mut().unwrap().certificate_pem =
         Some(sign_csr(&identity.csr_pem, NOW - 60, NOW + 60).unwrap());
     let old_cert = expiring.hub.as_ref().unwrap().certificate_pem.clone();
-    store.xiaomi().replace(&expiring).unwrap();
+    store.xiaomi().fixture_replace(&expiring).unwrap();
     let (auth, _) = service(
         &store,
         vec![
@@ -90,7 +90,7 @@ fn future_certificate_with_three_days_remaining_is_renewed() {
     record.hub.as_mut().unwrap().certificate_pem =
         Some(sign_csr(&identity.csr_pem, NOW + 100, NOW + 1_000).unwrap());
     let old_certificate = record.hub.as_ref().unwrap().certificate_pem.clone();
-    store.xiaomi().replace(&record).unwrap();
+    store.xiaomi().fixture_replace(&record).unwrap();
     let (base, requests) = dynamic_mock_server(2, |request| {
         if request.target.ends_with("gethome") {
             MockResponse::json(200, &home_body(Some("uid"), &[]))
@@ -157,7 +157,7 @@ fn certificate_401_refresh_failures_report_failed_renewal_and_cloud_state() {
         let store = Store::open(dir.path()).unwrap();
         let record = valid_record("uid", "access", NOW + 500, NOW + 60);
         let old_certificate = record.hub.as_ref().unwrap().certificate_pem.clone();
-        store.xiaomi().replace(&record).unwrap();
+        store.xiaomi().fixture_replace(&record).unwrap();
         let (auth, _) = service(&store, responses);
         let report = block_on(auth.check()).unwrap();
         assert_eq!(
@@ -223,7 +223,7 @@ fn shared_refresh_budget_covers_certificate_and_classifies_401_403_and_business_
         let store = Store::open(dir.path()).unwrap();
         store
             .xiaomi()
-            .replace(&valid_record("uid", "access", NOW + 500, NOW + 60))
+            .fixture_replace(&valid_record("uid", "access", NOW + 500, NOW + 60))
             .unwrap();
         let (auth, _) = service(&store, responses);
         let report = block_on(auth.check()).unwrap();
@@ -252,7 +252,7 @@ fn offline_keeps_real_certificate_validity_and_future_or_expired_is_unsuccessful
         .unwrap();
         record.hub.as_mut().unwrap().certificate_pem =
             Some(sign_csr(&identity.csr_pem, not_before, not_after).unwrap());
-        store.xiaomi().replace(&record).unwrap();
+        store.xiaomi().fixture_replace(&record).unwrap();
         let (auth, _) = service(&store, vec![MockResponse::json(500, "offline")]);
         let report = block_on(auth.check()).unwrap();
         assert_eq!(

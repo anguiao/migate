@@ -3,7 +3,7 @@ use super::{
     FailureReason, tokens,
 };
 use crate::{
-    storage::{HaAuthorization, StorageError, TokenSet, XiaomiRecord, XiaomiStore},
+    storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
         cloud::{CloudClient, CloudError},
@@ -113,46 +113,22 @@ impl AuthService {
         tokens: &TokenSet,
         now: impl Fn() -> i64,
     ) -> Result<TokenSet, AuthError> {
-        let generation = self
-            .store
-            .ha_refresh_generation(redirect_uri, tokens)?
-            .ok_or(AuthError::Missing("HA OAuth refresh is unavailable"))?;
-        let response = match self
+        let response = self
             .cloud
             .refresh_token(redirect_uri, &tokens.refresh_token)
-            .await
-        {
+            .await;
+        let response = match response {
             Ok(response) => response,
             Err(error) => {
-                if error.is_unauthorized() && !self.store.stop_ha_refresh_if_current(&generation)? {
-                    return Err(AuthError::Missing(
-                        "HA OAuth credentials changed during refresh",
-                    ));
+                if error.is_unauthorized() {
+                    self.store.stop_ha_refresh()?;
                 }
                 return Err(AuthError::Cloud(error));
             }
         };
         let replacement = tokens::from_response(response, now()).map_err(AuthError::Cloud)?;
-        if !self
-            .store
-            .update_tokens_if_current(&replacement, &generation)?
-        {
-            return Err(AuthError::Missing(
-                "HA OAuth credentials changed during refresh",
-            ));
-        }
+        self.store.update_tokens(&replacement)?;
         Ok(replacement)
-    }
-
-    pub(super) fn ha_generation(
-        &self,
-        authorization: &HaAuthorization,
-    ) -> Result<String, AuthError> {
-        self.store
-            .ha_refresh_generation(&authorization.redirect_uri, &authorization.tokens)?
-            .ok_or(AuthError::Missing(
-                "HA OAuth credentials changed during authorization check",
-            ))
     }
 
     pub(super) fn client_identity(
@@ -201,7 +177,7 @@ impl AuthService {
     }
 
     pub(super) fn load_validated(&self) -> Result<Option<StoredRecord>, AuthError> {
-        let Some(record) = self.store.load().map_err(AuthError::Storage)? else {
+        let Some(record) = self.store.snapshot().map_err(AuthError::Storage)?.record else {
             return Ok(None);
         };
         let (validity, certificate_update) = if let Some(hub) = &record.hub {

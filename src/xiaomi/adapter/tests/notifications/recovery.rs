@@ -32,9 +32,11 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
                 .unwrap()
                 .tokens
                 .access_token = "replacement-token".into();
-            c.store.xiaomi().replace(&record).unwrap();
-            c.context.live.borrow_mut().credentials = Some(record);
-            c.context.credentials_changed.notify(usize::MAX);
+            c.store
+                .xiaomi()
+                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
+                .unwrap();
+            c.context.adopt_credentials(record);
             until(|| peer.state.borrow().connects.len() == 9).await;
             assert_eq!(peer.state.borrow().connects[8], "replacement-token");
             let due = c.clock.now() + Duration::from_secs(10);

@@ -28,31 +28,26 @@ impl AuthService {
     pub(crate) async fn maintain_mijia(
         &self,
         record: &XiaomiRecord,
-        generation: &str,
     ) -> Result<MijiaSession, AuthError> {
-        self.ensure_mijia_current(&record.uid, generation)?;
         if let Some(session) = &record.mijia {
             let result = self.validate_mijia(&record.uid, session).await;
-            self.ensure_mijia_current(&record.uid, generation)?;
             match result {
                 Ok(()) => return Ok(session.clone()),
                 Err(AuthError::Cloud(error)) if error.is_unauthorized() => (),
                 Err(error) => return Err(error),
             }
         }
-        self.recover_mijia(record, generation).await
+        self.recover_mijia(record).await
     }
 
     /// Perform one restoration after the caller has identified a rejected or
-    /// missing session. The captured generation owns all resulting writes.
+    /// missing session.
     pub(crate) async fn recover_mijia(
         &self,
         record: &XiaomiRecord,
-        generation: &str,
     ) -> Result<MijiaSession, AuthError> {
-        let recovery = self.current_recovery(&record.uid, generation)?;
+        let recovery = self.current_recovery()?;
         let result = self.account.restore(&recovery.credentials).await;
-        self.current_recovery(&record.uid, generation)?;
         let candidate = match result {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -65,14 +60,8 @@ impl AuthService {
                     }
                     _ => None,
                 };
-                if let Some(stop) = stop
-                    && !self
-                        .store
-                        .stop_recovery_if_current(&record.uid, generation, stop)?
-                {
-                    return Err(AuthError::Missing(
-                        "Mijia credentials changed during recovery",
-                    ));
+                if let Some(stop) = stop {
+                    self.store.stop_recovery(stop)?;
                 }
                 return Err(AuthError::Account(error));
             }
@@ -80,40 +69,23 @@ impl AuthService {
         if candidate.credentials().user_id() != record.uid {
             return Err(AuthError::Failure(FailureReason::AccountIdentityMismatch));
         }
-        let validation = self.validate_mijia(&record.uid, candidate.session()).await;
-        self.current_recovery(&record.uid, generation)?;
-        validation?;
+        self.validate_mijia(&record.uid, candidate.session())
+            .await?;
         let (credentials, session) = candidate.into_parts();
-        if !self
-            .store
-            .update_recovery_if_current(&credentials, &session, generation)?
-        {
-            return Err(AuthError::Missing(
-                "Mijia credentials changed during recovery",
-            ));
-        }
+        self.store.update_recovery(&credentials, &session)?;
         Ok(session)
     }
 
-    fn current_recovery(&self, uid: &str, generation: &str) -> Result<AccountRecovery, AuthError> {
-        self.ensure_mijia_current(uid, generation)?;
+    fn current_recovery(&self) -> Result<AccountRecovery, AuthError> {
         let recovery = self
             .store
-            .load()?
+            .current_snapshot()
+            .record
             .and_then(|record| record.recovery)
             .ok_or(AuthError::Failure(FailureReason::MissingMijiaSession))?;
         if let Some(stop) = recovery.stop {
             return Err(AuthError::Failure(FailureReason::RecoveryStopped(stop)));
         }
         Ok(recovery)
-    }
-
-    fn ensure_mijia_current(&self, uid: &str, generation: &str) -> Result<(), AuthError> {
-        if self.store.mijia_generation(uid)?.as_deref() != Some(generation) {
-            return Err(AuthError::Missing(
-                "Mijia credentials changed during recovery",
-            ));
-        }
-        Ok(())
     }
 }

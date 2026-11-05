@@ -1,5 +1,8 @@
 use super::{AuthError, AuthService, CertificateUpdate, FailureReason};
-use crate::{storage::XiaomiRecord, xiaomi::certificate::CertificateValidity};
+use crate::{
+    storage::{HubIdentity, XiaomiRecord},
+    xiaomi::certificate::{CertificateValidity, ClientIdentity},
+};
 
 #[derive(Debug)]
 pub(crate) struct BridgeCertificate {
@@ -45,9 +48,22 @@ impl AuthService {
     pub(crate) async fn renew_bridge_certificate(
         &self,
         record: &XiaomiRecord,
+        generation: u64,
         now: impl Fn() -> i64,
     ) -> Result<super::BridgeCertificate, AuthError> {
-        let identity = self.client_identity(record)?;
+        let mut record = record.clone();
+        if record.hub.is_none() {
+            let identity = ClientIdentity::generate(&record.uid)
+                .map_err(|_| AuthError::Failure(FailureReason::InvalidClientIdentity))?;
+            let hub = HubIdentity {
+                virtual_did: identity.virtual_did,
+                private_key_pem: identity.private_key_pem,
+                certificate_pem: None,
+            };
+            self.store.create_hub(&hub)?;
+            record.hub = Some(hub);
+        }
+        let identity = self.client_identity(&record)?;
         let authorization = record
             .ha
             .as_ref()
@@ -57,9 +73,14 @@ impl AuthService {
         let certificate = self
             .cloud
             .get_certificate(&authorization.tokens.access_token, &identity.csr_pem)
-            .await
-            .map_err(AuthError::Cloud)?;
-        let update = match self.save_certificate_response(record, &certificate, now())? {
+            .await;
+        if !self.store.current_ha(&record.uid, generation) {
+            return Err(AuthError::Missing(
+                "HA OAuth credentials changed during certificate maintenance",
+            ));
+        }
+        let certificate = certificate.map_err(AuthError::Cloud)?;
+        let update = match self.save_certificate_response(&record, &certificate, now())? {
             Ok(_) => CertificateUpdate::Updated,
             Err(reason) => CertificateUpdate::Failed(reason),
         };

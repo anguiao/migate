@@ -213,7 +213,7 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
         .clone();
     tokens.refresh_at = 1;
     tokens.expires_at = 1;
-    rig.store.xiaomi().update_tokens(&tokens).unwrap();
+    rig.store.xiaomi().fixture_update_tokens(&tokens).unwrap();
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.token_status = 503;
@@ -654,9 +654,7 @@ fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
         online: true,
         lan: LanCredentials::Unknown,
     });
-    context
-        .adopt_credentials(rig.store.xiaomi().load().unwrap().unwrap())
-        .unwrap();
+    context.adopt_credentials(rig.store.xiaomi().load().unwrap().unwrap());
     context.cloud_scope_valid.set(true);
     let binding = PropertyBinding { siid: 4, piid: 1 };
     let key = (did.to_owned(), binding.siid, binding.piid);

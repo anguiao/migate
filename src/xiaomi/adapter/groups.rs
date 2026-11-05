@@ -165,16 +165,19 @@ impl Context {
                 // as its loading token.
                 let wait_life = life.clone();
                 let result = future::or(
-                    async { context.mijia_retired(&token).await.map(|()| None) },
+                    async {
+                        context.mijia_retired(&token).await;
+                        None
+                    },
                     future::or(
                         async {
                             wait_life.ended().await;
-                            Ok(None)
+                            None
                         },
-                        async { Ok(Some(client.get_instance(&instance_type).await)) },
+                        async { Some(client.get_instance(&instance_type).await) },
                     ),
                 )
-                .await?;
+                .await;
                 let cleared = {
                     let mut live = context.live.borrow_mut();
                     let Some(slot) = live.devices.get_mut(&group_did) else {
@@ -189,7 +192,7 @@ impl Context {
                     context.request_sync();
                     return Ok(());
                 };
-                let current = context.current_mijia(&token)?
+                let current = context.current_mijia(&token)
                     && context.live.borrow().scope.as_ref().is_some_and(|scope| {
                         scope.uid == captured_scope.uid && scope.home_id == captured_scope.home_id
                     })

@@ -15,8 +15,8 @@ fn directory_uses_mijia_session_and_signed_form() {
         )
         .unwrap(),
     );
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record).unwrap();
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
     block_on(rig.run(|c| async move {
         until(|| !c.cloud.lock().unwrap().home_requests.is_empty()).await;
         let cloud = c.cloud.lock().unwrap();

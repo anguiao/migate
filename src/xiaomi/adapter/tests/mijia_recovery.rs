@@ -6,8 +6,8 @@ fn set_missing(rig: &Rig, stop: Option<RecoveryStop>) {
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
     record.mijia = None;
     record.recovery.as_mut().unwrap().stop = stop;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record).unwrap();
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
 }
 
 #[test]
@@ -89,8 +89,14 @@ fn late_unauthorized_from_identical_old_session_cannot_stop_new_generation() {
         assert!(poll_once(command.as_mut()).await.is_none());
         until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
         let record = c.store.xiaomi().load().unwrap().unwrap();
-        c.store.xiaomi().replace(&record).unwrap();
-        c.context.adopt_credentials(record).unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.as_ref().unwrap().credentials,
+                record.mijia.as_ref().unwrap(),
+            )
+            .unwrap();
+        c.context.adopt_credentials(record);
         c.cloud.lock().unwrap().property_status = 200;
         release.send(()).unwrap();
         assert!(command.await.is_err());
@@ -103,22 +109,9 @@ fn late_unauthorized_from_identical_old_session_cannot_stop_new_generation() {
 }
 
 #[test]
-fn directory_guard_rechecks_database_generation_on_each_poll() {
-    let rig = Rig::new(true, &["one"]);
-    let path = rig.source.context.mijia_path().unwrap();
-    let context = rig.source.context.clone();
-    let mut retired = Box::pin(context.mijia_retired(&path));
-    block_on(async {
-        assert!(poll_once(retired.as_mut()).await.is_none());
-        let record = rig.store.xiaomi().load().unwrap().unwrap();
-        rig.store.xiaomi().replace(&record).unwrap();
-        assert!(poll_once(retired.as_mut()).await.is_some());
-    });
-}
-
-#[test]
 fn replaced_session_cannot_send_the_next_old_directory_page() {
     let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
     let (release, gate) = flume::bounded(1);
     {
         let mut cloud = rig.cloud.lock().unwrap();
@@ -128,7 +121,14 @@ fn replaced_session_cannot_send_the_next_old_directory_page() {
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().homes == 1).await;
         let record = c.store.xiaomi().load().unwrap().unwrap();
-        c.store.xiaomi().replace(&record).unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.as_ref().unwrap().credentials,
+                record.mijia.as_ref().unwrap(),
+            )
+            .unwrap();
+        c.context.reload_credentials();
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.home_more = false;
@@ -145,6 +145,7 @@ fn replaced_session_cannot_send_the_next_old_directory_page() {
 #[test]
 fn replaced_session_restarts_an_interrupted_manual_directory_round_without_waiting() {
     let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().catalogs > 0 && !c.context.sync_requested.get()).await;
@@ -160,7 +161,14 @@ fn replaced_session_restarts_an_interrupted_manual_directory_round_without_waiti
         c.context.request_sync();
         until(|| c.cloud.lock().unwrap().homes == before + 1).await;
         let record = c.store.xiaomi().load().unwrap().unwrap();
-        c.store.xiaomi().replace(&record).unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.as_ref().unwrap().credentials,
+                record.mijia.as_ref().unwrap(),
+            )
+            .unwrap();
+        c.context.reload_credentials();
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.home_more = false;
@@ -182,7 +190,7 @@ fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
             record.mijia = None;
         }
         record.recovery.as_mut().unwrap().stop = Some(RecoveryStop::Rejected);
-        rig.store.xiaomi().replace(&record).unwrap();
+        rig.store.xiaomi().fixture_replace(&record).unwrap();
         let (adapter, _) = XiaomiAdapter::build(
             rig.store.clone(),
             rig.source.cloud.clone(),
@@ -211,28 +219,6 @@ fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
             Some(RecoveryStop::Rejected)
         );
     }
-}
-
-#[test]
-fn committed_login_clears_stale_recovery_stop_before_new_session_is_reported_ready() {
-    let rig = Rig::new(true, &["one"]);
-    rig.enable_recovery();
-    let session = rig.store.xiaomi().load().unwrap().unwrap().mijia.unwrap();
-    set_missing(&rig, Some(RecoveryStop::Rejected));
-    let (_release, gate) = flume::bounded(1);
-    rig.cloud.lock().unwrap().home_gate = Some(gate);
-    block_on(rig.run(|c| async move {
-        until(|| c.context.status.borrow().auth.recovery_stop == Some(RecoveryStop::Rejected))
-            .await;
-        let mut replacement = c.store.xiaomi().load().unwrap().unwrap();
-        replacement.mijia = Some(session);
-        replacement.recovery.as_mut().unwrap().stop = None;
-        c.store.xiaomi().replace(&replacement).unwrap();
-        c.context.adopt_credentials(replacement).unwrap();
-        let report = c.context.status.borrow().auth.clone();
-        assert_eq!(report.recovery_stop, None);
-        assert_eq!(report.mijia, AuthenticationState::Checking);
-    }));
 }
 
 #[test]

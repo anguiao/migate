@@ -283,7 +283,8 @@ impl AccessRefresh {
 }
 pub(super) struct Live {
     pub(super) credentials: Option<XiaomiRecord>,
-    pub(super) mijia_generation: Option<String>,
+    pub(super) mijia_generation: Option<u64>,
+    pub(super) ha_generation: Option<u64>,
     pub(super) scope: Option<Scope>,
     pub(super) devices: BTreeMap<String, DeviceSlot>,
     pub(super) session: Option<Session>,
@@ -312,7 +313,11 @@ pub(super) struct Context {
     #[cfg(test)]
     pub(super) lan_timeout: Cell<Duration>,
     pub(super) ha_sync: RefCell<HaSync>,
-    pub(super) mijia_rejected: RefCell<Option<String>>,
+    pub(super) ha_verified: RefCell<Option<super::routing::HaKey>>,
+    pub(super) ha_refresh_failure: RefCell<Option<FailureReason>>,
+    pub(super) ha_refresh_in_flight: Cell<bool>,
+    pub(super) ha_changed: Event,
+    pub(super) mijia_rejected: RefCell<Option<u64>>,
     pub(super) mijia_changed: Event,
     pub(super) http_paused: Cell<bool>,
     pub(super) cloud_scope_valid: Cell<bool>,
@@ -340,21 +345,25 @@ pub(super) struct Context {
     pub(super) sync_changed: Event,
 }
 impl Context {
-    pub(super) fn adopt_credentials(
-        &self,
-        credentials: XiaomiRecord,
-    ) -> Result<(), super::model::AdapterError> {
-        let generation = self.store.xiaomi().mijia_generation(&credentials.uid)?;
+    pub(super) fn adopt_credentials(&self, credentials: XiaomiRecord) {
+        let snapshot = self.store.xiaomi().current_snapshot();
+        let generation = snapshot.mijia_generation();
+        let ha_generation = snapshot.ha_generation();
         let recovery_stop = credentials
             .recovery
             .as_ref()
             .and_then(|recovery| recovery.stop);
         let has_session = credentials.mijia.is_some();
+        let ha_stopped = credentials.ha.as_ref().is_some_and(|ha| ha.stopped);
         let mut live = self.live.borrow_mut();
         let generation_changed = live.mijia_generation != generation;
-        let changed = live.credentials.as_ref() != Some(&credentials) || generation_changed;
+        let ha_generation_changed = live.ha_generation != ha_generation;
+        let changed = live.credentials.as_ref() != Some(&credentials)
+            || generation_changed
+            || ha_generation_changed;
         live.credentials = Some(credentials);
         live.mijia_generation = generation;
+        live.ha_generation = ha_generation;
         drop(live);
         {
             let mut status = self.status.borrow_mut();
@@ -382,6 +391,23 @@ impl Context {
             self.mijia_changed.notify(usize::MAX);
             self.request_sync();
         }
+        if ha_generation_changed {
+            *self.ha_sync.borrow_mut() = if ha_stopped {
+                HaSync::Paused
+            } else {
+                HaSync::Idle
+            };
+            *self.ha_verified.borrow_mut() = None;
+            *self.ha_refresh_failure.borrow_mut() = None;
+            self.ha_refresh_in_flight.set(false);
+            let authentication = if self.live.borrow().ha_generation.is_some() {
+                AuthenticationState::Checking
+            } else {
+                AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
+            };
+            self.ha_authentication(authentication);
+            self.ha_changed.notify(usize::MAX);
+        }
         if changed {
             self.credentials_changed.notify(usize::MAX);
             self.changed.notify(usize::MAX);
@@ -389,24 +415,15 @@ impl Context {
             self.update_all_availability();
             self.update_routing("cloud credentials updated");
         }
-        Ok(())
     }
-    pub(super) fn reload_credentials(&self) -> Result<(), super::model::AdapterError> {
-        let record = self.store.xiaomi().load()?.ok_or_else(|| {
-            super::model::AdapterError::Unavailable("Xiaomi sign-in is required".into())
-        })?;
-        if self
-            .live
-            .borrow()
-            .credentials
-            .as_ref()
-            .is_some_and(|current| current.uid != record.uid)
-        {
-            return Err(super::model::AdapterError::Unavailable(
-                "Xiaomi account changed; restart after sign-in".into(),
-            ));
-        }
-        self.adopt_credentials(record)
+    pub(super) fn reload_credentials(&self) {
+        let record = self
+            .store
+            .xiaomi()
+            .current_snapshot()
+            .record
+            .expect("active account");
+        self.adopt_credentials(record);
     }
     pub(super) fn mijia_authentication(&self, authentication: AuthenticationState) {
         let mut status = self.status.borrow_mut();

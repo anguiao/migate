@@ -370,7 +370,7 @@ async fn send_power(
                 break;
             }
             ControlPath::Cloud(credentials) => {
-                if !context.current_mijia(&credentials)? {
+                if !context.current_mijia(&credentials) {
                     command.0.reject(
                         request,
                         CommandError::Unavailable("Mijia session changed".into()),
@@ -389,7 +389,7 @@ async fn send_power(
                 {
                     Ok(()) => {
                         command.0.receipts(vec![StepReceipt::Accepted]);
-                        let current = context.current_mijia(&credentials)?;
+                        let current = context.current_mijia(&credentials);
                         let result = if current {
                             work.observations.accept_write(
                                 &work,
@@ -413,11 +413,7 @@ async fn send_power(
                         command.0.reject(request, command_error);
                         let current = !work.life.is_closed() && !sink.life.is_closed();
                         // Account failures remain relevant after a binding is replaced.
-                        context.cloud_error(
-                            &credentials,
-                            current.then_some(did.as_str()),
-                            &error,
-                        )?;
+                        context.cloud_error(&credentials, current.then_some(did.as_str()), &error);
                     }
                 }
                 break;

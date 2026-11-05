@@ -1,4 +1,5 @@
-use migate::{
+use super::XiaomiTestFixture;
+use crate::{
     storage::{
         AccountRecovery, HaAuthorization, HaClient, HubIdentity, RecoveryStop, Store, TokenSet,
         XiaomiRecord,
@@ -77,7 +78,7 @@ fn account_identity_can_exist_without_any_service_credentials() {
     Connection::open(store.path())
         .unwrap()
         .execute(
-            "INSERT INTO xiaomi_account (id, uid, region, mijia_generation) VALUES (1, 'uid-only', 'cn', 'test-generation')",
+            "INSERT INTO xiaomi_account (id, uid, region) VALUES (1, 'uid-only', 'cn')",
             [],
         )
         .unwrap();
@@ -91,15 +92,33 @@ fn account_identity_can_exist_without_any_service_credentials() {
 }
 
 #[test]
-fn credentials_persist_and_replace_as_one_record() {
+fn login_credentials_persist_and_replace_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     assert!(store.xiaomi().load().unwrap().is_none());
     let first = record("first");
-    store.xiaomi().replace(&first).unwrap();
-    assert_eq!(store.xiaomi().load().unwrap(), Some(first));
-    let second = record("second");
-    store.xiaomi().replace(&second).unwrap();
+    store.xiaomi().fixture_replace(&first).unwrap();
+    assert_eq!(store.xiaomi().load().unwrap(), Some(first.clone()));
+    let mut second = first.clone();
+    second.recovery.as_mut().unwrap().credentials = recovery(&first.uid, "second");
+    second.mijia = Some(session(&first.uid, "second"));
+    second
+        .ha
+        .as_mut()
+        .unwrap()
+        .authorization
+        .as_mut()
+        .unwrap()
+        .tokens = tokens("second");
+    store
+        .xiaomi()
+        .commit_login(
+            &second.recovery.as_ref().unwrap().credentials,
+            second.mijia.as_ref().unwrap(),
+            UUID,
+            second.ha.as_ref().unwrap().authorization.as_ref().unwrap(),
+        )
+        .unwrap();
     drop(store);
     assert_eq!(
         Store::open(dir.path()).unwrap().xiaomi().load().unwrap(),
@@ -141,7 +160,7 @@ fn pem_line_breaks_are_persisted_without_exposing_secrets_in_debug() {
     ] {
         assert!(!debug.contains(secret), "debug leaked secret");
     }
-    store.xiaomi().replace(&credentials).unwrap();
+    store.xiaomi().fixture_replace(&credentials).unwrap();
     assert_eq!(store.xiaomi().load().unwrap(), Some(credentials));
 }
 
@@ -150,42 +169,30 @@ fn token_and_certificate_updates_change_only_their_fields() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let original = record("original");
-    store.xiaomi().replace(&original).unwrap();
+    store.xiaomi().fixture_replace(&original).unwrap();
+    let before = store.xiaomi().snapshot().unwrap();
     let replacement_tokens = tokens("updated");
     store.xiaomi().update_tokens(&replacement_tokens).unwrap();
-    let after_tokens = store.xiaomi().load().unwrap().unwrap();
+    let after_tokens = store.xiaomi().current_snapshot();
+    assert_ne!(before.ha_generation, after_tokens.ha_generation);
+    let updated = after_tokens.record.unwrap();
     assert_eq!(
-        after_tokens
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens,
+        updated.ha_authorization().unwrap().tokens,
         replacement_tokens
     );
-    assert_eq!(after_tokens.hub, original.hub);
-    assert_eq!(after_tokens.mijia, original.mijia);
+    assert_eq!(updated.hub, original.hub);
+    assert_eq!(updated.mijia, original.mijia);
     store
         .xiaomi()
         .update_certificate("certificate-updated")
         .unwrap();
-    let after_certificate = store.xiaomi().load().unwrap().unwrap();
+    let after = store.xiaomi().current_snapshot().record.unwrap();
     assert_eq!(
-        after_certificate
-            .hub
-            .as_ref()
-            .unwrap()
-            .certificate_pem
-            .as_deref(),
+        after.hub.as_ref().unwrap().certificate_pem.as_deref(),
         Some("certificate-updated")
     );
-    assert_eq!(after_certificate.ha, after_tokens.ha);
-    assert_eq!(
-        after_certificate.hub.as_ref().unwrap().private_key_pem,
-        original.hub.unwrap().private_key_pem
-    );
+    assert_eq!(after.ha, updated.ha);
+    assert_eq!(store.xiaomi().load().unwrap(), Some(after));
 }
 
 #[test]
@@ -193,13 +200,22 @@ fn rejected_transactional_writes_preserve_the_original_and_hide_secrets() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let original = record("original");
-    store.xiaomi().replace(&original).unwrap();
+    store.xiaomi().fixture_replace(&original).unwrap();
     let db = Connection::open(store.path()).unwrap();
-    db.execute_batch("CREATE TRIGGER reject_account AFTER UPDATE ON xiaomi_account BEGIN SELECT RAISE(ABORT, 'SECRET CONTENT'); END;
-        CREATE TRIGGER reject_tokens AFTER UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'SECRET CONTENT'); END;
+    db.execute_batch("CREATE TRIGGER reject_tokens AFTER UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'SECRET CONTENT'); END;
         CREATE TRIGGER reject_certificate AFTER UPDATE ON xiaomi_hub BEGIN SELECT RAISE(ABORT, 'SECRET CONTENT'); END;").unwrap();
+    let before = store.xiaomi().snapshot().unwrap();
+    let oauth = HaAuthorization {
+        redirect_uri: REDIRECT.into(),
+        tokens: tokens("SECRET"),
+    };
     for result in [
-        store.xiaomi().replace(&record("SECRET")),
+        store.xiaomi().commit_login(
+            &recovery(&original.uid, "SECRET"),
+            &session(&original.uid, "SECRET"),
+            UUID,
+            &oauth,
+        ),
         store.xiaomi().update_tokens(&tokens("SECRET")),
         store.xiaomi().update_certificate("SECRET"),
     ] {
@@ -207,6 +223,10 @@ fn rejected_transactional_writes_preserve_the_original_and_hide_secrets() {
         assert!(error.source().unwrap().is::<rusqlite::Error>());
         assert!(!format!("{error:?} {error}").contains("SECRET CONTENT"));
         assert_eq!(store.xiaomi().load().unwrap(), Some(original.clone()));
+        let current = store.xiaomi().current_snapshot();
+        assert_eq!(current.record, before.record);
+        assert_eq!(current.ha_generation, before.ha_generation);
+        assert_eq!(current.mijia_generation, before.mijia_generation);
     }
 }
 
@@ -216,7 +236,7 @@ fn stopped_groups_survive_restart_and_only_login_commit_clears_them() {
     let store = Store::open(dir.path()).unwrap();
     let old = record("original");
     let uid = old.uid.clone();
-    store.xiaomi().replace(&old).unwrap();
+    store.xiaomi().fixture_replace(&old).unwrap();
     store
         .xiaomi()
         .stop_recovery(RecoveryStop::VerificationRequired)
@@ -230,24 +250,6 @@ fn stopped_groups_survive_restart_and_only_login_commit_clears_them() {
         Some(RecoveryStop::VerificationRequired)
     );
     assert!(stopped.ha.as_ref().unwrap().stopped);
-    store.xiaomi().update_tokens(&tokens("refreshed")).unwrap();
-    let updated = store.xiaomi().load().unwrap().unwrap();
-    assert!(updated.ha.as_ref().unwrap().stopped);
-    store
-        .xiaomi()
-        .update_recovery(&recovery(&uid, "restored"), &session(&uid, "restored"))
-        .unwrap();
-    assert_eq!(
-        store
-            .xiaomi()
-            .load()
-            .unwrap()
-            .unwrap()
-            .recovery
-            .unwrap()
-            .stop,
-        Some(RecoveryStop::VerificationRequired)
-    );
     let oauth = HaAuthorization {
         redirect_uri: REDIRECT.into(),
         tokens: tokens("login"),
@@ -277,23 +279,15 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let old = record("old");
-    store.xiaomi().replace(&old).unwrap();
+    store.xiaomi().fixture_replace(&old).unwrap();
+    store.xiaomi().snapshot().unwrap();
     store
         .xiaomi()
         .stop_recovery(RecoveryStop::Rejected)
         .unwrap();
     store.xiaomi().stop_ha_refresh().unwrap();
     let before = store.xiaomi().load().unwrap();
-    let db = Connection::open(store.path()).unwrap();
-    let generation = || -> String {
-        db.query_row(
-            "SELECT mijia_generation FROM xiaomi_account WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
-    };
-    let before_generation = generation();
+    let before_snapshot = store.xiaomi().current_snapshot();
     let oauth = HaAuthorization {
         redirect_uri: REDIRECT.into(),
         tokens: tokens("new"),
@@ -310,7 +304,10 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
             .is_err()
     );
     assert_eq!(store.xiaomi().load().unwrap(), before);
-    assert_eq!(generation(), before_generation);
+    assert_eq!(
+        store.xiaomi().current_snapshot().record,
+        before_snapshot.record
+    );
     Connection::open(store.path()).unwrap().execute_batch(
         "CREATE TRIGGER reject_login BEFORE UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
     assert!(
@@ -325,7 +322,10 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
             .is_err()
     );
     assert_eq!(store.xiaomi().load().unwrap(), before);
-    assert_eq!(generation(), before_generation);
+    assert_eq!(
+        store.xiaomi().current_snapshot().record,
+        before_snapshot.record
+    );
 }
 
 #[test]
@@ -333,11 +333,8 @@ fn recovery_credentials_and_mijia_session_roll_back_together() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let old = record("old");
-    store.xiaomi().replace(&old).unwrap();
-    store
-        .xiaomi()
-        .stop_recovery(RecoveryStop::Rejected)
-        .unwrap();
+    store.xiaomi().fixture_replace(&old).unwrap();
+    let before_snapshot = store.xiaomi().snapshot().unwrap();
     let before = store.xiaomi().load().unwrap();
     Connection::open(store.path()).unwrap().execute_batch(
         "CREATE TRIGGER reject_session BEFORE UPDATE ON xiaomi_mijia_session BEGIN SELECT RAISE(ABORT, 'reject'); END;",
@@ -349,55 +346,9 @@ fn recovery_credentials_and_mijia_session_roll_back_together() {
             .is_err()
     );
     assert_eq!(store.xiaomi().load().unwrap(), before);
-}
-
-#[test]
-fn mijia_generation_changes_for_identical_writes_and_rolls_back_with_recovery() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let original = record("same");
-    store.xiaomi().replace(&original).unwrap();
-    let db = Connection::open(store.path()).unwrap();
-    let generation = || -> String {
-        db.query_row(
-            "SELECT mijia_generation FROM xiaomi_account WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap()
-    };
-    let before_login = generation();
-    let credentials = &original.recovery.as_ref().unwrap().credentials;
-    let session = original.mijia.as_ref().unwrap();
-    let ha = original.ha.as_ref().unwrap();
-    store
-        .xiaomi()
-        .commit_login(
-            credentials,
-            session,
-            &ha.client_uuid,
-            ha.authorization.as_ref().unwrap(),
-        )
-        .unwrap();
-    let after_login = generation();
-    assert_ne!(before_login, after_login);
-    store
-        .xiaomi()
-        .update_recovery(credentials, session)
-        .unwrap();
-    let after_recovery = generation();
-    assert_ne!(after_login, after_recovery);
-    assert_eq!(store.xiaomi().load().unwrap(), Some(original.clone()));
-
-    db.execute_batch("CREATE TRIGGER reject_session_generation BEFORE UPDATE ON xiaomi_mijia_session BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
-    assert!(
-        store
-            .xiaomi()
-            .update_recovery(credentials, session)
-            .is_err()
-    );
-    assert_eq!(generation(), after_recovery);
-    assert_eq!(store.xiaomi().load().unwrap(), Some(original));
+    let after = store.xiaomi().current_snapshot();
+    assert_eq!(after.record, before_snapshot.record);
+    assert_eq!(after.mijia_generation, before_snapshot.mijia_generation);
 }
 
 #[test]
@@ -407,11 +358,10 @@ fn ha_client_and_hub_identity_can_exist_without_token_or_certificate() {
     let mut partial = record("partial");
     partial.recovery = None;
     partial.mijia = None;
-    partial.ha.as_mut().unwrap().authorization = None;
     let mut hub = partial.hub.take().unwrap();
     hub.certificate_pem = None;
-    store.xiaomi().replace(&partial).unwrap();
-    store.xiaomi().update_hub(&hub).unwrap();
+    store.xiaomi().fixture_replace(&partial).unwrap();
+    store.xiaomi().create_hub(&hub).unwrap();
     partial.hub = Some(hub);
     drop(store);
     let reopened = Store::open(dir.path()).unwrap();
@@ -420,11 +370,21 @@ fn ha_client_and_hub_identity_can_exist_without_token_or_certificate() {
         .xiaomi()
         .update_certificate("new-certificate")
         .unwrap();
-    let saved = reopened.xiaomi().load().unwrap().unwrap();
-    assert_eq!(saved.ha.unwrap().client_uuid, UUID);
+    let mut saved = reopened.xiaomi().load().unwrap().unwrap();
+    saved.ha.as_mut().unwrap().authorization = None;
+    reopened.xiaomi().fixture_replace(&saved).unwrap();
+    assert_eq!(reopened.xiaomi().load().unwrap(), Some(saved.clone()));
+    assert_eq!(saved.ha.as_ref().unwrap().client_uuid, UUID);
     assert_eq!(
-        saved.hub.unwrap().certificate_pem.as_deref(),
+        saved.hub.as_ref().unwrap().certificate_pem.as_deref(),
         Some("new-certificate")
+    );
+    saved.hub.as_mut().unwrap().certificate_pem = None;
+    reopened.xiaomi().fixture_replace(&saved).unwrap();
+    drop(reopened);
+    assert_eq!(
+        Store::open(dir.path()).unwrap().xiaomi().load().unwrap(),
+        Some(saved)
     );
 }
 
@@ -432,7 +392,7 @@ fn ha_client_and_hub_identity_can_exist_without_token_or_certificate() {
 fn malformed_credentials_can_be_removed_without_loading_them() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    store.xiaomi().replace(&record("valid")).unwrap();
+    store.xiaomi().fixture_replace(&record("valid")).unwrap();
     Connection::open(store.path())
         .unwrap()
         .execute("UPDATE xiaomi_account SET region = 'us'", [])
@@ -449,7 +409,7 @@ fn malformed_single_account_slot_is_not_treated_as_signed_out() {
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     store.matter().put(7, b"paired").unwrap();
-    store.xiaomi().replace(&record("valid")).unwrap();
+    store.xiaomi().fixture_replace(&record("valid")).unwrap();
     let db = Connection::open(store.path()).unwrap();
     db.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE xiaomi_account SET id = 2;")
         .unwrap();
@@ -473,29 +433,42 @@ fn rejects_invalid_semantics_without_overwriting_credentials() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let original = record("original");
-    store.xiaomi().replace(&original).unwrap();
-    let mut invalid = record("invalid");
-    invalid.region = "us".into();
-    assert!(store.xiaomi().replace(&invalid).is_err());
+    store.xiaomi().fixture_replace(&original).unwrap();
+    let db = Connection::open(store.path()).unwrap();
+    db.execute("UPDATE xiaomi_account SET region = 'us'", [])
+        .unwrap();
+    assert!(store.xiaomi().load().is_err());
+    db.execute("UPDATE xiaomi_account SET region = 'cn'", [])
+        .unwrap();
     let mut invalid_tokens = tokens("invalid");
     invalid_tokens.refresh_at = invalid_tokens.expires_at + 1;
     assert!(store.xiaomi().update_tokens(&invalid_tokens).is_err());
     let mut invalid_token = tokens("invalid");
     invalid_token.access_token = "invalid token".into();
     assert!(store.xiaomi().update_tokens(&invalid_token).is_err());
-    let mut mismatch = original.clone();
-    mismatch.mijia = Some(session("other-uid", "other"));
-    assert!(store.xiaomi().replace(&mismatch).is_err());
-    let mut invalid_redirect = original.clone();
-    invalid_redirect
-        .ha
-        .as_mut()
-        .unwrap()
-        .authorization
-        .as_mut()
-        .unwrap()
-        .redirect_uri = "http://evil.invalid/api/webhook/0123456789abcdef0123456789abcdef".into();
-    assert!(store.xiaomi().replace(&invalid_redirect).is_err());
+    assert!(
+        store
+            .xiaomi()
+            .update_recovery(
+                &original.recovery.as_ref().unwrap().credentials,
+                &session("other-uid", "other"),
+            )
+            .is_err()
+    );
+    let mut invalid_redirect = original.ha.as_ref().unwrap().authorization.clone().unwrap();
+    invalid_redirect.redirect_uri =
+        "http://evil.invalid/api/webhook/0123456789abcdef0123456789abcdef".into();
+    assert!(
+        store
+            .xiaomi()
+            .commit_login(
+                &original.recovery.as_ref().unwrap().credentials,
+                original.mijia.as_ref().unwrap(),
+                UUID,
+                &invalid_redirect
+            )
+            .is_err()
+    );
     assert_eq!(store.xiaomi().load().unwrap(), Some(original));
 }
 
@@ -510,7 +483,7 @@ fn xiaomi_credentials_remain_inside_private_storage() {
     Store::open(&dir)
         .unwrap()
         .xiaomi()
-        .replace(&record("secret"))
+        .fixture_replace(&record("secret"))
         .unwrap();
     assert_eq!(
         fs::metadata(&dir).unwrap().permissions().mode() & 0o777,

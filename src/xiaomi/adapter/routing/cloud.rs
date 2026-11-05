@@ -27,7 +27,23 @@ impl Context {
         }
         Ok(())
     }
-    pub(in crate::xiaomi::adapter) fn token_usable(&self) -> bool {
+    pub(in crate::xiaomi::adapter) fn ha_key(&self) -> Option<super::HaKey> {
+        let live = self.live.borrow();
+        Some(super::HaKey {
+            uid: live.credentials.as_ref()?.uid.clone(),
+            generation: live.ha_generation?,
+        })
+    }
+    pub(in crate::xiaomi::adapter) fn current_ha(&self, key: &super::HaKey) -> bool {
+        let live = self.live.borrow();
+        live.ha_generation == Some(key.generation)
+            && live
+                .credentials
+                .as_ref()
+                .is_some_and(|record| record.uid == key.uid)
+            && self.store.xiaomi().current_ha(&key.uid, key.generation)
+    }
+    pub(in crate::xiaomi::adapter) fn token_available(&self) -> bool {
         !matches!(*self.ha_sync.borrow(), HaSync::Rejected(_) | HaSync::Paused)
             && self
                 .live
@@ -39,15 +55,11 @@ impl Context {
                     authorization.tokens.expires_at > self.clock.unix_now()
                 })
     }
-    pub(in crate::xiaomi::adapter) fn current_token(&self, token: &str) -> bool {
-        self.token_usable()
+    pub(in crate::xiaomi::adapter) fn token_usable(&self) -> bool {
+        self.token_available()
             && self
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .and_then(|credentials| credentials.ha_authorization())
-                .is_some_and(|authorization| authorization.tokens.access_token == token)
+                .ha_key()
+                .is_some_and(|key| self.ha_verified.borrow().as_ref() == Some(&key))
     }
     pub(in crate::xiaomi::adapter) fn mijia_path(&self) -> Option<super::CloudPath> {
         let live = self.live.borrow();
@@ -58,46 +70,29 @@ impl Context {
         }
         Some(super::CloudPath {
             uid: credentials.uid.clone(),
-            generation: generation.clone(),
+            generation: *generation,
             home_id: live.scope.as_ref().map(|scope| scope.home_id.clone()),
             session: credentials.mijia.clone()?,
         })
     }
-    pub(in crate::xiaomi::adapter) fn current_mijia(
-        &self,
-        path: &super::CloudPath,
-    ) -> Result<bool, AdapterError> {
-        Ok(
-            self.store.xiaomi().mijia_generation(&path.uid)?.as_deref() == Some(&path.generation)
-                && self.mijia_path().is_some_and(|current| {
-                    current.uid == path.uid
-                        && current.generation == path.generation
-                        && (path.home_id.is_none() || current.home_id == path.home_id)
-                }),
-        )
+    pub(in crate::xiaomi::adapter) fn current_mijia(&self, path: &super::CloudPath) -> bool {
+        self.store
+            .xiaomi()
+            .current_mijia(&path.uid, path.generation)
+            && self.mijia_path().is_some_and(|current| {
+                current.uid == path.uid
+                    && current.generation == path.generation
+                    && (path.home_id.is_none() || current.home_id == path.home_id)
+            })
     }
-    pub(in crate::xiaomi::adapter) async fn mijia_retired(
-        &self,
-        path: &super::CloudPath,
-    ) -> Result<(), AdapterError> {
+    pub(in crate::xiaomi::adapter) async fn mijia_retired(&self, path: &super::CloudPath) {
         loop {
             let credentials = self.credentials_changed.listen();
             let changed = self.mijia_changed.listen();
-            let result = futures_lite::future::or(
-                std::future::poll_fn(|_| match self.current_mijia(path) {
-                    Ok(true) => std::task::Poll::Pending,
-                    Ok(false) => std::task::Poll::Ready(Some(Ok(()))),
-                    Err(error) => std::task::Poll::Ready(Some(Err(error))),
-                }),
-                async {
-                    futures_lite::future::or(credentials, changed).await;
-                    None
-                },
-            )
-            .await;
-            if let Some(result) = result {
-                return result;
+            if !self.current_mijia(path) {
+                return;
             }
+            futures_lite::future::or(credentials, changed).await;
         }
     }
     pub(in crate::xiaomi::adapter) fn cloud_error(
@@ -105,12 +100,12 @@ impl Context {
         path: &super::CloudPath,
         did: Option<&str>,
         error: &CloudError,
-    ) -> Result<(), AdapterError> {
-        if !self.current_mijia(path)? {
-            return Ok(());
+    ) {
+        if !self.current_mijia(path) {
+            return;
         }
         if error.is_unauthorized() {
-            *self.mijia_rejected.borrow_mut() = Some(path.generation.clone());
+            *self.mijia_rejected.borrow_mut() = Some(path.generation);
             self.http_paused.set(true);
             self.mijia_authentication(AuthenticationState::Checking);
             self.mijia_changed.notify(usize::MAX);
@@ -138,16 +133,15 @@ impl Context {
         self.update_routing(&format!("Mijia HTTP request failed: {error}"));
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
-        Ok(())
     }
     pub(in crate::xiaomi::adapter) fn cloud_property_read_error(
         &self,
         path: &super::CloudPath,
         work: &DeviceWork,
         error: &CloudError,
-    ) -> Result<(), AdapterError> {
-        if error.is_temporary() || !self.current_mijia(path)? {
-            return Ok(());
+    ) {
+        if error.is_temporary() || !self.current_mijia(path) {
+            return;
         }
         let current_work = {
             let live = self.live.borrow();
@@ -162,39 +156,32 @@ impl Context {
             self.cloud_error(path, None, error)
         } else if current_work {
             self.cloud_error(path, Some(&work.key.id), error)
-        } else {
-            Ok(())
         }
     }
     pub(in crate::xiaomi::adapter) fn token_rejected(
         &self,
-        token: &str,
+        key: &super::HaKey,
         reason: FailureReason,
     ) -> Result<(), AdapterError> {
-        let current = self.store.xiaomi().load()?;
-        if current
-            .as_ref()
-            .and_then(|record| record.ha_authorization())
-            .is_some_and(|authorization| authorization.tokens.access_token == token)
-        {
-            let mut sync = self.ha_sync.borrow_mut();
-            match &*sync {
-                HaSync::Refreshed(fresh) if fresh == token => {
-                    self.store.xiaomi().stop_ha_refresh()?;
-                    *sync = HaSync::Paused;
-                    self.status.borrow_mut().auth.ha = AuthenticationState::SignInRequired(reason);
-                    self.status_changed.notify(usize::MAX);
-                }
-                HaSync::Rejected(_) | HaSync::Paused => {}
-                _ => {
-                    *sync = HaSync::Rejected(token.into());
-                }
-            }
+        if !self.current_ha(key) {
+            return Ok(());
         }
+        let mut sync = self.ha_sync.borrow_mut();
+        match &*sync {
+            HaSync::Refreshed(fresh) if fresh == &key.generation => {
+                self.store.xiaomi().stop_ha_refresh()?;
+                *sync = HaSync::Paused;
+                self.status.borrow_mut().auth.ha = AuthenticationState::SignInRequired(reason);
+                self.status_changed.notify(usize::MAX);
+            }
+            HaSync::Rejected(_) | HaSync::Paused => {}
+            _ => *sync = HaSync::Rejected(key.generation),
+        }
+        drop(sync);
         self.update_all_availability();
         self.update_routing("cloud access token rejected");
         self.changed.notify(usize::MAX);
-        self.credentials_changed.notify(usize::MAX);
+        self.ha_changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
         Ok(())
     }

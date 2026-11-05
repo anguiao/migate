@@ -1,3 +1,5 @@
+use super::XiaomiTestFixture;
+
 #[test]
 fn confirmed_records_are_scoped_and_survive_reopen() {
     use crate::xiaomi::lan::Token;
@@ -53,11 +55,15 @@ fn logout_erases_confirmed_lan_credentials() {
 }
 
 #[test]
-fn changing_account_erases_old_lan_records_atomically() {
+fn same_account_login_preserves_lan_and_logout_erases_it() {
     use crate::{
         configuration::Scope,
         storage::{Store, TokenSet, XiaomiRecord},
-        xiaomi::lan::Token,
+        xiaomi::{
+            auth::{AccountClientIdentity, AccountCredentials},
+            lan::Token,
+            mijia::MijiaSession,
+        },
     };
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -87,7 +93,10 @@ fn changing_account_erases_old_lan_records_atomically() {
             certificate_pem: Some("certificate".into()),
         }),
     };
-    store.xiaomi().replace(&credentials("owner")).unwrap();
+    store
+        .xiaomi()
+        .fixture_replace(&credentials("owner"))
+        .unwrap();
     let scope = Scope {
         uid: "owner".into(),
         home_id: "home".into(),
@@ -100,17 +109,53 @@ fn changing_account_erases_old_lan_records_atomically() {
         token: Token::parse("00112233445566778899aabbccddeeff").unwrap(),
     };
     store.lan().save(&record).unwrap();
-    store.xiaomi().replace(&credentials("owner")).unwrap();
+    let login = |uid: &str| {
+        (
+            AccountCredentials::new(
+                uid.into(),
+                "cuser".into(),
+                "pass".into(),
+                AccountClientIdentity::new("device".into(), "agent".into()).unwrap(),
+            )
+            .unwrap(),
+            MijiaSession::new(
+                uid.into(),
+                "service".into(),
+                "c2VjdXJpdHk=".into(),
+                "agent".into(),
+            )
+            .unwrap(),
+        )
+    };
+    let authorization = credentials("owner").ha.unwrap().authorization.unwrap();
+    let (other_account, other_session) = login("different-owner");
+    assert!(
+        store
+            .xiaomi()
+            .commit_login(
+                &other_account,
+                &other_session,
+                "550e8400-e29b-41d4-a716-446655440000",
+                &authorization
+            )
+            .is_err()
+    );
     assert_eq!(
         store.lan().load(&scope, &record.did).unwrap(),
         Some(record.clone())
     );
     let db = rusqlite::Connection::open(store.path()).unwrap();
-    db.execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_account BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
+    let (account, session) = login("owner");
     assert!(
         store
             .xiaomi()
-            .replace(&credentials("different-owner"))
+            .commit_login(
+                &account,
+                &session,
+                "550e8400-e29b-41d4-a716-446655440000",
+                &authorization
+            )
             .is_err()
     );
     assert_eq!(
@@ -120,7 +165,17 @@ fn changing_account_erases_old_lan_records_atomically() {
     db.execute_batch("DROP TRIGGER reject_auth;").unwrap();
     store
         .xiaomi()
-        .replace(&credentials("different-owner"))
+        .commit_login(
+            &account,
+            &session,
+            "550e8400-e29b-41d4-a716-446655440000",
+            &authorization,
+        )
         .unwrap();
+    assert_eq!(
+        store.lan().load(&scope, &record.did).unwrap(),
+        Some(record.clone())
+    );
+    store.xiaomi().logout().unwrap();
     assert_eq!(store.lan().load(&scope, &record.did).unwrap(), None);
 }

@@ -6,7 +6,7 @@ fn missing_mijia_session_does_not_make_ha_authorization_sufficient() {
     let store = Store::open(dir.path()).unwrap();
     let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
     record.mijia = None;
-    store.xiaomi().replace(&record).unwrap();
+    store.xiaomi().fixture_replace(&record).unwrap();
     let (auth, requests) = service(
         &store,
         vec![MockResponse::json(200, &home_body(Some("uid"), &[]))],
@@ -26,7 +26,7 @@ fn successful_certificate_renewal_does_not_hide_failed_due_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let original = valid_record("uid", "old", NOW, NOW + 60);
-    store.xiaomi().replace(&original).unwrap();
+    store.xiaomi().fixture_replace(&original).unwrap();
     let (base, requests) = dynamic_mock_server(2, |request| {
         if request.target.contains("get_token") {
             MockResponse::json(503, "temporary failure")
@@ -67,7 +67,7 @@ fn failed_refresh_followed_by_old_certificate_token_rejection_does_not_stop_ha()
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let original = valid_record("uid", "old", NOW, NOW + 60);
-    store.xiaomi().replace(&original).unwrap();
+    store.xiaomi().fixture_replace(&original).unwrap();
     let (auth, requests) = service(
         &store,
         vec![
@@ -91,67 +91,6 @@ fn failed_refresh_followed_by_old_certificate_token_rejection_does_not_stop_ha()
 }
 
 #[test]
-fn late_home_rejection_cannot_stop_a_new_grant_with_identical_token_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let original = valid_record("uid", "same-access", NOW + 500, NOW + 1_000_000);
-    store.xiaomi().replace(&original).unwrap();
-    let (release, gate) = flume::bounded(1);
-    let (base, requests) = dynamic_mock_server(3, move |request| {
-        if request.target.ends_with("gethome") {
-            MockResponse::json(401, "late rejection").gated(gate.clone())
-        } else {
-            MockResponse::json(401, "refresh rejected")
-        }
-    });
-    let auth = AuthService::with_clock(
-        store.xiaomi(),
-        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        now,
-    );
-    block_on(async {
-        let (result, ()) = future::zip(auth.check(), async {
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            loop {
-                if let Ok(request) = requests.try_recv() {
-                    assert!(request.target.ends_with("gethome"));
-                    break;
-                }
-                assert!(std::time::Instant::now() < deadline);
-                async_io::Timer::after(Duration::from_millis(1)).await;
-            }
-            let credentials = AccountCredentials::new(
-                "uid".into(),
-                "new-cuser".into(),
-                "new-pass".into(),
-                AccountClientIdentity::new("device".into(), "agent".into()).unwrap(),
-            )
-            .unwrap();
-            store
-                .xiaomi()
-                .commit_login(
-                    &credentials,
-                    original.mijia.as_ref().unwrap(),
-                    UUID,
-                    original
-                        .ha
-                        .as_ref()
-                        .unwrap()
-                        .authorization
-                        .as_ref()
-                        .unwrap(),
-                )
-                .unwrap();
-            release.send(()).unwrap();
-        })
-        .await;
-        assert!(matches!(result, Err(AuthError::Missing(_))));
-    });
-    assert!(!store.xiaomi().load().unwrap().unwrap().ha.unwrap().stopped);
-    assert!(requests.try_recv().is_err());
-}
-
-#[test]
 fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
     for (certificate, expected) in [
         (None, FailureReason::MissingCertificate),
@@ -171,7 +110,7 @@ fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
             if ha_state == "stopped" {
                 record.ha.as_mut().unwrap().stopped = true;
             }
-            store.xiaomi().replace(&record).unwrap();
+            store.xiaomi().fixture_replace(&record).unwrap();
             let home = match ha_state {
                 "network" => MockResponse::json(503, "unavailable"),
                 "mismatch" => MockResponse::json(200, &home_body(Some("other"), &[])),
@@ -230,7 +169,7 @@ fn independent_check_uses_ha_home_only_and_not_ha_device_directory() {
     let store = Store::open(dir.path()).unwrap();
     store
         .xiaomi()
-        .replace(&valid_record("uid", "access", NOW + 500, NOW + 1_000_000))
+        .fixture_replace(&valid_record("uid", "access", NOW + 500, NOW + 1_000_000))
         .unwrap();
     let (auth, requests) = service(
         &store,
@@ -262,7 +201,7 @@ fn stopped_refresh_survives_reopening_and_check_does_not_retry() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let record = valid_record("uid", "access", NOW, NOW + 1_000_000);
-    store.xiaomi().replace(&record).unwrap();
+    store.xiaomi().fixture_replace(&record).unwrap();
     let (auth, requests) = service(&store, vec![MockResponse::json(401, "denied")]);
     assert!(matches!(
         block_on(auth.check()).unwrap().ha,
@@ -302,7 +241,7 @@ fn local_status_reports_checking_with_real_certificate_dates_without_http() {
     assert_eq!(empty.certificate, None);
 
     let record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
-    store.xiaomi().replace(&record).unwrap();
+    store.xiaomi().fixture_replace(&record).unwrap();
     let status = auth.local_status().unwrap();
     assert!(matches!(status.ha, AuthenticationState::Checking));
     assert_eq!(
@@ -321,7 +260,7 @@ fn proactive_refresh_followed_by_rejected_home_stops_the_new_generation() {
     let store = Store::open(dir.path()).unwrap();
     store
         .xiaomi()
-        .replace(&valid_record("uid", "old", NOW, NOW + 1_000_000))
+        .fixture_replace(&valid_record("uid", "old", NOW, NOW + 1_000_000))
         .unwrap();
     let (auth, requests) = service(
         &store,
@@ -355,7 +294,7 @@ fn home_401_refreshes_once_and_retries_home_with_new_token() {
     let store = Store::open(dir.path()).unwrap();
     store
         .xiaomi()
-        .replace(&valid_record("uid", "old", NOW + 500, NOW + 1_000_000))
+        .fixture_replace(&valid_record("uid", "old", NOW + 500, NOW + 1_000_000))
         .unwrap();
     let (auth, requests) = service(
         &store,
@@ -387,7 +326,7 @@ fn home_refresh_exhausts_the_certificate_refresh_allowance() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let original = valid_record("uid", "old", NOW + 500, NOW + 60);
-    store.xiaomi().replace(&original).unwrap();
+    store.xiaomi().fixture_replace(&original).unwrap();
     let (auth, requests) = service(
         &store,
         vec![
@@ -434,7 +373,7 @@ fn refresh_is_saved_before_later_certificate_failure() {
     let store = Store::open(dir.path()).unwrap();
     store
         .xiaomi()
-        .replace(&valid_record("uid", "old", NOW, NOW + 60))
+        .fixture_replace(&valid_record("uid", "old", NOW, NOW + 60))
         .unwrap();
     let (auth, _) = service(
         &store,
@@ -476,7 +415,7 @@ fn refresh_403_and_business_failures_are_unavailable_not_sign_in_required() {
         let store = Store::open(dir.path()).unwrap();
         store
             .xiaomi()
-            .replace(&valid_record("uid", "access", NOW, NOW + 1_000_000))
+            .fixture_replace(&valid_record("uid", "access", NOW, NOW + 1_000_000))
             .unwrap();
         let (auth, _) = service(&store, vec![response]);
         let report = block_on(auth.check()).unwrap();

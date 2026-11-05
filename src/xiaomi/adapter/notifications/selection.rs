@@ -241,7 +241,7 @@ fn prepare_source(context: &Rc<Context>, work: Rc<DeviceWork>, source: Notificat
                     context.clone(),
                     work.clone(),
                     handle,
-                    session.key.token.clone(),
+                    session.key.clone(),
                     session.subscriptions.clone(),
                     preparation,
                 ));

@@ -9,6 +9,12 @@ pub(in super::super) struct CloudState {
     pub(in super::super) home_delay: Duration,
     pub(in super::super) home_gate: Option<flume::Receiver<()>>,
     pub(in super::super) home_status: u16,
+    pub(in super::super) ha_status: u16,
+    pub(in super::super) ha_homes: usize,
+    pub(in super::super) ha_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) ha_uid: Option<String>,
+    pub(in super::super) ha_missing_uid: bool,
+    pub(in super::super) cert_sign_csr: bool,
     pub(in super::super) home_bad_signature: bool,
     pub(in super::super) home_more: bool,
     pub(in super::super) member_pages: usize,
@@ -121,8 +127,8 @@ impl Rig {
             .unwrap(),
             stop: None,
         });
-        self.store.xiaomi().replace(&record).unwrap();
-        self.source.context.adopt_credentials(record).unwrap();
+        self.store.xiaomi().fixture_replace(&record).unwrap();
+        self.source.context.adopt_credentials(record);
     }
     /// A fresh catalog containing one real on/off light among ordinary devices.
     pub(in super::super) fn unrestored_with_member_light(members: &[&str]) -> Self {
@@ -252,7 +258,7 @@ impl Rig {
             )
             .unwrap(),
         );
-        store.xiaomi().replace(&credentials).unwrap();
+        store.xiaomi().fixture_replace(&credentials).unwrap();
         let mut data = vec![
             cached(&uid, "one", false),
             cached(&uid, "multi", true),
@@ -308,6 +314,7 @@ impl Rig {
             status: 200,
             home_status: 200,
             detail_status: 200,
+            ha_status: 200,
             cert_status: 200,
             token_status: 200,
             restore_status: 200,
@@ -354,10 +361,20 @@ impl Rig {
                     .to_ascii_lowercase()
                     .contains("authorization: bearer")
             {
-                return MockResponse::json(
-                    200,
-                    &json!({"code":0,"result":{"homelist":[{"uid":account_uid}]}}).to_string(),
+                state.ha_homes += 1;
+                let homes = if state.ha_missing_uid {
+                    json!([])
+                } else {
+                    json!([{"uid":state.ha_uid.as_deref().unwrap_or(&account_uid)}])
+                };
+                let mut response = MockResponse::json(
+                    state.ha_status,
+                    &json!({"code":0,"result":{"homelist":homes}}).to_string(),
                 );
+                if let Some(gate) = state.ha_gate.clone() {
+                    response = response.gated(gate);
+                }
+                return response;
             }
             if state.status != 200 {
                 return MockResponse::json(state.status, "{}");
@@ -477,7 +494,12 @@ impl Rig {
             } else if request.target.contains("get_token") {
                 state.tokens += 1;
                 if state.token_status != 200 {
-                    return MockResponse::json(state.token_status, "{}");
+                    let mut response = MockResponse::json(state.token_status, "{}")
+                        .on_sent(move || token_finished.lock().unwrap().token_done += 1);
+                    if let Some(gate) = state.token_gate.clone() {
+                        response = response.gated(gate);
+                    }
+                    return response;
                 }
                 json!({"code":0,"result":{"access_token":state.token_access.as_deref().unwrap_or("fresh-access"),"refresh_token":"fresh-refresh","expires_in":state.token_lifetime}})
             } else if request.target.ends_with("/get_central_crt") {
@@ -489,7 +511,18 @@ impl Rig {
                     }
                     return response;
                 }
-                json!({"code":0,"result":{"cert":state.cert_pem.as_deref().unwrap_or(&certificate)}})
+                if state.cert_sign_csr {
+                    let body: Value = serde_json::from_str(&request.body).unwrap();
+                    let csr = STANDARD.decode(body["csr"].as_str().unwrap()).unwrap();
+                    let csr = String::from_utf8(csr).unwrap();
+                    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                    let signed =
+                        crate::xiaomi::test_support::sign_csr(&csr, now - 60, now + 864_000)
+                            .unwrap();
+                    json!({"code":0,"result":{"cert":signed}})
+                } else {
+                    json!({"code":0,"result":{"cert":state.cert_pem.as_deref().unwrap_or(&certificate)}})
+                }
             } else if request.target.ends_with("/get_dev_room_page") {
                 state.member_pages += 1;
                 json!({"code":0,"result":{"info":[{"id":"local","dids":[]}],"has_more":false}})

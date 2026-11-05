@@ -11,6 +11,7 @@ use super::{
 };
 use rusqlite::Connection;
 use std::{
+    cell::RefCell,
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -25,6 +26,7 @@ pub struct Store {
 struct Inner {
     path: PathBuf,
     connection: Connection,
+    xiaomi: RefCell<Option<super::xiaomi::CredentialSnapshot>>,
 }
 
 impl Store {
@@ -64,7 +66,11 @@ impl Store {
                 .map_err(|e| StorageError::database(&path, "initialize database", e))?;
         }
         Ok(Self {
-            inner: Rc::new(Inner { path, connection }),
+            inner: Rc::new(Inner {
+                path,
+                connection,
+                xiaomi: RefCell::new(None),
+            }),
         })
     }
 
@@ -94,6 +100,10 @@ impl Store {
 
     pub(super) fn connection(&self) -> &Connection {
         &self.inner.connection
+    }
+
+    pub(super) fn xiaomi_state(&self) -> &RefCell<Option<super::xiaomi::CredentialSnapshot>> {
+        &self.inner.xiaomi
     }
 
     pub(super) fn database_error(

@@ -3,8 +3,8 @@ pub(super) enum HaSync {
     #[default]
     Idle,
     // Retained during refresh so concurrent failures coalesce into the same attempt.
-    Rejected(String),
-    Refreshed(String),
+    Rejected(u64),
+    Refreshed(u64),
     Paused,
 }
 use super::{
@@ -30,18 +30,7 @@ fn saved(auth: &AuthService, context: &Context) -> Result<XiaomiRecord, AdapterE
     let record = auth
         .saved_bridge_credentials()?
         .ok_or_else(|| AdapterError::Unavailable("Xiaomi sign-in is required".into()))?;
-    if context
-        .live
-        .borrow()
-        .credentials
-        .as_ref()
-        .is_some_and(|current| current.uid != record.uid)
-    {
-        return Err(AdapterError::Unavailable(
-            "Xiaomi account changed; restart after sign-in".into(),
-        ));
-    }
-    context.adopt_credentials(record.clone())?;
+    context.adopt_credentials(record.clone());
     Ok(record)
 }
 
@@ -59,6 +48,16 @@ fn eligibility_changed(context: &Context, reason: &str) {
     context.status_changed.notify(usize::MAX);
 }
 
+async fn ha_retired(context: &Context, key: &super::routing::HaKey) {
+    loop {
+        let changed = context.ha_changed.listen();
+        if !context.current_ha(key) {
+            return;
+        }
+        changed.await;
+    }
+}
+
 fn token_expired(context: &Context) {
     if !matches!(*context.ha_sync.borrow(), HaSync::Paused) {
         context.ha_authentication(AuthenticationState::Unavailable(
@@ -73,9 +72,9 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
     let mut retry = None;
     let mut observed_expiry = None;
     loop {
-        let credentials_changed = context.credentials_changed.listen();
+        let changed = context.ha_changed.listen();
         let record = saved(auth, &context)?;
-        let Some(authorization) = record.ha_authorization() else {
+        let Some(key) = context.ha_key() else {
             if !matches!(
                 context.status.borrow().auth.ha,
                 AuthenticationState::SignInRequired(_)
@@ -84,18 +83,17 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     FailureReason::MissingHaAuthorization,
                 ));
             }
-            credentials_changed.await;
+            changed.await;
             continue;
         };
-        let tokens = authorization.tokens.clone();
-        let key = (tokens.access_token.clone(), tokens.expires_at);
+        let tokens = &record.ha_authorization().unwrap().tokens;
         let is_expired = tokens.expires_at <= context.clock.unix_now();
-        if is_expired && observed_expiry.as_ref() != Some(&key) {
-            observed_expiry = Some(key);
+        if is_expired && observed_expiry != Some(tokens.expires_at) {
+            observed_expiry = Some(tokens.expires_at);
             token_expired(&context);
         }
         let paused = matches!(*context.ha_sync.borrow(), HaSync::Paused);
-        let rejected = matches!(&*context.ha_sync.borrow(), HaSync::Rejected(token) if token == &tokens.access_token);
+        let rejected = matches!(&*context.ha_sync.borrow(), HaSync::Rejected(generation) if generation == &key.generation);
         let refresh_due = retry.unwrap_or_else(|| {
             if rejected {
                 context.clock.now()
@@ -107,69 +105,67 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
             && (rejected || context.clock.unix_now() >= tokens.refresh_at)
             && context.clock.now() >= refresh_due
         {
+            context.ha_refresh_in_flight.set(true);
             context.ha_authentication(AuthenticationState::Refreshing);
+            if matches!(&*context.ha_sync.borrow(), HaSync::Refreshed(generation) if generation == &key.generation)
+            {
+                *context.ha_sync.borrow_mut() = HaSync::Idle;
+            }
             let refreshing = auth.refresh_bridge_tokens(&record, || context.clock.unix_now());
             let mut refreshing = std::pin::pin!(refreshing);
             let result = if !is_expired {
                 let expiry = deadline(&context, tokens.expires_at);
                 match future::or(async { Some(refreshing.as_mut().await) }, async {
                     context.clock.wait_until(expiry).await;
-                    observed_expiry = Some((tokens.access_token.clone(), tokens.expires_at));
-                    token_expired(&context);
                     None
                 })
                 .await
                 {
                     Some(result) => result,
-                    None => refreshing.await,
+                    None => {
+                        observed_expiry = Some(tokens.expires_at);
+                        token_expired(&context);
+                        refreshing.await
+                    }
                 }
             } else {
                 refreshing.await
             };
+            context.ha_refresh_in_flight.set(false);
             match result {
                 Ok(replacement) => {
-                    let Some(refreshed) = replacement.ha_authorization() else {
-                        context.adopt_credentials(replacement)?;
-                        continue;
-                    };
-                    let already_due = refreshed.tokens.refresh_at <= context.clock.unix_now();
-                    *context.ha_sync.borrow_mut() =
-                        HaSync::Refreshed(refreshed.tokens.access_token.clone());
-                    context.adopt_credentials(replacement)?;
+                    let already_due = replacement
+                        .ha_authorization()
+                        .is_some_and(|ha| ha.tokens.refresh_at <= context.clock.unix_now());
+                    context.adopt_credentials(replacement);
+                    *context.ha_refresh_failure.borrow_mut() = None;
+                    if let Some(fresh) = context.ha_key() {
+                        *context.ha_sync.borrow_mut() = HaSync::Refreshed(fresh.generation);
+                    }
                     context.ha_authentication(AuthenticationState::Checking);
-                    context.credentials_changed.notify(usize::MAX);
-                    // Extremely short grants can already be due at completion; keep maintenance bounded.
+                    context.ha_changed.notify(usize::MAX);
                     retry = already_due.then(|| context.clock.now() + Duration::from_secs(1));
                     backoff = Backoff::new(1, 30);
                 }
                 Err(AuthError::Cloud(error)) => {
-                    let delay = if error.is_temporary() {
-                        backoff.failed()
-                    } else {
-                        super::cloud::MEMBER_INTERVAL
-                    };
                     if error.is_unauthorized() {
+                        saved(auth, &context)?;
                         *context.ha_sync.borrow_mut() = HaSync::Paused;
                         context.ha_authentication(AuthenticationState::SignInRequired(
                             FailureReason::Cloud(error),
                         ));
                     } else {
-                        context.ha_authentication(AuthenticationState::Unavailable(
-                            FailureReason::Cloud(error),
-                        ));
+                        let delay = if error.is_temporary() {
+                            backoff.failed()
+                        } else {
+                            super::cloud::MEMBER_INTERVAL
+                        };
+                        let reason = FailureReason::Cloud(error);
+                        *context.ha_refresh_failure.borrow_mut() = Some(reason.clone());
+                        context.ha_authentication(AuthenticationState::Unavailable(reason));
+                        retry = Some(context.clock.now() + delay);
                     }
-                    // A maintenance network failure does not suspend a still-valid, unrejected token.
-                    retry = Some(context.clock.now() + delay);
                     eligibility_changed(&context, "cloud token maintenance failed");
-                }
-                Err(AuthError::Missing(_)) => {
-                    let current = saved(auth, &context)?;
-                    if current.ha_authorization().is_some() {
-                        *context.ha_sync.borrow_mut() = HaSync::Idle;
-                        context.ha_authentication(AuthenticationState::Checking);
-                        context.credentials_changed.notify(usize::MAX);
-                    }
-                    retry = None;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -180,7 +176,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
             .into_iter()
             .chain((!is_expired).then(|| deadline(&context, tokens.expires_at)))
             .min();
-        future::or(credentials_changed, async {
+        future::or(changed, async {
             if let Some(next) = next {
                 context.clock.wait_until(next).await;
             } else {
@@ -195,47 +191,95 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
     let mut backoff = Backoff::new(1, 30);
     let mut due = context.clock.now();
     let mut last_expiry = None;
+    let mut last_hub = None;
+    let mut maintained = None;
     loop {
         let changed = context.changed.listen();
         let record = saved(auth, &context)?;
         let report = auth.local_status()?;
-        let Some(validity) = report.certificate else {
-            context.certificate_unavailable(report.certificate_update);
-            changed.await;
-            continue;
-        };
-        if context.status.borrow().auth.certificate != Some(validity) {
-            context.certificate(validity, CertificateUpdate::NotNeeded);
+        let validity = report.certificate;
+        if last_hub.as_ref() != Some(&record.hub) {
+            last_hub = Some(record.hub.clone());
+            if let Some(validity) = validity {
+                context.certificate(validity, CertificateUpdate::NotNeeded);
+            } else {
+                context.certificate_unavailable(report.certificate_update);
+            }
+        }
+        let key = context.ha_key();
+        if maintained != key {
+            maintained = key.clone();
+            due = context.clock.now();
+            backoff = Backoff::new(1, 30);
         }
         let now = context.clock.unix_now();
-        if now >= validity.not_after && last_expiry != Some(validity.not_after) {
+        if let Some(validity) = validity
+            && now >= validity.not_after
+            && last_expiry != Some(validity.not_after)
+        {
             last_expiry = Some(validity.not_after);
             eligibility_changed(&context, "hub certificate expired");
         }
-        if validity.renewal_due(now) && context.token_usable() && context.clock.now() >= due {
-            let renewal = auth.renew_bridge_certificate(&record, || context.clock.unix_now());
-            let mut renewal = std::pin::pin!(renewal);
-            let result = if validity.currently_valid(now) {
-                match future::or(async { Some(renewal.as_mut().await) }, async {
-                    context
-                        .clock
-                        .wait_until(deadline(&context, validity.not_after))
-                        .await;
-                    last_expiry = Some(validity.not_after);
-                    eligibility_changed(&context, "hub certificate expired");
-                    None
-                })
-                .await
+        let needs_renewal = validity.is_none_or(|validity| validity.renewal_due(now));
+        if needs_renewal && context.token_usable() && context.clock.now() >= due {
+            let key = key.unwrap();
+            let attempt = async {
+                let renewal = auth
+                    .renew_bridge_certificate(&record, key.generation, || context.clock.unix_now());
+                let mut renewal = std::pin::pin!(renewal);
+                let result = if let Some(validity) =
+                    validity.filter(|validity| validity.currently_valid(now))
                 {
-                    Some(result) => result,
-                    None => renewal.await,
-                }
-            } else {
-                renewal.await
+                    match future::or(async { Some(renewal.as_mut().await) }, async {
+                        context
+                            .clock
+                            .wait_until(deadline(&context, validity.not_after))
+                            .await;
+                        None
+                    })
+                    .await
+                    {
+                        Some(result) => result,
+                        None => {
+                            let current = saved(auth, &context)?;
+                            if current.uid == record.uid && current.hub == record.hub {
+                                last_expiry = Some(validity.not_after);
+                                eligibility_changed(&context, "hub certificate expired");
+                            }
+                            renewal.await
+                        }
+                    }
+                } else {
+                    renewal.await
+                };
+                Ok::<_, AdapterError>(Some(result))
+            };
+            let result = future::or(attempt, async {
+                ha_retired(&context, &key).await;
+                Ok(None)
+            })
+            .await?;
+            let Some(result) = result else {
+                saved(auth, &context)?;
+                continue;
             };
             match result {
                 Ok(renewed) => {
-                    context.adopt_credentials(renewed.credentials)?;
+                    if !context.current_ha(&key) {
+                        saved(auth, &context)?;
+                        continue;
+                    }
+                    context.adopt_credentials(renewed.credentials);
+                    last_hub = Some(
+                        context
+                            .live
+                            .borrow()
+                            .credentials
+                            .as_ref()
+                            .unwrap()
+                            .hub
+                            .clone(),
+                    );
                     let failed = matches!(renewed.update, CertificateUpdate::Failed(_));
                     if let Some(validity) = renewed.validity {
                         context.certificate(validity, renewed.update);
@@ -247,113 +291,155 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                         backoff = Backoff::new(1, 30);
                     }
                 }
+                Err(AuthError::Missing(_)) => {
+                    saved(auth, &context)?;
+                }
                 Err(AuthError::Cloud(error)) => {
+                    let current = saved(auth, &context)?;
+                    if !context.current_ha(&key) {
+                        continue;
+                    }
+                    last_hub = Some(current.hub);
                     let delay = if error.is_temporary() {
                         backoff.failed()
                     } else {
                         super::cloud::MEMBER_INTERVAL
                     };
-                    let Some(authorization) = record.ha_authorization() else {
-                        continue;
-                    };
                     if error.is_unauthorized() {
-                        context.token_rejected(
-                            &authorization.tokens.access_token,
-                            FailureReason::Cloud(error.clone()),
-                        )?;
+                        context.token_rejected(&key, FailureReason::Cloud(error.clone()))?;
                     }
-                    let stale = !context.current_token(&authorization.tokens.access_token);
-                    context.certificate(
-                        validity,
-                        CertificateUpdate::Failed(FailureReason::Cloud(error)),
-                    );
-                    due = if stale {
-                        context.clock.now()
+                    let update = CertificateUpdate::Failed(FailureReason::Cloud(error));
+                    if let Some(validity) = validity {
+                        context.certificate(validity, update);
                     } else {
-                        context.clock.now() + delay
-                    };
+                        context.certificate_unavailable(update);
+                    }
+                    due = context.clock.now() + delay;
+                }
+                Err(AuthError::Failure(reason)) => {
+                    if !context.current_ha(&key) {
+                        continue;
+                    }
+                    let update = CertificateUpdate::Failed(reason);
+                    if let Some(validity) = validity {
+                        context.certificate(validity, update);
+                    } else {
+                        context.certificate_unavailable(update);
+                    }
+                    due = context.clock.now() + super::cloud::MEMBER_INTERVAL;
                 }
                 Err(error) => return Err(error.into()),
             }
             continue;
         }
-        let expiry = (now < validity.not_after).then(|| deadline(&context, validity.not_after));
-        let renewal = context
-            .token_usable()
-            .then(|| due.max(deadline(&context, validity.renewal_at())));
+        let expiry = validity
+            .filter(|validity| now < validity.not_after)
+            .map(|validity| deadline(&context, validity.not_after));
+        let renewal = context.token_usable().then(|| match validity {
+            Some(validity) => due.max(deadline(&context, validity.renewal_at())),
+            None => due,
+        });
         let next = expiry.into_iter().chain(renewal).min();
-        future::or(
-            async {
-                changed.await;
-            },
-            async {
-                if let Some(next) = next {
-                    context.clock.wait_until(next).await;
-                } else {
-                    future::pending::<()>().await;
-                }
-            },
-        )
+        future::or(changed, async {
+            if let Some(next) = next {
+                context.clock.wait_until(next).await;
+            } else {
+                future::pending::<()>().await;
+            }
+        })
         .await;
     }
 }
 
 async fn ha_identity(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {
     let mut checked = None;
+    let mut maintained = None;
     let mut backoff = Backoff::new(1, 30);
+    let mut retry = None;
+    let mut identity_failure: Option<FailureReason> = None;
     loop {
-        let changed = context.credentials_changed.listen();
+        let changed = context.ha_changed.listen();
         let record = saved(auth, &context)?;
-        let Some(authorization) = record.ha_authorization() else {
+        let Some(key) = context.ha_key() else {
+            maintained = None;
             checked = None;
             changed.await;
             continue;
         };
-        let token = authorization.tokens.access_token.clone();
-        let key = (
-            record.uid.clone(),
-            token.clone(),
-            authorization.tokens.expires_at,
-            authorization.tokens.refresh_at,
-        );
-        if !context.token_usable() || checked.as_ref() == Some(&key) {
+        if maintained.as_ref() != Some(&key) {
+            maintained = Some(key.clone());
+            checked = None;
+            retry = None;
+            identity_failure = None;
+            backoff = Backoff::new(1, 30);
+        }
+        if !context.token_available() || checked.as_ref() == Some(&key) {
             changed.await;
             continue;
         }
-        let result = auth.validate_bridge_ha(&record).await;
-        if !context.current_token(&token)
-            || context
-                .live
-                .borrow()
-                .credentials
-                .as_ref()
-                .is_none_or(|current| current.uid != record.uid)
+        if let Some(due) = retry
+            && context.clock.now() < due
         {
+            future::or(changed, context.clock.wait_until(due)).await;
+            continue;
+        }
+        retry = None;
+        let result = future::or(
+            async { Some(auth.validate_bridge_ha(&record).await) },
+            async {
+                ha_retired(&context, &key).await;
+                None
+            },
+        )
+        .await;
+        let Some(result) = result else {
+            saved(auth, &context)?;
+            continue;
+        };
+        if !context.current_ha(&key) {
+            saved(auth, &context)?;
+            continue;
+        }
+        if !context.token_available() {
             continue;
         }
         match result {
             Ok(()) => {
-                checked = Some(key);
+                checked = Some(key.clone());
                 backoff = Backoff::new(1, 30);
-                if !matches!(
-                    context.status.borrow().auth.ha,
-                    AuthenticationState::Refreshing
-                ) {
-                    context.ha_authentication(AuthenticationState::Authenticated);
+                *context.ha_verified.borrow_mut() = Some(key);
+                let should_report = {
+                    let status = context.status.borrow();
+                    matches!(status.auth.ha, AuthenticationState::Checking)
+                        || identity_failure.as_ref().is_some_and(|reason| {
+                            status.auth.ha == AuthenticationState::Unavailable(reason.clone())
+                        })
+                };
+                if should_report {
+                    let authentication = if context.ha_refresh_in_flight.get() {
+                        AuthenticationState::Refreshing
+                    } else {
+                        match context.ha_refresh_failure.borrow().clone() {
+                            Some(reason) => AuthenticationState::Unavailable(reason),
+                            None => AuthenticationState::Authenticated,
+                        }
+                    };
+                    context.ha_authentication(authentication);
                 }
+                identity_failure = None;
+                context.changed.notify(usize::MAX);
+                context.ha_changed.notify(usize::MAX);
             }
             Err(AuthError::Cloud(error)) if error.is_unauthorized() => {
-                checked = None;
-                context.token_rejected(&token, FailureReason::Cloud(error))?;
+                context.token_rejected(&key, FailureReason::Cloud(error))?;
             }
             Err(AuthError::Cloud(error)) => {
                 let temporary = error.is_temporary();
-                context.ha_authentication(AuthenticationState::Unavailable(FailureReason::Cloud(
-                    error,
-                )));
+                let reason = FailureReason::Cloud(error);
+                identity_failure = Some(reason.clone());
+                context.ha_authentication(AuthenticationState::Unavailable(reason));
                 if temporary {
-                    let due = context.clock.now() + backoff.failed();
-                    future::or(changed, context.clock.wait_until(due)).await;
+                    retry = Some(context.clock.now() + backoff.failed());
                 } else {
                     checked = Some(key);
                 }
@@ -370,7 +456,6 @@ async fn ha_identity(auth: &AuthService, context: Rc<Context>) -> Result<(), Ada
 
 async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {
     let mut backoff = Backoff::new(1, 30);
-    let mut maintained_generation = None;
     let mut retry_due = None;
     let mut blocked = false;
     loop {
@@ -379,16 +464,7 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
             .live
             .borrow()
             .mijia_generation
-            .clone()
-            .ok_or_else(|| {
-                AdapterError::Unavailable("Xiaomi account changed; restart after sign-in".into())
-            })?;
-        if maintained_generation.as_ref() != Some(&generation) {
-            maintained_generation = Some(generation.clone());
-            backoff = Backoff::new(1, 30);
-            retry_due = None;
-            blocked = false;
-        }
+            .expect("active account");
         let changed = context.mijia_changed.listen();
         let credentials_changed = context.credentials_changed.listen();
         let rejected = context.mijia_rejected.borrow().as_ref() == Some(&generation);
@@ -427,7 +503,7 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
         }
         retry_due = None;
         context.mijia_authentication(AuthenticationState::Restoring);
-        match auth.recover_mijia(&record, &generation).await {
+        match auth.recover_mijia(&record).await {
             Ok(_) => {
                 saved(auth, &context)?;
                 context.status.borrow_mut().auth.recovery_stop = None;
@@ -436,15 +512,9 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
                 context.refresh_changed.notify(usize::MAX);
                 backoff = Backoff::new(1, 30);
             }
-            Err(AuthError::Missing(_)) => {
-                saved(auth, &context)?;
-            }
             Err(AuthError::Storage(error)) => return Err(error.into()),
             Err(error) => {
                 let current = saved(auth, &context)?;
-                if context.live.borrow().mijia_generation.as_deref() != Some(&generation) {
-                    continue;
-                }
                 let stop = current.recovery.as_ref().and_then(|recovery| recovery.stop);
                 context.status.borrow_mut().auth.recovery_stop = stop;
                 let (reason, retry) = match error {

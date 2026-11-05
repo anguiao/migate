@@ -5,9 +5,11 @@ mod configuration_fan;
 mod configuration_sensors;
 mod configuration_temperature_bindings;
 pub(crate) mod fixtures;
+pub(crate) use super::xiaomi::fixture::XiaomiTestFixture;
 mod validity;
 
 mod configuration_states;
 
 mod lan;
 mod xiaomi;
+mod xiaomi_storage;

@@ -30,14 +30,20 @@ impl ControlPath {
         }
     }
 }
-/// A captured device session and its committed credential generation.
+/// A captured device session and its committed process-local credential identity.
 #[derive(Clone)]
 pub(super) struct CloudPath {
     pub(super) uid: String,
-    pub(super) generation: String,
+    pub(super) generation: u64,
     pub(super) home_id: Option<String>,
     pub(super) session: crate::xiaomi::mijia::MijiaSession,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct HaKey {
+    pub(super) uid: String,
+    pub(super) generation: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PathPriority {
     LocalFirst,

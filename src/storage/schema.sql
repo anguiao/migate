@@ -11,8 +11,7 @@ CREATE TABLE blobs (
 CREATE TABLE xiaomi_account (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uid TEXT NOT NULL,
-    region TEXT NOT NULL,
-    mijia_generation TEXT NOT NULL
+    region TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE xiaomi_account_recovery (
@@ -41,7 +40,6 @@ CREATE TABLE xiaomi_ha_client (
 
 CREATE TABLE xiaomi_ha_oauth (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    generation TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
     access_token TEXT NOT NULL,
     refresh_token TEXT NOT NULL,

@@ -19,6 +19,7 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
 #[test]
 fn successful_write_from_replaced_identical_session_does_not_change_new_generation_state() {
     let rig = Rig::new(true, &["one"]);
+    rig.enable_recovery();
     rig.cloud.lock().unwrap().online.insert("one".into());
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
@@ -33,8 +34,14 @@ fn successful_write_from_replaced_identical_session_does_not_change_new_generati
         assert!(poll_once(command.as_mut()).await.is_none());
         until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
         let record = c.store.xiaomi().load().unwrap().unwrap();
-        c.store.xiaomi().replace(&record).unwrap();
-        c.context.adopt_credentials(record).unwrap();
+        c.store
+            .xiaomi()
+            .update_recovery(
+                &record.recovery.as_ref().unwrap().credentials,
+                record.mijia.as_ref().unwrap(),
+            )
+            .unwrap();
+        c.context.adopt_credentials(record);
         release.send(()).unwrap();
         command.await.unwrap();
         assert_eq!(one.snapshot().power(), Some(Power::Off));
@@ -55,7 +62,12 @@ fn concurrent_unauthorized_writes_share_one_mijia_recovery_without_replay() {
     let (release_restore, restore_gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one", "two"]).await;
-        let old_generation = c.store.xiaomi().mijia_generation(&c.uid).unwrap().unwrap();
+        let old_generation = c
+            .store
+            .xiaomi()
+            .current_snapshot()
+            .mijia_generation()
+            .unwrap();
         let before_tokens = c.cloud.lock().unwrap().tokens;
         {
             let mut cloud = c.cloud.lock().unwrap();
@@ -80,12 +92,7 @@ fn concurrent_unauthorized_writes_share_one_mijia_recovery_without_replay() {
             c.cloud.lock().unwrap().property_status = 200;
             release_restore.send(()).unwrap();
             until(|| {
-                c.store
-                    .xiaomi()
-                    .mijia_generation(&c.uid)
-                    .unwrap()
-                    .as_deref()
-                    != Some(&old_generation)
+                c.store.xiaomi().current_snapshot().mijia_generation() != Some(old_generation)
             })
             .await;
             until(|| c.context.cloud_candidate("one", true).is_ok()).await;
@@ -104,8 +111,8 @@ fn device_http_remains_usable_without_ha_authorization() {
     rig.cloud.lock().unwrap().online.insert("one".into());
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
     record.ha = None;
-    rig.store.xiaomi().replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record).unwrap();
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one"]).await;
         function(&c.context.registry, "one", "outlet:2")
@@ -192,9 +199,7 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
         );
         errors.push(timeout);
         for error in errors {
-            c.context
-                .cloud_property_read_error(&token, &work, &error)
-                .unwrap();
+            c.context.cloud_property_read_error(&token, &work, &error);
             assert!(!c.context.http_paused.get());
             assert!(c.context.cloud_candidate("one", true).is_ok());
             assert!(c.context.cloud_candidate("two", true).is_ok());
@@ -224,20 +229,16 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             cloud_ready(&c, &["one", "two"]).await;
             let token = c.context.mijia_path().unwrap();
             let mut stale = token.clone();
-            stale.generation = "stale".into();
+            stale.generation = token.generation.wrapping_add(1);
             let work = c.context.live.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
             let error = background_property_error(200, code).await;
 
-            c.context
-                .cloud_property_read_error(&stale, &work, &error)
-                .unwrap();
+            c.context.cloud_property_read_error(&stale, &work, &error);
             assert!(c.context.cloud_candidate("one", true).is_ok());
-            c.context
-                .cloud_property_read_error(&token, &work, &error)
-                .unwrap();
+            c.context.cloud_property_read_error(&token, &work, &error);
             assert!(c.context.cloud_candidate("one", true).is_err());
             assert!(c.context.cloud_candidate("two", true).is_ok());
             assert!(!c.context.http_paused.get());
@@ -253,7 +254,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         cloud_ready(&c, &["one"]).await;
         let token = c.context.mijia_path().unwrap();
         let mut stale = token.clone();
-        stale.generation = "stale".into();
+        stale.generation = token.generation.wrapping_add(1);
         let work = c.context.live.borrow().devices["one"]
             .admitted
             .clone()
@@ -261,9 +262,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         let offline = background_property_error(200, -704_042_011).await;
         let unauthorized = background_property_error(401, 0).await;
         work.life.close();
-        c.context
-            .cloud_property_read_error(&token, &work, &offline)
-            .unwrap();
+        c.context.cloud_property_read_error(&token, &work, &offline);
         assert!(
             c.context.live.borrow().devices["one"]
                 .cloud_access
@@ -272,16 +271,11 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
                 .online
         );
         c.context
-            .cloud_property_read_error(&stale, &work, &unauthorized)
-            .unwrap();
+            .cloud_property_read_error(&stale, &work, &unauthorized);
         assert!(c.context.mijia_rejected.borrow().is_none());
         c.context
-            .cloud_property_read_error(&token, &work, &unauthorized)
-            .unwrap();
-        assert_eq!(
-            c.context.mijia_rejected.borrow().as_deref(),
-            Some(token.generation.as_str())
-        );
+            .cloud_property_read_error(&token, &work, &unauthorized);
+        assert_eq!(*c.context.mijia_rejected.borrow(), Some(token.generation));
     }));
 }
 

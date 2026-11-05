@@ -73,11 +73,13 @@ impl XiaomiAdapter {
         auth: AuthService,
     ) -> Result<(Self, TopologyReady), AdapterError> {
         let credentials = auth.saved_bridge_credentials()?;
-        let mijia_generation = credentials
+        let snapshot = store.xiaomi().current_snapshot();
+        let mijia_generation = snapshot.mijia_generation();
+        let ha_generation = snapshot.ha_generation();
+        let ha_stopped = credentials
             .as_ref()
-            .map(|record| store.xiaomi().mijia_generation(&record.uid))
-            .transpose()?
-            .flatten();
+            .and_then(|record| record.ha.as_ref())
+            .is_some_and(|ha| ha.stopped);
         let stored = store.devices().load_configuration()?;
         let scope = credentials
             .as_ref()
@@ -180,7 +182,15 @@ impl XiaomiAdapter {
             lan_test_endpoints: RefCell::new(BTreeMap::new()),
             #[cfg(test)]
             lan_timeout: Cell::new(Duration::from_secs(10)),
-            ha_sync: RefCell::new(super::credentials::HaSync::default()),
+            ha_sync: RefCell::new(if ha_stopped {
+                super::credentials::HaSync::Paused
+            } else {
+                super::credentials::HaSync::default()
+            }),
+            ha_verified: RefCell::new(None),
+            ha_refresh_failure: RefCell::new(None),
+            ha_refresh_in_flight: Cell::new(false),
+            ha_changed: Event::new(),
             mijia_rejected: RefCell::new(None),
             mijia_changed: Event::new(),
             http_paused: Cell::new(false),
@@ -192,6 +202,7 @@ impl XiaomiAdapter {
             live: RefCell::new(Live {
                 credentials,
                 mijia_generation,
+                ha_generation,
                 scope,
                 devices: BTreeMap::new(),
                 session: None,

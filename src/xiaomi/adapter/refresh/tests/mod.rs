@@ -124,7 +124,7 @@ fn satisfying_one_property_baseline_preserves_the_others() {
 fn cloud_path() -> ControlPath {
     ControlPath::Cloud(super::super::routing::CloudPath {
         uid: "account".into(),
-        generation: "generation".into(),
+        generation: 0,
         home_id: None,
         session: crate::xiaomi::mijia::MijiaSession::new(
             "account".into(),

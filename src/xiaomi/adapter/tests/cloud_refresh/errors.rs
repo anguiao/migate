@@ -236,8 +236,7 @@ fn foreground_cloud_read_unauthorized_rejects_current_credentials() {
         let before = c.cloud.lock().unwrap().tokens;
         work(&c, "one").refresh_property("outlet:2", PropertyBinding { siid: 2, piid: 1 });
         c.clock.advance(Duration::from_millis(201));
-        until(|| c.context.mijia_rejected.borrow().as_deref() == Some(token.generation.as_str()))
-            .await;
+        until(|| *c.context.mijia_rejected.borrow() == Some(token.generation)).await;
         assert_eq!(c.cloud.lock().unwrap().tokens, before);
         assert!(c.context.cloud_candidate("one", true).is_err());
         assert!(c.context.http_paused.get());

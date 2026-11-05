@@ -1,5 +1,7 @@
 #[path = "support/process.rs"]
 mod process_support;
+#[path = "support/xiaomi_fixture.rs"]
+mod xiaomi_fixture;
 use migate::storage::{TokenSet, XiaomiRecord};
 use process_support::{Stream, TIMEOUT, TestProcess};
 use rusqlite::Connection;
@@ -133,9 +135,9 @@ fn logout_clears_corrupt_credentials_and_preserves_identity_and_matter_data() {
     let store = migate::storage::Store::open(directory.path()).unwrap();
     let identity = store.load_identity().unwrap();
     store.matter().put(7, b"paired").unwrap();
-    store
-        .xiaomi()
-        .replace(&XiaomiRecord {
+    xiaomi_fixture::seed(
+        &store.xiaomi(),
+        &XiaomiRecord {
             uid: "uid".into(),
             region: "cn".into(),
             recovery: None,
@@ -158,8 +160,8 @@ fn logout_clears_corrupt_credentials_and_preserves_identity_and_matter_data() {
                 private_key_pem: "broken-key".into(),
                 certificate_pem: Some("broken-certificate".into()),
             }),
-        })
-        .unwrap();
+        },
+    );
     Connection::open(store.path())
         .unwrap()
         .execute("UPDATE xiaomi_account SET region = 'us'", [])
@@ -298,7 +300,7 @@ fn login_signal_reports_and_preserves_existing_credential_groups() {
         }),
         hub: None,
     };
-    store.xiaomi().replace(&previous).unwrap();
+    xiaomi_fixture::seed(&store.xiaomi(), &previous);
     drop(store);
     let process = blocked_login(directory.path());
     let (status, stdout, stderr) = process.signal_failure("-TERM");

@@ -207,7 +207,7 @@ fn reserve_cloud_batch(
 struct CloudPoll {
     next: Duration,
     backoff: Backoff,
-    identity: Option<(String, String)>,
+    identity: Option<(String, u64)>,
     generation: u64,
 }
 impl Default for CloudPoll {

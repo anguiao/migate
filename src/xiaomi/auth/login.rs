@@ -130,16 +130,12 @@ impl AuthService {
             .map_err(|error| login_step("certificate preparation", error))?;
         report.mijia = AuthenticationState::Authenticated;
         report.ha = AuthenticationState::Authenticated;
-        let generation = self
-            .ha_generation(&authorization)
-            .map_err(|error| login_step("certificate preparation", error))?;
         let mut session = CheckSession {
             auth: self,
             redirect_uri: &authorization.redirect_uri,
             tokens: authorization.tokens,
             refreshed: false,
             refresh_succeeded: false,
-            generation,
         };
         self.maintain_certificate(&stored.record, stored.validity, &mut session, &mut report)
             .await

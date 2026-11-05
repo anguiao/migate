@@ -121,6 +121,25 @@ impl XiaomiRecord {
     }
 }
 
+/// Process-local identities for asynchronous operations using saved credentials.
+#[derive(Clone)]
+pub(crate) struct CredentialSnapshot {
+    pub(crate) record: Option<XiaomiRecord>,
+    pub(crate) mijia_generation: u64,
+    pub(crate) ha_generation: u64,
+}
+
+impl CredentialSnapshot {
+    pub(crate) fn mijia_generation(&self) -> Option<u64> {
+        self.record.as_ref().map(|_| self.mijia_generation)
+    }
+
+    pub(crate) fn ha_generation(&self) -> Option<u64> {
+        self.record.as_ref()?.ha_authorization()?;
+        Some(self.ha_generation)
+    }
+}
+
 #[derive(Clone)]
 pub struct XiaomiStore {
     store: Store,
@@ -146,6 +165,56 @@ impl XiaomiStore {
                 InvalidCredentials,
             ),
         })
+    }
+
+    /// Initialize the runtime snapshot at the storage boundary once per Store.
+    pub(crate) fn snapshot(&self) -> Result<CredentialSnapshot, StorageError> {
+        if self.store.xiaomi_state().borrow().is_none() {
+            let record = self.load()?;
+            *self.store.xiaomi_state().borrow_mut() = Some(CredentialSnapshot {
+                record,
+                mijia_generation: 0,
+                ha_generation: 0,
+            });
+        }
+        Ok(self.current_snapshot())
+    }
+
+    pub(crate) fn current_snapshot(&self) -> CredentialSnapshot {
+        self.store
+            .xiaomi_state()
+            .borrow()
+            .as_ref()
+            .expect("credentials initialized")
+            .clone()
+    }
+
+    pub(crate) fn current_mijia(&self, uid: &str, generation: u64) -> bool {
+        self.store
+            .xiaomi_state()
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| {
+                state.mijia_generation() == Some(generation)
+                    && state
+                        .record
+                        .as_ref()
+                        .is_some_and(|record| record.uid == uid)
+            })
+    }
+
+    pub(crate) fn current_ha(&self, uid: &str, generation: u64) -> bool {
+        self.store
+            .xiaomi_state()
+            .borrow()
+            .as_ref()
+            .is_some_and(|state| {
+                state.ha_generation() == Some(generation)
+                    && state
+                        .record
+                        .as_ref()
+                        .is_some_and(|record| record.uid == uid)
+            })
     }
 
     fn load_inner(&self) -> Result<Option<XiaomiRecord>, LoadError> {
@@ -257,47 +326,6 @@ impl XiaomiStore {
         Ok(Some(record))
     }
 
-    /// Replace the complete record transactionally. Independent maintenance
-    /// should use the focused update methods so other groups are preserved.
-    pub fn replace(&self, record: &XiaomiRecord) -> Result<(), StorageError> {
-        self.validate(record)?;
-        (|| {
-            let tx = self.store.connection().unchecked_transaction()?;
-            tx.execute("DELETE FROM xiaomi_lan WHERE uid <> ?1", [&record.uid])?;
-            tx.execute(
-                "INSERT INTO xiaomi_account (id, uid, region, mijia_generation) VALUES (1, ?1, ?2, ?3)
-                ON CONFLICT (id) DO UPDATE SET uid = excluded.uid, region = excluded.region, mijia_generation = excluded.mijia_generation",
-                (&record.uid, &record.region, Uuid::new_v4().to_string()),
-            )?;
-            for table in [
-                "xiaomi_account_recovery",
-                "xiaomi_mijia_session",
-                "xiaomi_ha_oauth",
-                "xiaomi_ha_client",
-                "xiaomi_hub",
-            ] {
-                tx.execute(&format!("DELETE FROM {table}"), [])?;
-            }
-            if let Some(recovery) = &record.recovery {
-                write_recovery(&tx, &recovery.credentials, recovery.stop)?;
-            }
-            if let Some(session) = &record.mijia {
-                write_session(&tx, session)?;
-            }
-            if let Some(ha) = &record.ha {
-                write_ha(&tx, ha)?;
-            }
-            if let Some(hub) = &record.hub {
-                write_hub(&tx, hub)?;
-            }
-            tx.commit()
-        })()
-        .map_err(|error| {
-            self.store
-                .database_error("replace Xiaomi credentials", error)
-        })
-    }
-
     /// Commit all credentials obtained during one login while preserving the
     /// existing hub identity. This is the only maintenance operation that
     /// clears both durable stop flags.
@@ -334,68 +362,27 @@ impl XiaomiStore {
             if old_client.as_deref().is_some_and(|uuid| uuid != client_uuid) {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            tx.execute("INSERT INTO xiaomi_account (id, uid, region, mijia_generation) VALUES (1, ?1, 'cn', ?2) ON CONFLICT(id) DO UPDATE SET mijia_generation = excluded.mijia_generation", (&candidate.uid, Uuid::new_v4().to_string()))?;
+            tx.execute("INSERT INTO xiaomi_account (id, uid, region) VALUES (1, ?1, 'cn') ON CONFLICT(id) DO NOTHING", [&candidate.uid])?;
             write_recovery(&tx, credentials, None)?;
             write_session(&tx, session)?;
             write_ha(&tx, candidate.ha.as_ref().expect("candidate includes HA client"))?;
             tx.commit()
-        })().map_err(|error| self.store.database_error("commit Xiaomi login", error))
+        })().map_err(|error| self.store.database_error("commit Xiaomi login", error))?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            let mut candidate = candidate;
+            candidate.hub = state.record.as_ref().and_then(|record| record.hub.clone());
+            state.record = Some(candidate);
+            state.mijia_generation = state.mijia_generation.wrapping_add(1);
+            state.ha_generation = state.ha_generation.wrapping_add(1);
+        }
+        Ok(())
     }
 
-    /// Replace a restored account credential and device session together.
-    pub fn update_recovery(
+    pub(crate) fn update_recovery(
         &self,
         credentials: &AccountCredentials,
         session: &MijiaSession,
     ) -> Result<(), StorageError> {
-        let current = self.load()?.ok_or_else(|| {
-            StorageError::new(self.path(), "update Xiaomi recovery", InvalidCredentials)
-        })?;
-        if current.uid != credentials.user_id() || current.uid != session.user_id() {
-            return Err(StorageError::new(
-                self.path(),
-                "validate Xiaomi recovery",
-                InvalidCredentials,
-            ));
-        }
-        let stop = current.recovery.as_ref().and_then(|recovery| recovery.stop);
-        (|| {
-            let tx = self.store.connection().unchecked_transaction()?;
-            tx.execute(
-                "UPDATE xiaomi_account SET mijia_generation = ?1 WHERE id = 1",
-                [Uuid::new_v4().to_string()],
-            )
-            .and_then(require_record)?;
-            write_recovery(&tx, credentials, stop)?;
-            write_session(&tx, session)?;
-            tx.commit()
-        })()
-        .map_err(|error| self.store.database_error("update Xiaomi recovery", error))
-    }
-
-    /// Capture the generation alongside an account snapshot before starting
-    /// asynchronous device requests or account recovery.
-    pub(crate) fn mijia_generation(&self, uid: &str) -> Result<Option<String>, StorageError> {
-        self.store
-            .connection()
-            .query_row(
-                "SELECT mijia_generation FROM xiaomi_account WHERE id = 1 AND uid = ?1",
-                [uid],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| {
-                self.store
-                    .database_error("read Mijia session generation", error)
-            })
-    }
-
-    pub(crate) fn update_recovery_if_current(
-        &self,
-        credentials: &AccountCredentials,
-        session: &MijiaSession,
-        generation: &str,
-    ) -> Result<bool, StorageError> {
         if credentials.user_id() != session.user_id() {
             return Err(StorageError::new(
                 self.path(),
@@ -405,158 +392,110 @@ impl XiaomiStore {
         }
         (|| {
             let tx = self.store.connection().unchecked_transaction()?;
-            let changed = tx.execute(
-                "UPDATE xiaomi_account SET mijia_generation = ?1
-                 WHERE id = 1 AND uid = ?2 AND mijia_generation = ?3
-                   AND EXISTS (SELECT 1 FROM xiaomi_account_recovery WHERE id = 1 AND stopped IS NULL)",
-                (Uuid::new_v4().to_string(), credentials.user_id(), generation),
-            )?;
-            if changed == 0 {
-                return Ok(false);
-            }
             write_recovery(&tx, credentials, None)?;
             write_session(&tx, session)?;
-            tx.commit()?;
-            Ok(true)
+            tx.commit()
         })()
-        .map_err(|error| self.store.database_error("update Xiaomi recovery", error))
+        .map_err(|error| self.store.database_error("update Xiaomi recovery", error))?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            let record = state.record.as_mut().expect("initialized account");
+            record.recovery = Some(AccountRecovery {
+                credentials: credentials.clone(),
+                stop: None,
+            });
+            record.mijia = Some(session.clone());
+            state.mijia_generation = state.mijia_generation.wrapping_add(1);
+        }
+        Ok(())
     }
 
-    pub(crate) fn stop_recovery_if_current(
-        &self,
-        uid: &str,
-        generation: &str,
-        stop: RecoveryStop,
-    ) -> Result<bool, StorageError> {
-        self.store
-            .connection()
-            .execute(
-                "UPDATE xiaomi_account_recovery SET stopped = ?1
-                 WHERE id = 1 AND stopped IS NULL
-                   AND EXISTS (SELECT 1 FROM xiaomi_account
-                               WHERE id = 1 AND uid = ?2 AND mijia_generation = ?3)",
-                (stop.as_str(), uid, generation),
-            )
-            .map(|changed| changed == 1)
-            .map_err(|error| self.store.database_error("stop Xiaomi recovery", error))
-    }
-
-    pub fn stop_recovery(&self, stop: RecoveryStop) -> Result<(), StorageError> {
+    pub(crate) fn stop_recovery(&self, stop: RecoveryStop) -> Result<(), StorageError> {
         self.store
             .connection()
             .execute(
                 "UPDATE xiaomi_account_recovery SET stopped = ?1 WHERE id = 1",
                 [stop.as_str()],
             )
-            .and_then(require_record)
-            .map_err(|error| self.store.database_error("stop Xiaomi recovery", error))
+            .map_err(|error| self.store.database_error("stop Xiaomi recovery", error))?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            state
+                .record
+                .as_mut()
+                .expect("initialized account")
+                .recovery
+                .as_mut()
+                .expect("recovery credentials")
+                .stop = Some(stop);
+        }
+        Ok(())
     }
 
-    pub fn stop_ha_refresh(&self) -> Result<(), StorageError> {
+    pub(crate) fn stop_ha_refresh(&self) -> Result<(), StorageError> {
         self.store
             .connection()
             .execute("UPDATE xiaomi_ha_client SET stopped = 1 WHERE id = 1", [])
-            .and_then(require_record)
-            .map_err(|error| self.store.database_error("stop HA refresh", error))
+            .map_err(|error| self.store.database_error("stop HA refresh", error))?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            state
+                .record
+                .as_mut()
+                .expect("initialized account")
+                .ha
+                .as_mut()
+                .expect("HA client")
+                .stopped = true;
+        }
+        Ok(())
     }
 
-    pub(crate) fn ha_refresh_generation(
-        &self,
-        redirect_uri: &str,
-        tokens: &TokenSet,
-    ) -> Result<Option<String>, StorageError> {
-        self.store
-            .connection()
-            .query_row(
-                "SELECT oauth.generation FROM xiaomi_ha_oauth AS oauth
-             JOIN xiaomi_ha_client AS client ON client.id = oauth.id
-             WHERE oauth.id = 1 AND client.stopped = 0
-               AND oauth.redirect_uri = ?1 AND oauth.access_token = ?2
-               AND oauth.refresh_token = ?3 AND oauth.expires_at = ?4 AND oauth.refresh_at = ?5",
-                (
-                    redirect_uri,
-                    &tokens.access_token,
-                    &tokens.refresh_token,
-                    tokens.expires_at,
-                    tokens.refresh_at,
-                ),
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| {
-                self.store
-                    .database_error("read HA authorization generation", error)
-            })
-    }
-
-    pub(crate) fn stop_ha_refresh_if_current(
-        &self,
-        generation: &str,
-    ) -> Result<bool, StorageError> {
-        self.store
-            .connection()
-            .execute(
-                "UPDATE xiaomi_ha_client SET stopped = 1 WHERE id = 1
-             AND EXISTS (SELECT 1 FROM xiaomi_ha_oauth WHERE id = 1 AND generation = ?1)",
-                [generation],
-            )
-            .map(|changed| changed == 1)
-            .map_err(|error| self.store.database_error("stop HA refresh", error))
-    }
-
-    pub fn update_tokens(&self, tokens: &TokenSet) -> Result<(), StorageError> {
-        validate_tokens(tokens)
-            .map_err(|error| StorageError::new(self.path(), "validate Xiaomi tokens", error))?;
-        self.store.connection().execute("UPDATE xiaomi_ha_oauth SET access_token = ?1, refresh_token = ?2, expires_at = ?3, refresh_at = ?4, generation = ?5 WHERE id = 1",
-            (&tokens.access_token, &tokens.refresh_token, tokens.expires_at, tokens.refresh_at, Uuid::new_v4().to_string()))
-            .and_then(require_record).map_err(|error| self.store.database_error("update Xiaomi tokens", error))
-    }
-
-    pub(crate) fn update_tokens_if_current(
-        &self,
-        tokens: &TokenSet,
-        generation: &str,
-    ) -> Result<bool, StorageError> {
+    pub(crate) fn update_tokens(&self, tokens: &TokenSet) -> Result<(), StorageError> {
         validate_tokens(tokens)
             .map_err(|error| StorageError::new(self.path(), "validate Xiaomi tokens", error))?;
         self.store
             .connection()
             .execute(
                 "UPDATE xiaomi_ha_oauth SET access_token = ?1, refresh_token = ?2,
-                expires_at = ?3, refresh_at = ?4, generation = ?5
-             WHERE id = 1 AND generation = ?6
-               AND EXISTS (SELECT 1 FROM xiaomi_ha_client WHERE id = 1 AND stopped = 0)",
+             expires_at = ?3, refresh_at = ?4 WHERE id = 1",
                 (
                     &tokens.access_token,
                     &tokens.refresh_token,
                     tokens.expires_at,
                     tokens.refresh_at,
-                    Uuid::new_v4().to_string(),
-                    generation,
                 ),
             )
-            .map(|changed| changed == 1)
-            .map_err(|error| self.store.database_error("update Xiaomi tokens", error))
+            .map_err(|error| self.store.database_error("update Xiaomi tokens", error))?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            state
+                .record
+                .as_mut()
+                .expect("initialized account")
+                .ha
+                .as_mut()
+                .expect("HA client")
+                .authorization
+                .as_mut()
+                .expect("HA authorization")
+                .tokens = tokens.clone();
+            state.ha_generation = state.ha_generation.wrapping_add(1);
+        }
+        Ok(())
     }
 
-    pub fn update_hub(&self, hub: &HubIdentity) -> Result<(), StorageError> {
+    pub(crate) fn create_hub(&self, hub: &HubIdentity) -> Result<(), StorageError> {
         validate_hub(hub).map_err(|error| {
             StorageError::new(self.path(), "validate Xiaomi hub identity", error)
         })?;
-        if self.load()?.is_none() {
-            return Err(StorageError::new(
-                self.path(),
-                "update Xiaomi hub identity",
-                InvalidCredentials,
-            ));
+        self.store.connection().execute(
+            "INSERT INTO xiaomi_hub (id, virtual_did, private_key_pem, certificate_pem) VALUES (1, ?1, ?2, ?3)",
+            (&hub.virtual_did, &hub.private_key_pem, &hub.certificate_pem),
+        ).map_err(|error| self.store.database_error("create Xiaomi hub identity", error))?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            state.record.as_mut().expect("initialized account").hub = Some(hub.clone());
         }
-        write_hub(self.store.connection(), hub).map_err(|error| {
-            self.store
-                .database_error("update Xiaomi hub identity", error)
-        })
+        Ok(())
     }
 
-    pub fn update_certificate(&self, certificate_pem: &str) -> Result<(), StorageError> {
+    pub(crate) fn update_certificate(&self, certificate_pem: &str) -> Result<(), StorageError> {
         validate_pem(certificate_pem).map_err(|error| {
             StorageError::new(self.path(), "validate Xiaomi certificate", error)
         })?;
@@ -566,11 +505,21 @@ impl XiaomiStore {
                 "UPDATE xiaomi_hub SET certificate_pem = ?1 WHERE id = 1",
                 [certificate_pem],
             )
-            .and_then(require_record)
             .map_err(|error| {
                 self.store
                     .database_error("update Xiaomi certificate", error)
-            })
+            })?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            state
+                .record
+                .as_mut()
+                .expect("initialized account")
+                .hub
+                .as_mut()
+                .expect("hub identity")
+                .certificate_pem = Some(certificate_pem.to_owned());
+        }
+        Ok(())
     }
 
     pub fn logout(&self) -> Result<(), StorageError> {
@@ -592,7 +541,13 @@ impl XiaomiStore {
         .map_err(|error| {
             self.store
                 .database_error("delete Xiaomi credentials", error)
-        })
+        })?;
+        if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
+            state.record = None;
+            state.mijia_generation = state.mijia_generation.wrapping_add(1);
+            state.ha_generation = state.ha_generation.wrapping_add(1);
+        }
+        Ok(())
     }
 
     fn validate(&self, record: &XiaomiRecord) -> Result<(), StorageError> {
@@ -627,17 +582,10 @@ fn write_ha(db: &Connection, ha: &HaClient) -> rusqlite::Result<()> {
     )?;
     if let Some(authorization) = &ha.authorization {
         let tokens = &authorization.tokens;
-        db.execute("INSERT INTO xiaomi_ha_oauth (id, redirect_uri, access_token, refresh_token, expires_at, refresh_at, generation) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
-            ON CONFLICT(id) DO UPDATE SET redirect_uri=excluded.redirect_uri, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at, refresh_at=excluded.refresh_at, generation=excluded.generation",
-            (&authorization.redirect_uri, &tokens.access_token, &tokens.refresh_token, tokens.expires_at, tokens.refresh_at, Uuid::new_v4().to_string()))?;
+        db.execute("INSERT INTO xiaomi_ha_oauth (id, redirect_uri, access_token, refresh_token, expires_at, refresh_at) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(id) DO UPDATE SET redirect_uri=excluded.redirect_uri, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at, refresh_at=excluded.refresh_at",
+            (&authorization.redirect_uri, &tokens.access_token, &tokens.refresh_token, tokens.expires_at, tokens.refresh_at))?;
     }
-    Ok(())
-}
-
-fn write_hub(db: &Connection, hub: &HubIdentity) -> rusqlite::Result<()> {
-    db.execute("INSERT INTO xiaomi_hub (id, virtual_did, private_key_pem, certificate_pem) VALUES (1, ?1, ?2, ?3)
-        ON CONFLICT(id) DO UPDATE SET virtual_did=excluded.virtual_did, private_key_pem=excluded.private_key_pem, certificate_pem=excluded.certificate_pem",
-        (&hub.virtual_did, &hub.private_key_pem, &hub.certificate_pem))?;
     Ok(())
 }
 
@@ -740,10 +688,7 @@ fn validate_pem(value: &str) -> Result<(), InvalidCredentials> {
         Ok(())
     }
 }
-fn require_record(changed: usize) -> rusqlite::Result<()> {
-    if changed == 1 {
-        Ok(())
-    } else {
-        Err(rusqlite::Error::QueryReturnedNoRows)
-    }
-}
+
+#[cfg(test)]
+#[path = "tests/xiaomi_fixture.rs"]
+pub(crate) mod fixture;

@@ -56,7 +56,7 @@ pub(super) fn read_cloud_batch(
             || flight.life.is_closed()
             || work.life.is_closed()
             || !flight.current(&context, did, &reads[0].id)
-            || !context.current_mijia(credentials)?
+            || !context.current_mijia(credentials)
         {
             None
         } else {
@@ -85,7 +85,7 @@ pub(super) fn read_cloud_batch(
         let current = !flight.life.is_closed()
             && !work.life.is_closed()
             && flight.current(&context, did, &reads[0].id)
-            && context.current_mijia(credentials)?;
+            && context.current_mijia(credentials);
         if let Some((poll, generation)) = &poll {
             match &result {
                 Some(Err(error)) if current && error.is_temporary() => {
@@ -153,7 +153,7 @@ pub(super) fn read_cloud_batch(
                         &stamps[index],
                     );
                 }
-                context.cloud_property_read_error(credentials, &work, &error)?;
+                context.cloud_property_read_error(credentials, &work, &error);
                 for index in selected {
                     results[index] = Some(Err(error.clone()));
                 }
@@ -164,7 +164,7 @@ pub(super) fn read_cloud_batch(
             reads.into_iter().zip(stamps).zip(results).enumerate()
         {
             if !batch_error && let Some(Err(error)) = &result {
-                context.cloud_property_read_error(credentials, &work, error)?;
+                context.cloud_property_read_error(credentials, &work, error);
             }
             if work.life.is_closed() || !work.contains(&read.id, read.binding) {
                 cleanups[index].retry = false;
