@@ -197,7 +197,20 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
         })
         .unwrap();
     rig.clock.automatic.store(true, Ordering::Relaxed);
-    let mut tokens = rig.store.xiaomi().load().unwrap().unwrap().tokens;
+    let mut tokens = rig
+        .store
+        .xiaomi()
+        .load()
+        .unwrap()
+        .unwrap()
+        .ha
+        .as_ref()
+        .unwrap()
+        .authorization
+        .as_ref()
+        .unwrap()
+        .tokens
+        .clone();
     tokens.refresh_at = 1;
     tokens.expires_at = 1;
     rig.store.xiaomi().update_tokens(&tokens).unwrap();

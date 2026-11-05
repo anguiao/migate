@@ -6,17 +6,24 @@ pub(super) fn credentials() -> XiaomiRecord {
     XiaomiRecord {
         uid: "account".into(),
         region: "cn".into(),
-        oauth_client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-        redirect_uri: "unused".into(),
-        tokens: TokenSet {
-            access_token: "access-secret".into(),
-            refresh_token: "refresh-secret".into(),
-            expires_at: 1,
-            refresh_at: 1,
-        },
-        virtual_did: "different-local-identity".into(),
-        private_key_pem: "unused".into(),
-        certificate_pem: "unused".into(),
+        recovery: None,
+        mijia: None,
+        ha: Some(crate::storage::HaClient {
+            client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            authorization: Some(crate::storage::HaAuthorization {
+                redirect_uri:
+                    "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
+                        .into(),
+                tokens: TokenSet {
+                    access_token: "access-secret".into(),
+                    refresh_token: "refresh-secret".into(),
+                    expires_at: 1,
+                    refresh_at: 1,
+                },
+            }),
+            stopped: false,
+        }),
+        hub: None,
     }
 }
 

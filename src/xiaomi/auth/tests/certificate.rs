@@ -25,19 +25,29 @@ fn certificate_renewal_reuses_key_and_failure_is_independent_from_authentication
         CertificateUpdate::Updated
     ));
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(saved.private_key_pem, old.private_key_pem);
-    assert_eq!(saved.virtual_did, old.virtual_did);
-    assert_ne!(saved.certificate_pem, old.certificate_pem);
+    assert_eq!(
+        saved.hub.as_ref().unwrap().private_key_pem,
+        old.hub.as_ref().unwrap().private_key_pem
+    );
+    assert_eq!(
+        saved.hub.as_ref().unwrap().virtual_did,
+        old.hub.as_ref().unwrap().virtual_did
+    );
+    assert_ne!(
+        saved.hub.as_ref().unwrap().certificate_pem,
+        old.hub.as_ref().unwrap().certificate_pem
+    );
 
     let mut expiring = saved;
     let identity = ClientIdentity::from_private_key(
         &expiring.uid,
-        &expiring.virtual_did,
-        &expiring.private_key_pem,
+        &expiring.hub.as_ref().unwrap().virtual_did,
+        &expiring.hub.as_ref().unwrap().private_key_pem,
     )
     .unwrap();
-    expiring.certificate_pem = sign_csr(&identity.csr_pem, NOW - 60, NOW + 60).unwrap();
-    let old_cert = expiring.certificate_pem.clone();
+    expiring.hub.as_mut().unwrap().certificate_pem =
+        Some(sign_csr(&identity.csr_pem, NOW - 60, NOW + 60).unwrap());
+    let old_cert = expiring.hub.as_ref().unwrap().certificate_pem.clone();
     store.xiaomi().replace(&expiring).unwrap();
     let (auth, _) = service(
         &store,
@@ -56,7 +66,15 @@ fn certificate_renewal_reuses_key_and_failure_is_independent_from_authentication
         CertificateUpdate::Failed(_)
     ));
     assert_eq!(
-        store.xiaomi().load().unwrap().unwrap().certificate_pem,
+        store
+            .xiaomi()
+            .load()
+            .unwrap()
+            .unwrap()
+            .hub
+            .as_ref()
+            .unwrap()
+            .certificate_pem,
         old_cert
     );
 }
@@ -66,11 +84,15 @@ fn future_certificate_with_three_days_remaining_is_renewed() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000);
-    let identity =
-        ClientIdentity::from_private_key(&record.uid, &record.virtual_did, &record.private_key_pem)
-            .unwrap();
-    record.certificate_pem = sign_csr(&identity.csr_pem, NOW + 100, NOW + 1_000).unwrap();
-    let old_certificate = record.certificate_pem.clone();
+    let identity = ClientIdentity::from_private_key(
+        &record.uid,
+        &record.hub.as_ref().unwrap().virtual_did,
+        &record.hub.as_ref().unwrap().private_key_pem,
+    )
+    .unwrap();
+    record.hub.as_mut().unwrap().certificate_pem =
+        Some(sign_csr(&identity.csr_pem, NOW + 100, NOW + 1_000).unwrap());
+    let old_certificate = record.hub.as_ref().unwrap().certificate_pem.clone();
     store.xiaomi().replace(&record).unwrap();
     let (base, requests) = dynamic_mock_server(2, |request| {
         if request.target.ends_with("gethome") {
@@ -90,7 +112,15 @@ fn future_certificate_with_three_days_remaining_is_renewed() {
         CertificateUpdate::Updated
     ));
     assert_ne!(
-        store.xiaomi().load().unwrap().unwrap().certificate_pem,
+        store
+            .xiaomi()
+            .load()
+            .unwrap()
+            .unwrap()
+            .hub
+            .as_ref()
+            .unwrap()
+            .certificate_pem,
         old_certificate
     );
     assert_eq!(requests.try_iter().count(), 2);
@@ -129,7 +159,7 @@ fn certificate_401_refresh_failures_report_failed_renewal_and_cloud_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let record = valid_record("uid", "access", NOW + 500, NOW + 60);
-        let old_certificate = record.certificate_pem.clone();
+        let old_certificate = record.hub.as_ref().unwrap().certificate_pem.clone();
         store.xiaomi().replace(&record).unwrap();
         let (auth, _) = service(&store, responses);
         let report = block_on(auth.check()).unwrap();
@@ -158,7 +188,15 @@ fn certificate_401_refresh_failures_report_failed_renewal_and_cloud_state() {
             })
         );
         assert_eq!(
-            store.xiaomi().load().unwrap().unwrap().certificate_pem,
+            store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .hub
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
             old_certificate
         );
     }
@@ -215,10 +253,14 @@ fn offline_keeps_real_certificate_validity_and_future_or_expired_is_unsuccessful
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let mut record = valid_record("uid", "access", NOW + 500, not_after.max(NOW + 1));
-        let identity =
-            ClientIdentity::from_private_key("uid", &record.virtual_did, &record.private_key_pem)
-                .unwrap();
-        record.certificate_pem = sign_csr(&identity.csr_pem, not_before, not_after).unwrap();
+        let identity = ClientIdentity::from_private_key(
+            "uid",
+            &record.hub.as_ref().unwrap().virtual_did,
+            &record.hub.as_ref().unwrap().private_key_pem,
+        )
+        .unwrap();
+        record.hub.as_mut().unwrap().certificate_pem =
+            Some(sign_csr(&identity.csr_pem, not_before, not_after).unwrap());
         store.xiaomi().replace(&record).unwrap();
         let (auth, _) = service(&store, vec![MockResponse::json(500, "offline")]);
         let report = block_on(auth.check()).unwrap();

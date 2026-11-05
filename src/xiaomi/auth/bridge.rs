@@ -4,7 +4,7 @@ use crate::{storage::XiaomiRecord, xiaomi::certificate::CertificateValidity};
 #[derive(Debug)]
 pub(crate) struct BridgeCertificate {
     pub(crate) credentials: XiaomiRecord,
-    pub(crate) validity: CertificateValidity,
+    pub(crate) validity: Option<CertificateValidity>,
     pub(crate) update: CertificateUpdate,
 }
 
@@ -14,7 +14,13 @@ impl AuthService {
         record: &XiaomiRecord,
         now: impl Fn() -> i64,
     ) -> Result<XiaomiRecord, AuthError> {
-        self.refresh_tokens_once(&record.redirect_uri, &record.tokens.refresh_token, now)
+        let authorization = record
+            .ha
+            .as_ref()
+            .filter(|ha| !ha.stopped)
+            .and_then(|ha| ha.authorization.as_ref())
+            .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
+        self.refresh_tokens_once(&authorization.redirect_uri, &authorization.tokens, now)
             .await?;
         Ok(self.reload_credentials()?.record)
     }
@@ -25,9 +31,15 @@ impl AuthService {
         now: impl Fn() -> i64,
     ) -> Result<super::BridgeCertificate, AuthError> {
         let identity = self.client_identity(record)?;
+        let authorization = record
+            .ha
+            .as_ref()
+            .filter(|ha| !ha.stopped)
+            .and_then(|ha| ha.authorization.as_ref())
+            .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
         let certificate = self
             .cloud
-            .get_certificate(&record.tokens.access_token, &identity.csr_pem)
+            .get_certificate(&authorization.tokens.access_token, &identity.csr_pem)
             .await
             .map_err(AuthError::Cloud)?;
         let update = match self.save_certificate_response(record, &certificate, now())? {

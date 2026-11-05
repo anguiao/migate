@@ -267,14 +267,17 @@ impl Context {
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
             _ if direct.is_some() => direct.map(ControlPath::Direct),
-            _ if self.cloud_observation_candidate(did, true).is_ok() => {
-                self.live.borrow().credentials.as_ref().map(|credentials| {
-                    ControlPath::Cloud(CloudPath {
+            _ if self.cloud_observation_candidate(did, true).is_ok() => self
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .and_then(|credentials| {
+                    Some(ControlPath::Cloud(CloudPath {
                         uid: credentials.uid.clone(),
-                        access_token: credentials.tokens.access_token.clone(),
-                    })
-                })
-            }
+                        access_token: credentials.ha_authorization()?.tokens.access_token.clone(),
+                    }))
+                }),
             _ => local.map(ControlPath::Local),
         }
     }
@@ -308,14 +311,17 @@ impl Context {
         match self.priority() {
             PathPriority::LocalFirst if local.is_some() => local.map(ControlPath::Local),
             _ if direct.is_some() => direct.map(ControlPath::Direct),
-            _ if self.cloud_candidate(did, true).is_ok() => {
-                self.live.borrow().credentials.as_ref().map(|credentials| {
-                    ControlPath::Cloud(CloudPath {
+            _ if self.cloud_candidate(did, true).is_ok() => self
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .and_then(|credentials| {
+                    Some(ControlPath::Cloud(CloudPath {
                         uid: credentials.uid.clone(),
-                        access_token: credentials.tokens.access_token.clone(),
-                    })
-                })
-            }
+                        access_token: credentials.ha_authorization()?.tokens.access_token.clone(),
+                    }))
+                }),
             _ => local.map(ControlPath::Local),
         }
     }

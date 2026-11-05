@@ -3,7 +3,7 @@ use crate::{
     storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
-        cloud::{CloudClient, validate_saved_redirect_uri},
+        cloud::CloudClient,
     },
 };
 use std::error::Error as StdError;
@@ -28,9 +28,15 @@ impl AuthService {
         let status = self.load_validated()?;
         Ok(match status {
             Some(stored) => AuthReport {
-                authentication: AuthenticationState::Checking,
-                certificate: Some(stored.validity),
-                certificate_update: CertificateUpdate::NotNeeded,
+                authentication: match &stored.record.ha {
+                    Some(ha) if ha.stopped => {
+                        AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
+                    }
+                    Some(ha) if ha.authorization.is_some() => AuthenticationState::Checking,
+                    _ => AuthenticationState::Unavailable(FailureReason::MissingHaAuthorization),
+                },
+                certificate: stored.validity,
+                certificate_update: stored.certificate_update,
                 completed_at: (self.now)(),
             },
             None => AuthReport {
@@ -51,16 +57,37 @@ impl AuthService {
     pub(super) async fn refresh_tokens_once(
         &self,
         redirect_uri: &str,
-        refresh_token: &str,
+        tokens: &TokenSet,
         now: impl Fn() -> i64,
     ) -> Result<TokenSet, AuthError> {
-        let response = self
+        let generation = self
+            .store
+            .ha_refresh_generation(redirect_uri, tokens)?
+            .ok_or(AuthError::Missing("HA OAuth refresh is unavailable"))?;
+        let response = match self
             .cloud
-            .refresh_token(redirect_uri, refresh_token)
+            .refresh_token(redirect_uri, &tokens.refresh_token)
             .await
-            .map_err(AuthError::Cloud)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if error.is_unauthorized() && !self.store.stop_ha_refresh_if_current(&generation)? {
+                    return Err(AuthError::Missing(
+                        "HA OAuth credentials changed during refresh",
+                    ));
+                }
+                return Err(AuthError::Cloud(error));
+            }
+        };
         let replacement = tokens::from_response(response, now()).map_err(AuthError::Cloud)?;
-        self.store.update_tokens(&replacement)?;
+        if !self
+            .store
+            .update_tokens_if_current(&replacement, &generation)?
+        {
+            return Err(AuthError::Missing(
+                "HA OAuth credentials changed during refresh",
+            ));
+        }
         Ok(replacement)
     }
 
@@ -68,7 +95,11 @@ impl AuthService {
         &self,
         record: &XiaomiRecord,
     ) -> Result<ClientIdentity, AuthError> {
-        ClientIdentity::from_private_key(&record.uid, &record.virtual_did, &record.private_key_pem)
+        let hub = record
+            .hub
+            .as_ref()
+            .ok_or(AuthError::Missing("Gateway identity is unavailable"))?;
+        ClientIdentity::from_private_key(&record.uid, &hub.virtual_did, &hub.private_key_pem)
             .map_err(|error| self.corrupt_record(error).into())
     }
 
@@ -78,10 +109,14 @@ impl AuthService {
         certificate_pem: &str,
         completed_at: i64,
     ) -> Result<Result<CertificateValidity, FailureReason>, AuthError> {
+        let hub = record
+            .hub
+            .as_ref()
+            .ok_or(AuthError::Missing("Gateway identity is unavailable"))?;
         let validity = match validate_certificate(
             &record.uid,
-            &record.virtual_did,
-            &record.private_key_pem,
+            &hub.virtual_did,
+            &hub.private_key_pem,
             certificate_pem,
         ) {
             Ok(validity) => validity,
@@ -105,16 +140,39 @@ impl AuthService {
         let Some(record) = self.store.load().map_err(AuthError::Storage)? else {
             return Ok(None);
         };
-        validate_saved_redirect_uri(&record.redirect_uri)
-            .map_err(|error| AuthError::Storage(self.corrupt_record(error)))?;
-        let validity = validate_certificate(
-            &record.uid,
-            &record.virtual_did,
-            &record.private_key_pem,
-            &record.certificate_pem,
-        )
-        .map_err(|error| AuthError::Storage(self.corrupt_record(error)))?;
-        Ok(Some(StoredRecord { record, validity }))
+        let (validity, certificate_update) = if let Some(hub) = &record.hub {
+            ClientIdentity::from_private_key(&record.uid, &hub.virtual_did, &hub.private_key_pem)
+                .map_err(|error| AuthError::Storage(self.corrupt_record(error)))?;
+            if let Some(certificate) = hub.certificate_pem.as_deref() {
+                match validate_certificate(
+                    &record.uid,
+                    &hub.virtual_did,
+                    &hub.private_key_pem,
+                    certificate,
+                ) {
+                    Ok(validity) => (Some(validity), CertificateUpdate::NotNeeded),
+                    Err(_) => (
+                        None,
+                        CertificateUpdate::Failed(FailureReason::InvalidCertificate),
+                    ),
+                }
+            } else {
+                (
+                    None,
+                    CertificateUpdate::Failed(FailureReason::MissingCertificate),
+                )
+            }
+        } else {
+            (
+                None,
+                CertificateUpdate::Failed(FailureReason::MissingCertificate),
+            )
+        };
+        Ok(Some(StoredRecord {
+            record,
+            validity,
+            certificate_update,
+        }))
     }
 
     pub(super) fn corrupt_record(&self, source: impl Into<Box<dyn StdError>>) -> StorageError {
@@ -132,5 +190,6 @@ fn current_time() -> i64 {
 
 pub(super) struct StoredRecord {
     pub(super) record: XiaomiRecord,
-    pub(super) validity: CertificateValidity,
+    pub(super) validity: Option<CertificateValidity>,
+    pub(super) certificate_update: CertificateUpdate,
 }

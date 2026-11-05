@@ -189,7 +189,7 @@ fn connack_rejection_and_persisted_session_are_rejected_over_tls() {
                     .unwrap();
                 let error = match start(
                     Box::new(stream),
-                    &fixture.credentials.virtual_did,
+                    &fixture.credentials.hub.as_ref().unwrap().virtual_did,
                     Timing::default(),
                 )
                 .await

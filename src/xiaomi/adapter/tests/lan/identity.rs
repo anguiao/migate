@@ -198,7 +198,20 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
         token: token.clone(),
     };
     rig.store.lan().save(&record).unwrap();
-    let mut tokens = rig.store.xiaomi().load().unwrap().unwrap().tokens;
+    let mut tokens = rig
+        .store
+        .xiaomi()
+        .load()
+        .unwrap()
+        .unwrap()
+        .ha
+        .as_ref()
+        .unwrap()
+        .authorization
+        .as_ref()
+        .unwrap()
+        .tokens
+        .clone();
     tokens.refresh_at = 1;
     tokens.expires_at = 1;
     rig.store.xiaomi().update_tokens(&tokens).unwrap();

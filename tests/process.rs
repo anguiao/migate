@@ -131,24 +131,31 @@ fn logout_clears_corrupt_credentials_and_preserves_identity_and_matter_data() {
         .replace(&XiaomiRecord {
             uid: "uid".into(),
             region: "cn".into(),
-            oauth_client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-            redirect_uri:
-                "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
-                    .into(),
-            tokens: TokenSet {
-                access_token: "access".into(),
-                refresh_token: "refresh".into(),
-                expires_at: 2_000_000_000,
-                refresh_at: 1_900_000_000,
-            },
-            virtual_did: "1".into(),
-            private_key_pem: "broken-key".into(),
-            certificate_pem: "broken-certificate".into(),
+            recovery: None,
+            mijia: None,
+            ha: Some(migate::storage::HaClient {
+                client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+                authorization: Some(migate::storage::HaAuthorization {
+                    redirect_uri: "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef".into(),
+                    tokens: TokenSet {
+                        access_token: "access".into(),
+                        refresh_token: "refresh".into(),
+                        expires_at: 2_000_000_000,
+                        refresh_at: 1_900_000_000,
+                    },
+                }),
+                stopped: false,
+            }),
+            hub: Some(migate::storage::HubIdentity {
+                virtual_did: "1".into(),
+                private_key_pem: "broken-key".into(),
+                certificate_pem: Some("broken-certificate".into()),
+            }),
         })
         .unwrap();
     Connection::open(store.path())
         .unwrap()
-        .execute("UPDATE xiaomi_auth SET region = 'us'", [])
+        .execute("UPDATE xiaomi_account SET region = 'us'", [])
         .unwrap();
     drop(store);
 

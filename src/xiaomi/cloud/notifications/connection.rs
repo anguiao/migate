@@ -24,11 +24,20 @@ pub async fn connect_notifications(
 }
 
 fn validate_credentials(credentials: &XiaomiRecord) -> Result<String, NotificationError> {
+    let ha = credentials
+        .ha
+        .as_ref()
+        .filter(|ha| !ha.stopped)
+        .ok_or(NotificationError::InvalidInput)?;
+    let authorization = ha
+        .authorization
+        .as_ref()
+        .ok_or(NotificationError::InvalidInput)?;
     if credentials.region != REGION
         || !valid_identifier(&credentials.uid)
-        || credentials.tokens.access_token.is_empty()
-        || credentials.tokens.access_token.len() > u16::MAX as usize
-        || credentials
+        || authorization.tokens.access_token.is_empty()
+        || authorization.tokens.access_token.len() > u16::MAX as usize
+        || authorization
             .tokens
             .access_token
             .chars()
@@ -36,8 +45,8 @@ fn validate_credentials(credentials: &XiaomiRecord) -> Result<String, Notificati
     {
         return Err(NotificationError::InvalidInput);
     }
-    let uuid = uuid::Uuid::parse_str(&credentials.oauth_client_uuid)
-        .map_err(|_| NotificationError::InvalidInput)?;
+    let uuid =
+        uuid::Uuid::parse_str(&ha.client_uuid).map_err(|_| NotificationError::InvalidInput)?;
     Ok(format!("ha.{}", uuid.simple()))
 }
 
@@ -53,10 +62,13 @@ impl PreparedConnection {
         timing: Timing,
     ) -> Result<Self, NotificationError> {
         let client_id = validate_credentials(credentials)?;
+        let authorization = credentials
+            .ha_authorization()
+            .ok_or(NotificationError::InvalidInput)?;
         let mut connect = Connect::new(client_id);
         connect.set_login(
             CLIENT_ID.to_string(),
-            credentials.tokens.access_token.clone(),
+            authorization.tokens.access_token.clone(),
         );
         connect.keep_alive = timing.keepalive.map_or(0, |duration| {
             duration.as_secs().clamp(1, u64::from(u16::MAX)) as u16

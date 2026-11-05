@@ -8,19 +8,51 @@ CREATE TABLE blobs (
     value BLOB NOT NULL
 ) STRICT;
 
-CREATE TABLE xiaomi_auth (
+CREATE TABLE xiaomi_account (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     uid TEXT NOT NULL,
-    region TEXT NOT NULL,
-    oauth_client_uuid TEXT NOT NULL,
+    region TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE xiaomi_account_recovery (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    user_id TEXT NOT NULL,
+    c_user_id TEXT NOT NULL,
+    pass_token TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    user_agent TEXT NOT NULL,
+    stopped TEXT CHECK (stopped IN ('rejected', 'verification_required'))
+) STRICT;
+
+CREATE TABLE xiaomi_mijia_session (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    user_id TEXT NOT NULL,
+    service_token TEXT NOT NULL,
+    ssecurity TEXT NOT NULL,
+    user_agent TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE xiaomi_ha_client (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    client_uuid TEXT NOT NULL,
+    stopped INTEGER NOT NULL CHECK (stopped IN (0, 1))
+) STRICT;
+
+CREATE TABLE xiaomi_ha_oauth (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    generation TEXT NOT NULL,
     redirect_uri TEXT NOT NULL,
     access_token TEXT NOT NULL,
     refresh_token TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
-    refresh_at INTEGER NOT NULL,
+    refresh_at INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE xiaomi_hub (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
     virtual_did TEXT NOT NULL,
     private_key_pem TEXT NOT NULL,
-    certificate_pem TEXT NOT NULL
+    certificate_pem TEXT
 ) STRICT;
 
 -- The complete committed bridge configuration in one private JSON record.
@@ -55,4 +87,4 @@ CREATE TABLE xiaomi_lan (
     token BLOB NOT NULL CHECK (length(token) = 16)
 ) STRICT;
 
-PRAGMA user_version = 11;
+PRAGMA user_version = 12;

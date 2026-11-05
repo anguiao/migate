@@ -17,7 +17,10 @@ pub(crate) use lan::LanRecord;
 pub use lock::InstanceLock;
 pub use matter::MatterStore;
 pub use store::Store;
-pub use xiaomi::{TokenSet, XiaomiRecord, XiaomiStore};
+pub use xiaomi::{
+    AccountRecovery, HaAuthorization, HaClient, HubIdentity, RecoveryStop, TokenSet, XiaomiRecord,
+    XiaomiStore,
+};
 
 #[cfg(test)]
 pub(crate) mod tests;

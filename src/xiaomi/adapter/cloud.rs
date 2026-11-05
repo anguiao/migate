@@ -67,9 +67,14 @@ pub(super) async fn run(
             .await;
             continue;
         }
-        let credentials = context.live.borrow().credentials.as_ref().unwrap().clone();
+        let Some(credentials) = context.live.borrow().credentials.clone() else {
+            continue;
+        };
+        let Some(authorization) = credentials.ha_authorization() else {
+            continue;
+        };
         context.ready.finish(Ok(()));
-        let token = &credentials.tokens.access_token;
+        let token = &authorization.tokens.access_token;
         let Some(homes) = future::or(async { Some(cloud.get_owned_homes(token).await) }, async {
             context.token_retired(token).await;
             None
@@ -177,7 +182,7 @@ pub(super) async fn run(
                 .collect::<BTreeMap<_, _>>(),
             Err(error) => {
                 context.set_catalog_problem(Some(error.to_string()));
-                context.cloud_error(&credentials.tokens.access_token, None, &error)?;
+                context.cloud_error(token, None, &error)?;
                 due = context
                     .sync_not_before
                     .get()
@@ -301,6 +306,7 @@ pub(super) async fn run(
             let current = context.clone();
             let client = cloud.clone();
             let credentials = credentials.clone();
+            let captured_token = token.clone();
             let home = home.clone();
             let captured_scope = scope.clone();
             let task = async move {
@@ -330,7 +336,7 @@ pub(super) async fn run(
                             == target
                 };
                 if !current_loading
-                    || !current.current_token(&credentials.tokens.access_token)
+                    || !current.current_token(&captured_token)
                     || current.live.borrow().scope.as_ref() != Some(&captured_scope)
                 {
                     if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
@@ -375,11 +381,7 @@ pub(super) async fn run(
                         if let CatalogError::Cloud(error) = &error
                             && !error.is_temporary()
                         {
-                            current.cloud_error(
-                                &credentials.tokens.access_token,
-                                Some(&did),
-                                error,
-                            )?;
+                            current.cloud_error(&captured_token, Some(&did), error)?;
                         }
                     }
                 }

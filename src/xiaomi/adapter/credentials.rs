@@ -65,33 +65,51 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
         let credentials_changed = context.credentials_changed.listen();
         let sync_changed = context.sync_changed.listen();
         let record = saved(auth, &context)?;
-        let key = (record.tokens.access_token.clone(), record.tokens.expires_at);
-        let is_expired = record.tokens.expires_at <= context.clock.unix_now();
+        let Some(authorization) = record.ha_authorization() else {
+            if record.ha.as_ref().is_some_and(|ha| ha.stopped) {
+                if !matches!(
+                    context.status.borrow().authentication.authentication,
+                    AuthenticationState::SignInRequired(_)
+                ) {
+                    context.authentication(AuthenticationState::SignInRequired(
+                        FailureReason::MissingHaAuthorization,
+                    ));
+                }
+            } else {
+                context.authentication(AuthenticationState::Unavailable(
+                    FailureReason::MissingHaAuthorization,
+                ));
+            }
+            future::or(credentials_changed, sync_changed).await;
+            continue;
+        };
+        let tokens = authorization.tokens.clone();
+        let key = (tokens.access_token.clone(), tokens.expires_at);
+        let is_expired = tokens.expires_at <= context.clock.unix_now();
         if is_expired && observed_expiry.as_ref() != Some(&key) {
             observed_expiry = Some(key);
             token_expired(&context);
         }
         let paused = matches!(*context.cloud_sync.borrow(), CloudSync::Paused);
-        let rejected = matches!(&*context.cloud_sync.borrow(), CloudSync::Rejected(token) if token == &record.tokens.access_token);
+        let rejected = matches!(&*context.cloud_sync.borrow(), CloudSync::Rejected(token) if token == &tokens.access_token);
         let refresh_due = retry.unwrap_or_else(|| {
             if rejected {
                 context.clock.now()
             } else {
-                deadline(&context, record.tokens.refresh_at)
+                deadline(&context, tokens.refresh_at)
             }
         });
         if !paused
-            && (rejected || context.clock.unix_now() >= record.tokens.refresh_at)
+            && (rejected || context.clock.unix_now() >= tokens.refresh_at)
             && context.clock.now() >= refresh_due
         {
             let refreshing = auth.refresh_bridge_tokens(&record, || context.clock.unix_now());
             let mut refreshing = std::pin::pin!(refreshing);
             let result = if !is_expired {
-                let expiry = deadline(&context, record.tokens.expires_at);
+                let expiry = deadline(&context, tokens.expires_at);
                 match future::or(async { Some(refreshing.as_mut().await) }, async {
                     context.clock.wait_until(expiry).await;
-                    observed_expiry =
-                        Some((record.tokens.access_token.clone(), record.tokens.expires_at));
+                    observed_expiry = Some((tokens.access_token.clone(), tokens.expires_at));
                     token_expired(&context);
                     None
                 })
@@ -105,9 +123,13 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
             };
             match result {
                 Ok(replacement) => {
-                    let already_due = replacement.tokens.refresh_at <= context.clock.unix_now();
+                    let Some(refreshed) = replacement.ha_authorization() else {
+                        context.adopt_credentials(replacement);
+                        continue;
+                    };
+                    let already_due = refreshed.tokens.refresh_at <= context.clock.unix_now();
                     *context.cloud_sync.borrow_mut() =
-                        CloudSync::Refreshed(replacement.tokens.access_token.clone());
+                        CloudSync::Refreshed(refreshed.tokens.access_token.clone());
                     context.adopt_credentials(replacement);
                     context.authentication(AuthenticationState::Checking);
                     context.request_sync();
@@ -135,6 +157,15 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     retry = Some(context.clock.now() + delay);
                     eligibility_changed(&context, "cloud token maintenance failed");
                 }
+                Err(AuthError::Missing(_)) => {
+                    let current = saved(auth, &context)?;
+                    if current.ha_authorization().is_some() {
+                        *context.cloud_sync.borrow_mut() = CloudSync::Idle;
+                        context.authentication(AuthenticationState::Checking);
+                        context.request_sync();
+                    }
+                    retry = None;
+                }
                 Err(error) => return Err(error.into()),
             }
             continue;
@@ -142,7 +173,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
         let next = (!paused)
             .then_some(refresh_due)
             .into_iter()
-            .chain((!is_expired).then(|| deadline(&context, record.tokens.expires_at)))
+            .chain((!is_expired).then(|| deadline(&context, tokens.expires_at)))
             .min();
         future::or(
             async {
@@ -172,7 +203,15 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
     loop {
         let changed = context.changed.listen();
         let record = saved(auth, &context)?;
-        let validity = auth.local_status()?.certificate.unwrap();
+        let report = auth.local_status()?;
+        let Some(validity) = report.certificate else {
+            context.certificate_unavailable(report.certificate_update);
+            changed.await;
+            continue;
+        };
+        if context.status.borrow().authentication.certificate != Some(validity) {
+            context.certificate(validity, CertificateUpdate::NotNeeded);
+        }
         let now = context.clock.unix_now();
         if now >= validity.not_after && last_expiry != Some(validity.not_after) {
             last_expiry = Some(validity.not_after);
@@ -204,7 +243,11 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                 Ok(renewed) => {
                     context.adopt_credentials(renewed.credentials);
                     let failed = matches!(renewed.update, CertificateUpdate::Failed(_));
-                    context.certificate(renewed.validity, renewed.update);
+                    if let Some(validity) = renewed.validity {
+                        context.certificate(validity, renewed.update);
+                    } else {
+                        context.certificate_unavailable(renewed.update);
+                    }
                     due = context.clock.now() + super::cloud::MEMBER_INTERVAL;
                     if !failed {
                         backoff = Backoff::new(1, 30);
@@ -216,13 +259,16 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                     } else {
                         super::cloud::MEMBER_INTERVAL
                     };
+                    let Some(authorization) = record.ha_authorization() else {
+                        continue;
+                    };
                     if error.is_unauthorized() {
                         context.token_rejected(
-                            &record.tokens.access_token,
+                            &authorization.tokens.access_token,
                             FailureReason::Cloud(error.clone()),
                         )?;
                     }
-                    let stale = !context.current_token(&record.tokens.access_token);
+                    let stale = !context.current_token(&authorization.tokens.access_token);
                     context.certificate(
                         validity,
                         CertificateUpdate::Failed(FailureReason::Cloud(error)),

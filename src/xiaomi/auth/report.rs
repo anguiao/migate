@@ -25,6 +25,8 @@ pub enum FailureReason {
     Cloud(CloudError),
     CloudNotification(crate::xiaomi::cloud::NotificationError),
     AccessTokenExpired,
+    MissingHaAuthorization,
+    MissingCertificate,
     CannotDetermineAccountIdentity,
     AccountIdentityMismatch,
     InvalidClientIdentity,
@@ -38,6 +40,10 @@ impl fmt::Display for FailureReason {
             Self::Cloud(error) => error.fmt(formatter),
             Self::CloudNotification(error) => error.fmt(formatter),
             Self::AccessTokenExpired => formatter.write_str("Xiaomi access token has expired"),
+            Self::MissingHaAuthorization => {
+                formatter.write_str("HA OAuth credentials are unavailable")
+            }
+            Self::MissingCertificate => formatter.write_str("Gateway certificate is unavailable"),
             Self::CannotDetermineAccountIdentity => formatter
                 .write_str("Cannot determine account identity required for gateway certificate"),
             Self::AccountIdentityMismatch => {
@@ -46,9 +52,7 @@ impl fmt::Display for FailureReason {
             Self::InvalidClientIdentity => {
                 formatter.write_str("Gateway certificate client identity is invalid")
             }
-            Self::InvalidCertificate => {
-                formatter.write_str("Gateway certificate response is invalid")
-            }
+            Self::InvalidCertificate => formatter.write_str("Gateway certificate is invalid"),
             Self::CertificateNotCurrentlyValid => {
                 formatter.write_str("Gateway certificate is not currently valid")
             }
@@ -138,6 +142,7 @@ impl AuthReport {
 pub enum AuthError {
     Storage(StorageError),
     Cloud(CloudError),
+    Missing(&'static str),
 }
 
 impl fmt::Display for AuthError {
@@ -145,6 +150,7 @@ impl fmt::Display for AuthError {
         match self {
             Self::Storage(error) => error.fmt(formatter),
             Self::Cloud(error) => error.fmt(formatter),
+            Self::Missing(message) => formatter.write_str(message),
         }
     }
 }
@@ -154,6 +160,7 @@ impl StdError for AuthError {
         match self {
             Self::Storage(error) => Some(error),
             Self::Cloud(error) => Some(error),
+            Self::Missing(_) => None,
         }
     }
 }

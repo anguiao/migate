@@ -3,7 +3,7 @@ use super::{
     service::StoredRecord, tokens,
 };
 use crate::{
-    storage::XiaomiRecord,
+    storage::{HaAuthorization, HaClient, HubIdentity, XiaomiRecord},
     xiaomi::{
         certificate::{ClientIdentity, validate_certificate},
         cloud::{AuthorizationAttempt, REGION},
@@ -39,7 +39,8 @@ impl AuthService {
         let authorization = AuthorizationAttempt::new(
             previous
                 .as_ref()
-                .map(|candidate| candidate.record.oauth_client_uuid.as_str()),
+                .and_then(|candidate| candidate.record.ha.as_ref())
+                .map(|ha| ha.client_uuid.as_str()),
         )
         .map_err(AuthError::Cloud)?;
         Ok(LoginAttempt {
@@ -53,7 +54,26 @@ impl AuthService {
         attempt: LoginAttempt,
         callback: &str,
     ) -> Result<AuthReport, AuthError> {
-        let previous_certificate = attempt.previous.as_ref().map(|value| value.validity);
+        let previous_update = attempt
+            .previous
+            .as_ref()
+            .map(|stored| stored.certificate_update.clone());
+        let mut report = self.complete_attempt(attempt, callback).await?;
+        if report.certificate.is_none()
+            && report.certificate_update == CertificateUpdate::NotNeeded
+            && let Some(previous_update) = previous_update
+        {
+            report.certificate_update = previous_update;
+        }
+        Ok(report)
+    }
+
+    async fn complete_attempt(
+        &self,
+        attempt: LoginAttempt,
+        callback: &str,
+    ) -> Result<AuthReport, AuthError> {
+        let previous_certificate = attempt.previous.as_ref().and_then(|value| value.validity);
         let code = match attempt.authorization.parse_callback(callback) {
             Ok(code) => code,
             Err(error) => {
@@ -126,28 +146,34 @@ impl AuthService {
             .as_ref()
             .filter(|previous| previous.record.uid == uid);
         if let Some(previous) = same_account
-            && previous.validity.currently_valid(certificate_decision_time)
-            && !previous.validity.renewal_due(certificate_decision_time)
+            && previous.validity.is_some_and(|validity| {
+                validity.currently_valid(certificate_decision_time)
+                    && !validity.renewal_due(certificate_decision_time)
+            })
         {
             let mut record = previous.record.clone();
-            record.oauth_client_uuid = attempt.authorization.oauth_client_uuid().to_owned();
-            record.redirect_uri = attempt.authorization.redirect_uri().to_owned();
-            record.tokens = tokens;
+            let stopped = record.ha.as_ref().is_some_and(|ha| ha.stopped);
+            record.ha = Some(HaClient {
+                client_uuid: attempt.authorization.oauth_client_uuid().to_owned(),
+                authorization: Some(HaAuthorization {
+                    redirect_uri: attempt.authorization.redirect_uri().to_owned(),
+                    tokens,
+                }),
+                stopped,
+            });
             self.store.replace(&record).map_err(AuthError::Storage)?;
             return Ok(AuthReport {
                 authentication: AuthenticationState::Authenticated,
-                certificate: Some(previous.validity),
+                certificate: previous.validity,
                 certificate_update: CertificateUpdate::NotNeeded,
                 completed_at: (self.now)(),
             });
         }
 
-        let identity = match same_account {
-            Some(previous) => ClientIdentity::from_private_key(
-                &uid,
-                &previous.record.virtual_did,
-                &previous.record.private_key_pem,
-            ),
+        let identity = match same_account.and_then(|previous| previous.record.hub.as_ref()) {
+            Some(hub) => {
+                ClientIdentity::from_private_key(&uid, &hub.virtual_did, &hub.private_key_pem)
+            }
             None => ClientIdentity::generate(&uid),
         };
         let identity = match identity {
@@ -197,16 +223,30 @@ impl AuthService {
                 completed_at,
             ));
         }
-        let record = XiaomiRecord {
-            uid,
-            region: REGION.to_owned(),
-            oauth_client_uuid: attempt.authorization.oauth_client_uuid().to_owned(),
-            redirect_uri: attempt.authorization.redirect_uri().to_owned(),
-            tokens,
+        let mut record = same_account
+            .map(|previous| previous.record.clone())
+            .unwrap_or_else(|| XiaomiRecord {
+                uid,
+                region: REGION.to_owned(),
+                recovery: None,
+                mijia: None,
+                ha: None,
+                hub: None,
+            });
+        let stopped = record.ha.as_ref().is_some_and(|ha| ha.stopped);
+        record.ha = Some(HaClient {
+            client_uuid: attempt.authorization.oauth_client_uuid().to_owned(),
+            authorization: Some(HaAuthorization {
+                redirect_uri: attempt.authorization.redirect_uri().to_owned(),
+                tokens,
+            }),
+            stopped,
+        });
+        record.hub = Some(HubIdentity {
             virtual_did: identity.virtual_did,
             private_key_pem: identity.private_key_pem,
-            certificate_pem,
-        };
+            certificate_pem: Some(certificate_pem),
+        });
         self.store.replace(&record).map_err(AuthError::Storage)?;
         Ok(AuthReport {
             authentication: AuthenticationState::Authenticated,

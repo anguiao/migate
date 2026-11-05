@@ -220,7 +220,7 @@ pub(super) async fn pair_fixture<S, C, SF, CF, W>(
             .unwrap();
         let (handle, driver) = start(
             wrap(Box::new(stream)),
-            &fixture.credentials.virtual_did,
+            &fixture.credentials.hub.as_ref().unwrap().virtual_did,
             timing,
         )
         .await

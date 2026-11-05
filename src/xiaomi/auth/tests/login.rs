@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn failed_login_retains_the_saved_certificate_diagnostic() {
+    for (certificate, expected) in [
+        (None, FailureReason::MissingCertificate),
+        (
+            Some("malformed certificate".to_owned()),
+            FailureReason::InvalidCertificate,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
+        record.hub.as_mut().unwrap().certificate_pem = certificate;
+        store.xiaomi().replace(&record).unwrap();
+        let (auth, requests) = service(&store, vec![MockResponse::json(503, "unavailable")]);
+        let attempt = auth.begin_login().unwrap();
+        let input = callback(&attempt);
+        let report = block_on(auth.complete_login(attempt, &input)).unwrap();
+        assert!(matches!(
+            report.authentication,
+            AuthenticationState::Unavailable(FailureReason::Cloud(_))
+        ));
+        assert_eq!(report.certificate, None);
+        assert_eq!(
+            report.certificate_update,
+            CertificateUpdate::Failed(expected)
+        );
+        assert_eq!(store.xiaomi().load().unwrap(), Some(record));
+        assert_eq!(requests.try_iter().count(), 1);
+    }
+}
+
+#[test]
 fn login_succeeds_persists_and_restart_reuses_oauth_and_client_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -26,11 +58,22 @@ fn login_succeeds_persists_and_restart_reuses_oauth_and_client_identity() {
     let report = block_on(auth.complete_login(first, &first_callback)).unwrap();
     assert!(report.is_success(), "{report:?}");
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(saved.oauth_client_uuid, first_uuid);
-    assert_eq!(saved.tokens.access_token, "access-new");
-    let old_key = saved.private_key_pem.clone();
-    let old_did = saved.virtual_did.clone();
-    let old_cert = saved.certificate_pem.clone();
+    assert_eq!(saved.ha.as_ref().unwrap().client_uuid, first_uuid);
+    assert_eq!(
+        saved
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .tokens
+            .access_token,
+        "access-new"
+    );
+    let old_key = saved.hub.as_ref().unwrap().private_key_pem.clone();
+    let old_did = saved.hub.as_ref().unwrap().virtual_did.clone();
+    let old_cert = saved.hub.as_ref().unwrap().certificate_pem.clone();
 
     let second = auth.begin_login().unwrap();
     assert_eq!(second.authorization().oauth_client_uuid(), first_uuid);
@@ -46,9 +89,9 @@ fn login_succeeds_persists_and_restart_reuses_oauth_and_client_identity() {
         .load()
         .unwrap()
         .unwrap();
-    assert_eq!(restarted.private_key_pem, old_key);
-    assert_eq!(restarted.virtual_did, old_did);
-    assert_eq!(restarted.certificate_pem, old_cert);
+    assert_eq!(restarted.hub.as_ref().unwrap().private_key_pem, old_key);
+    assert_eq!(restarted.hub.as_ref().unwrap().virtual_did, old_did);
+    assert_eq!(restarted.hub.as_ref().unwrap().certificate_pem, old_cert);
     assert_eq!(requests.try_iter().count(), 7);
 }
 
@@ -81,9 +124,19 @@ fn same_uid_renews_with_same_identity_while_changed_uid_gets_new_identity() {
                 .is_success()
         );
         let saved = store.xiaomi().load().unwrap().unwrap();
-        assert_eq!(saved.oauth_client_uuid, old.oauth_client_uuid);
-        assert_eq!(saved.private_key_pem == old.private_key_pem, same);
-        assert_eq!(saved.virtual_did == old.virtual_did, same);
+        assert_eq!(
+            saved.ha.as_ref().unwrap().client_uuid,
+            old.ha.as_ref().unwrap().client_uuid
+        );
+        assert_eq!(
+            saved.hub.as_ref().unwrap().private_key_pem
+                == old.hub.as_ref().unwrap().private_key_pem,
+            same
+        );
+        assert_eq!(
+            saved.hub.as_ref().unwrap().virtual_did == old.hub.as_ref().unwrap().virtual_did,
+            same
+        );
     }
 }
 
@@ -135,7 +188,7 @@ fn failed_login_inputs_cloud_identity_certificate_and_storage_preserve_old_recor
             MockResponse::json(200, &home_body(Some("uid"), &[]))
         }
     });
-    Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_auth BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
+    Connection::open(store.path()).unwrap().execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_account BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
     let auth = AuthService::with_clock(
         store.xiaomi(),
         CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),

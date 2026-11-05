@@ -9,13 +9,12 @@ pub async fn connect(
     address: SocketAddr,
     credentials: &XiaomiRecord,
 ) -> Result<(SessionHandle, SessionDriver), CentralError> {
+    let hub = credentials
+        .hub
+        .as_ref()
+        .ok_or(CentralError::InvalidCredentials)?;
     let stream = tls::connect_tls(address, credentials).await?;
-    start(
-        Box::new(stream),
-        &credentials.virtual_did,
-        Timing::default(),
-    )
-    .await
+    start(Box::new(stream), &hub.virtual_did, Timing::default()).await
 }
 pub(in crate::xiaomi::central) async fn start(
     mut stream: Box<dyn Transport>,

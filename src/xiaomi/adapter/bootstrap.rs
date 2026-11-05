@@ -126,7 +126,7 @@ impl XiaomiAdapter {
             .map(|scope| super::relations::Relations::restored(scope, &restored_relations))
             .unwrap_or_default();
         let ready = Rc::new(Ready::default());
-        if scope.is_some() {
+        if credentials.is_some() {
             ready.finish(Ok(()));
         }
         let report = auth.local_status()?;

@@ -24,7 +24,9 @@ fn the_old_schema_is_rejected_without_modification() {
     let path = dir.join("state.db");
     let db = Connection::open(&path).unwrap();
     db.execute_batch(
-        "PRAGMA user_version = 9;
+        "PRAGMA user_version = 11;
+         CREATE TABLE xiaomi_auth (id INTEGER PRIMARY KEY, uid TEXT NOT NULL);
+         INSERT INTO xiaomi_auth VALUES (1, 'old-account');
          CREATE TABLE marker (value TEXT);
          INSERT INTO marker VALUES ('old');",
     )
@@ -51,14 +53,14 @@ fn the_old_schema_is_rejected_without_modification() {
 }
 
 #[test]
-fn schema11_is_one_private_singleton() {
+fn schema12_is_one_private_singleton() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let db = Connection::open(store.path()).unwrap();
     let version = db
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .unwrap();
-    assert_eq!(version, 11);
+    assert_eq!(version, 12);
     let rows = db
         .query_row("SELECT count(*) FROM bridge_configuration", [], |row| {
             row.get::<_, i64>(0)
@@ -74,6 +76,7 @@ fn schema11_is_one_private_singleton() {
         "native_group",
         "native_group_member",
         "publication_root",
+        "xiaomi_auth",
     ] {
         let exists = db
             .query_row(

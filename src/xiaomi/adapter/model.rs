@@ -67,6 +67,7 @@ impl From<AuthError> for AdapterError {
         match e {
             AuthError::Storage(e) => Self::Storage(e),
             AuthError::Cloud(e) => Self::Cloud(e),
+            AuthError::Missing(message) => Self::Unavailable(message.into()),
         }
     }
 }

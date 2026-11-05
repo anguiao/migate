@@ -66,6 +66,12 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
             .credentials
             .as_ref()
             .unwrap()
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
             .tokens
             .access_token
             .clone();
@@ -127,6 +133,12 @@ fn background_property_device_errors_revoke_only_current_device_access() {
                 .credentials
                 .as_ref()
                 .unwrap()
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
                 .tokens
                 .access_token
                 .clone();
@@ -156,7 +168,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one"]).await;
-        let token = c.context.live.borrow().credentials.as_ref().unwrap().tokens.access_token.clone();
+        let token = c.context.live.borrow().credentials.as_ref().unwrap().ha.as_ref().unwrap().authorization.as_ref().unwrap().tokens.access_token.clone();
         let work = c.context.live.borrow().devices["one"].admitted.clone().unwrap();
         let offline = background_property_error(200, -704_042_011).await;
         let unauthorized = background_property_error(401, 0).await;

@@ -62,11 +62,19 @@ pub(super) fn client_config(
     record: &XiaomiRecord,
     ca_pem: &str,
 ) -> Result<Arc<ClientConfig>, CentralError> {
+    let hub = record
+        .hub
+        .as_ref()
+        .ok_or(CentralError::InvalidCredentials)?;
+    let certificate_pem = hub
+        .certificate_pem
+        .as_deref()
+        .ok_or(CentralError::InvalidCredentials)?;
     let validity = validate_certificate(
         &record.uid,
-        &record.virtual_did,
-        &record.private_key_pem,
-        &record.certificate_pem,
+        &hub.virtual_did,
+        &hub.private_key_pem,
+        certificate_pem,
     )
     .map_err(|_| CentralError::InvalidCredentials)?;
     if !validity.currently_valid(time::OffsetDateTime::now_utc().unix_timestamp()) {
@@ -81,9 +89,9 @@ pub(super) fn client_config(
     if roots.is_empty() {
         return Err(CentralError::InvalidCredentials);
     }
-    let certificate = CertificateDer::from_pem_slice(record.certificate_pem.as_bytes())
+    let certificate = CertificateDer::from_pem_slice(certificate_pem.as_bytes())
         .map_err(|_| CentralError::InvalidCredentials)?;
-    let key = PrivateKeyDer::from_pem_slice(record.private_key_pem.as_bytes())
+    let key = PrivateKeyDer::from_pem_slice(hub.private_key_pem.as_bytes())
         .map_err(|_| CentralError::InvalidCredentials)?;
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let verifier = Arc::new(GatewayVerifier {

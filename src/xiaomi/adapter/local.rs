@@ -342,14 +342,12 @@ pub(super) async fn wait_retry(
         .as_ref()
         .map(|group| discovery.snapshot().routes(group, previous))
         .unwrap_or_default();
-    let credentials = context.live.borrow().credentials.as_ref().map(|record| {
-        (
-            record.uid.clone(),
-            record.virtual_did.clone(),
-            record.private_key_pem.clone(),
-            record.certificate_pem.clone(),
-        )
-    });
+    let credentials = context
+        .live
+        .borrow()
+        .credentials
+        .as_ref()
+        .map(|record| (record.uid.clone(), record.hub.clone()));
     let deadline = context.clock.now() + delay;
     future::or(
         async {
@@ -373,14 +371,12 @@ pub(super) async fn wait_retry(
             async {
                 loop {
                     let listener = context.changed.listen();
-                    let current = context.live.borrow().credentials.as_ref().map(|record| {
-                        (
-                            record.uid.clone(),
-                            record.virtual_did.clone(),
-                            record.private_key_pem.clone(),
-                            record.certificate_pem.clone(),
-                        )
-                    });
+                    let current = context
+                        .live
+                        .borrow()
+                        .credentials
+                        .as_ref()
+                        .map(|record| (record.uid.clone(), record.hub.clone()));
                     if current != credentials {
                         return Ok(());
                     }

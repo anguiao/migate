@@ -3,10 +3,196 @@ use super::*;
 
 fn token_deadlines(rig: &Rig, refresh: i64, expiry: i64) {
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record.tokens.refresh_at = rig.clock.wall() + refresh;
-    record.tokens.expires_at = rig.clock.wall() + expiry;
+    record
+        .ha
+        .as_mut()
+        .unwrap()
+        .authorization
+        .as_mut()
+        .unwrap()
+        .tokens
+        .refresh_at = rig.clock.wall() + refresh;
+    record
+        .ha
+        .as_mut()
+        .unwrap()
+        .authorization
+        .as_mut()
+        .unwrap()
+        .tokens
+        .expires_at = rig.clock.wall() + expiry;
     rig.store.xiaomi().replace(&record).unwrap();
     rig.source.context.live.borrow_mut().credentials = Some(record);
+}
+
+#[test]
+fn a_missing_replacement_certificate_clears_previous_readiness() {
+    let rig = Rig::new(true, &["one"]);
+    assert!(
+        rig.source
+            .context
+            .status
+            .borrow()
+            .authentication
+            .certificate
+            .is_some()
+    );
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    let certificate = record.hub.as_ref().unwrap().certificate_pem.clone();
+    record.ha.as_mut().unwrap().authorization = None;
+    record.hub.as_mut().unwrap().certificate_pem = None;
+    rig.store.xiaomi().replace(&record).unwrap();
+    block_on(rig.run(|control| async move {
+        until(|| {
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate
+                .is_none()
+        })
+        .await;
+        assert!(matches!(
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate_update,
+            crate::xiaomi::auth::CertificateUpdate::Failed(
+                crate::xiaomi::auth::FailureReason::MissingCertificate
+            )
+        ));
+        record.hub.as_mut().unwrap().certificate_pem = certificate;
+        control.store.xiaomi().replace(&record).unwrap();
+        control.context.changed.notify(usize::MAX);
+        until(|| {
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate
+                .is_some()
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn background_distinguishes_missing_invalid_and_repaired_certificates() {
+    let rig = Rig::new(true, &["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    let original = record.hub.as_ref().unwrap().certificate_pem.clone();
+    record.ha.as_mut().unwrap().authorization = None;
+    record.hub.as_mut().unwrap().certificate_pem = None;
+    rig.store.xiaomi().replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record.clone());
+    block_on(rig.run(|control| async move {
+        until(|| {
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate
+                .is_none()
+        })
+        .await;
+        assert_eq!(
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate_update,
+            crate::xiaomi::auth::CertificateUpdate::Failed(
+                crate::xiaomi::auth::FailureReason::MissingCertificate
+            )
+        );
+
+        record.hub.as_mut().unwrap().certificate_pem = Some("malformed certificate".into());
+        control.store.xiaomi().replace(&record).unwrap();
+        control.context.changed.notify(usize::MAX);
+        until(|| {
+            control
+                .context
+                .live
+                .borrow()
+                .credentials
+                .as_ref()
+                .unwrap()
+                .hub
+                .as_ref()
+                .unwrap()
+                .certificate_pem
+                .as_deref()
+                == Some("malformed certificate")
+        })
+        .await;
+        assert_eq!(
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate_update,
+            crate::xiaomi::auth::CertificateUpdate::Failed(
+                crate::xiaomi::auth::FailureReason::InvalidCertificate
+            )
+        );
+
+        record.hub.as_mut().unwrap().certificate_pem = original;
+        control.store.xiaomi().replace(&record).unwrap();
+        control.context.changed.notify(usize::MAX);
+        until(|| {
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate
+                .is_some()
+        })
+        .await;
+        assert_eq!(
+            control
+                .context
+                .status
+                .borrow()
+                .authentication
+                .certificate_update,
+            crate::xiaomi::auth::CertificateUpdate::NotNeeded
+        );
+        assert_eq!(control.cloud.lock().unwrap().homes, 0);
+        assert_eq!(control.cloud.lock().unwrap().certs, 0);
+    }));
+}
+
+#[test]
+fn saved_hub_control_works_without_ha_authorization() {
+    let rig = Rig::new(true, &["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    record.ha.as_mut().unwrap().authorization = None;
+    rig.store.xiaomi().replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
+    block_on(rig.run(|control| async move {
+        control.announce();
+        let peer = Rc::new(Peer::default());
+        let current = &control;
+        control
+            .peer(peer, |peer| async move {
+                initialized(current, &peer, &["one"]).await;
+                function(&current.context.registry, "one", "outlet:2")
+                    .execute(Command::On)
+                    .await
+                    .unwrap();
+                assert_eq!(current.cloud.lock().unwrap().homes, 0);
+                assert_eq!(current.cloud.lock().unwrap().tokens, 0);
+            })
+            .await;
+    }));
 }
 
 #[test]
@@ -36,6 +222,12 @@ fn token_deadline_is_polled_while_initial_home_identity_is_pending() {
                 .credentials
                 .as_ref()
                 .unwrap()
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
                 .tokens
                 .access_token
                 == "fresh-access"
@@ -48,6 +240,12 @@ fn token_deadline_is_polled_while_initial_home_identity_is_pending() {
                 .live
                 .borrow()
                 .credentials
+                .as_ref()
+                .unwrap()
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
                 .as_ref()
                 .unwrap()
                 .tokens
@@ -103,6 +301,12 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .credentials
                     .as_ref()
                     .unwrap()
+                    .ha
+                    .as_ref()
+                    .unwrap()
+                    .authorization
+                    .as_ref()
+                    .unwrap()
                     .tokens
                     .access_token,
                 "fresh-access"
@@ -132,6 +336,12 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .load()
                     .unwrap()
                     .unwrap()
+                    .ha
+                    .as_ref()
+                    .unwrap()
+                    .authorization
+                    .as_ref()
+                    .unwrap()
                     .tokens
                     .access_token,
                 "fresh-access"
@@ -141,6 +351,12 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .live
                     .borrow()
                     .credentials
+                    .as_ref()
+                    .unwrap()
+                    .ha
+                    .as_ref()
+                    .unwrap()
+                    .authorization
                     .as_ref()
                     .unwrap()
                     .tokens
@@ -205,8 +421,24 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let mut record = control.store.xiaomi().load().unwrap().unwrap();
-            record.tokens.refresh_at = control.clock.wall() + 5;
-            record.tokens.expires_at = control.clock.wall() + 10;
+            record
+                .ha
+                .as_mut()
+                .unwrap()
+                .authorization
+                .as_mut()
+                .unwrap()
+                .tokens
+                .refresh_at = control.clock.wall() + 5;
+            record
+                .ha
+                .as_mut()
+                .unwrap()
+                .authorization
+                .as_mut()
+                .unwrap()
+                .tokens
+                .expires_at = control.clock.wall() + 10;
             control.store.xiaomi().replace(&record).unwrap();
             control.context.adopt_credentials(record);
             control.cloud.lock().unwrap().token_status = 503;
@@ -348,8 +580,15 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
             .load()
             .unwrap()
             .unwrap()
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
             .tokens
-            .access_token;
+            .access_token
+            .clone();
         c.context
             .token_rejected(
                 &token,
@@ -363,6 +602,12 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
                 .live
                 .borrow()
                 .credentials
+                .as_ref()
+                .unwrap()
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
                 .as_ref()
                 .unwrap()
                 .tokens
@@ -430,6 +675,12 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
             .credentials
             .as_ref()
             .unwrap()
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
             .tokens
             .access_token
             .clone();
@@ -447,6 +698,12 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
                 .live
                 .borrow()
                 .credentials
+                .as_ref()
+                .unwrap()
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
                 .as_ref()
                 .unwrap()
                 .tokens
@@ -632,6 +889,12 @@ fn candidate_unauthorized_requests_coalesce_into_one_token_refresh_and_resume_pr
                     .load()
                     .unwrap()
                     .unwrap()
+                    .ha
+                    .as_ref()
+                    .unwrap()
+                    .authorization
+                    .as_ref()
+                    .unwrap()
                     .tokens
                     .access_token,
                 "fresh-access"
@@ -668,7 +931,15 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                 initialized(control, &peer, &["one"]).await;
                 until(|| control.cloud.lock().unwrap().details > 0).await;
                 let mut record = control.store.xiaomi().load().unwrap().unwrap();
-                record.tokens.refresh_at = time::OffsetDateTime::now_utc().unix_timestamp() - 1;
+                record
+                    .ha
+                    .as_mut()
+                    .unwrap()
+                    .authorization
+                    .as_mut()
+                    .unwrap()
+                    .tokens
+                    .refresh_at = time::OffsetDateTime::now_utc().unix_timestamp() - 1;
                 control.store.xiaomi().replace(&record).unwrap();
                 control.context.request_sync();
                 until(|| control.cloud.lock().unwrap().tokens == 1).await;
@@ -684,6 +955,12 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                             .xiaomi()
                             .load()
                             .unwrap()
+                            .unwrap()
+                            .ha
+                            .as_ref()
+                            .unwrap()
+                            .authorization
+                            .as_ref()
                             .unwrap()
                             .tokens
                             .access_token
@@ -703,6 +980,12 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                             .load()
                             .unwrap()
                             .unwrap()
+                            .ha
+                            .as_ref()
+                            .unwrap()
+                            .authorization
+                            .as_ref()
+                            .unwrap()
                             .tokens
                             .access_token,
                         "unused"
@@ -715,6 +998,12 @@ fn stale_candidate_401s_before_or_after_a_refresh_cannot_pause_fresh_credentials
                         .xiaomi()
                         .load()
                         .unwrap()
+                        .unwrap()
+                        .ha
+                        .as_ref()
+                        .unwrap()
+                        .authorization
+                        .as_ref()
                         .unwrap()
                         .tokens
                         .access_token
@@ -789,6 +1078,17 @@ fn a_failed_refresh_or_a_second_unauthorized_token_requires_signin_without_stopp
                 })
                 .await;
                 assert_eq!(control.cloud.lock().unwrap().tokens, 1);
+                assert!(
+                    control
+                        .store
+                        .xiaomi()
+                        .load()
+                        .unwrap()
+                        .unwrap()
+                        .ha
+                        .unwrap()
+                        .stopped
+                );
                 control.clock.advance(Duration::from_secs(600));
                 control.context.request_sync();
                 function(&control.context.registry, "one", "outlet:2")

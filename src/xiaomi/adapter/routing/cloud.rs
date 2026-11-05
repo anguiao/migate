@@ -36,7 +36,8 @@ impl Context {
             .borrow()
             .credentials
             .as_ref()
-            .is_some_and(|credentials| credentials.tokens.expires_at > self.clock.unix_now())
+            .and_then(|credentials| credentials.ha_authorization())
+            .is_some_and(|authorization| authorization.tokens.expires_at > self.clock.unix_now())
     }
     pub(in crate::xiaomi::adapter) fn current_token(&self, token: &str) -> bool {
         self.token_usable()
@@ -45,7 +46,8 @@ impl Context {
                 .borrow()
                 .credentials
                 .as_ref()
-                .is_some_and(|credentials| credentials.tokens.access_token == token)
+                .and_then(|credentials| credentials.ha_authorization())
+                .is_some_and(|authorization| authorization.tokens.access_token == token)
     }
     pub(in crate::xiaomi::adapter) async fn token_retired(&self, token: &str) {
         loop {
@@ -117,7 +119,8 @@ impl Context {
             (
                 live.credentials
                     .as_ref()
-                    .is_some_and(|credentials| credentials.tokens.access_token == token),
+                    .and_then(|credentials| credentials.ha_authorization())
+                    .is_some_and(|authorization| authorization.tokens.access_token == token),
                 !work.life.is_closed()
                     && live
                         .devices
@@ -145,11 +148,13 @@ impl Context {
         let current = self.store.xiaomi().load()?;
         if current
             .as_ref()
-            .is_some_and(|record| record.tokens.access_token == token)
+            .and_then(|record| record.ha_authorization())
+            .is_some_and(|authorization| authorization.tokens.access_token == token)
         {
             let mut sync = self.cloud_sync.borrow_mut();
             match &*sync {
                 CloudSync::Refreshed(fresh) if fresh == token => {
+                    self.store.xiaomi().stop_ha_refresh()?;
                     *sync = CloudSync::Paused;
                     self.status.borrow_mut().authentication.authentication =
                         AuthenticationState::SignInRequired(reason);

@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn check_reports_saved_certificate_defects_alongside_ha_result() {
+    for (certificate, expected) in [
+        (None, FailureReason::MissingCertificate),
+        (
+            Some("malformed certificate".to_owned()),
+            FailureReason::InvalidCertificate,
+        ),
+    ] {
+        for ha_state in ["ok", "missing", "stopped", "network", "mismatch"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path()).unwrap();
+            let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
+            record.hub.as_mut().unwrap().certificate_pem = certificate.clone();
+            if ha_state == "missing" {
+                record.ha.as_mut().unwrap().authorization = None;
+            } else if ha_state == "stopped" {
+                record.ha.as_mut().unwrap().stopped = true;
+            }
+            store.xiaomi().replace(&record).unwrap();
+            let response = if ha_state == "network" {
+                MockResponse::json(503, "unavailable")
+            } else if ha_state == "mismatch" {
+                MockResponse::json(200, &home_body(Some("other-uid"), &[]))
+            } else {
+                MockResponse::json(200, &home_body(Some("uid"), &[]))
+            };
+            let (auth, requests) = service(&store, vec![response]);
+            let report = block_on(auth.check()).unwrap();
+            assert_eq!(report.certificate, None);
+            assert_eq!(
+                report.certificate_update,
+                CertificateUpdate::Failed(expected.clone())
+            );
+            match ha_state {
+                "ok" => assert!(matches!(
+                    report.authentication,
+                    AuthenticationState::Authenticated
+                )),
+                "missing" => assert!(matches!(
+                    report.authentication,
+                    AuthenticationState::Unavailable(FailureReason::MissingHaAuthorization)
+                )),
+                "stopped" => assert!(matches!(
+                    report.authentication,
+                    AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
+                )),
+                "network" => assert!(matches!(
+                    report.authentication,
+                    AuthenticationState::Unavailable(FailureReason::Cloud(_))
+                )),
+                "mismatch" => assert!(matches!(
+                    report.authentication,
+                    AuthenticationState::Unavailable(FailureReason::AccountIdentityMismatch)
+                )),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                requests.try_iter().count(),
+                usize::from(!matches!(ha_state, "missing" | "stopped"))
+            );
+        }
+    }
+}
+
+#[test]
 fn independent_check_keeps_its_cloud_device_probe_without_a_local_gateway() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -39,6 +104,44 @@ fn check_without_credentials_is_not_signed_in_and_makes_no_request() {
     assert_eq!(report.certificate, None);
     assert!(!report.is_success());
     assert!(requests.try_recv().is_err());
+}
+
+#[test]
+fn stopped_refresh_survives_reopening_and_check_does_not_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let record = valid_record("uid", "access", NOW, NOW + 1_000_000);
+    store.xiaomi().replace(&record).unwrap();
+    let (auth, requests) = service(&store, vec![MockResponse::json(401, "denied")]);
+    assert!(matches!(
+        block_on(auth.check()).unwrap().authentication,
+        AuthenticationState::SignInRequired(_)
+    ));
+    assert_eq!(requests.try_iter().count(), 1);
+    drop(auth);
+    drop(store);
+
+    let reopened = Store::open(dir.path()).unwrap();
+    let (auth, requests) = service(&reopened, vec![]);
+    for _ in 0..2 {
+        let report = block_on(auth.check()).unwrap();
+        assert!(matches!(
+            report.authentication,
+            AuthenticationState::SignInRequired(_)
+        ));
+        assert_eq!(report.certificate.unwrap().not_after, NOW + 1_000_000);
+    }
+    assert!(requests.try_recv().is_err());
+    assert!(
+        reopened
+            .xiaomi()
+            .load()
+            .unwrap()
+            .unwrap()
+            .ha
+            .unwrap()
+            .stopped
+    );
 }
 
 #[test]
@@ -139,7 +242,19 @@ fn check_refreshes_at_deadline_and_retries_only_failed_device_after_401() {
         AuthenticationState::SignInRequired(_)
     ));
     assert_eq!(
-        store.xiaomi().load().unwrap().unwrap().tokens.access_token,
+        store
+            .xiaomi()
+            .load()
+            .unwrap()
+            .unwrap()
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .tokens
+            .access_token,
         "fresh"
     );
     let paths = requests.try_iter().map(|r| r.target).collect::<Vec<_>>();
@@ -239,8 +354,22 @@ fn home_or_device_refresh_exhausts_the_certificate_refresh_allowance() {
             CertificateUpdate::Failed(_)
         ));
         let saved = store.xiaomi().load().unwrap().unwrap();
-        assert_eq!(saved.tokens.refresh_token, "rotated");
-        assert_eq!(saved.certificate_pem, original.certificate_pem);
+        assert_eq!(
+            saved
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
+                .tokens
+                .refresh_token,
+            "rotated"
+        );
+        assert_eq!(
+            saved.hub.as_ref().unwrap().certificate_pem,
+            original.hub.as_ref().unwrap().certificate_pem
+        );
         let requests = requests.try_iter().collect::<Vec<_>>();
         assert_eq!(requests.len(), expected_requests);
         assert_eq!(
@@ -287,7 +416,19 @@ fn refresh_is_saved_before_later_device_or_certificate_failure() {
         let report = block_on(auth.check()).unwrap();
         assert!(!report.is_success());
         assert_eq!(
-            store.xiaomi().load().unwrap().unwrap().tokens.refresh_token,
+            store
+                .xiaomi()
+                .load()
+                .unwrap()
+                .unwrap()
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
+                .tokens
+                .refresh_token,
             "rotated"
         );
     }

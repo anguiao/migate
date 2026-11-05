@@ -1,5 +1,6 @@
 use super::{
     AuthError, AuthReport, AuthService, AuthenticationState, CertificateUpdate, FailureReason,
+    service::StoredRecord,
 };
 use crate::{
     storage::{StorageError, TokenSet},
@@ -16,12 +17,46 @@ impl AuthService {
                 completed_at: (self.now)(),
             });
         };
+        let certificate_update = stored.certificate_update.clone();
+        let mut report = self.check_stored(stored).await?;
+        if report.certificate.is_none() {
+            report.certificate_update = certificate_update;
+        }
+        Ok(report)
+    }
+
+    async fn check_stored(&self, stored: StoredRecord) -> Result<AuthReport, AuthError> {
         let record = stored.record;
         let old_validity = stored.validity;
+        let certificate_update = stored.certificate_update;
+        if record.ha.as_ref().is_some_and(|ha| ha.stopped) {
+            return Ok(AuthReport {
+                authentication: AuthenticationState::SignInRequired(
+                    FailureReason::MissingHaAuthorization,
+                ),
+                certificate: old_validity,
+                certificate_update: CertificateUpdate::NotNeeded,
+                completed_at: (self.now)(),
+            });
+        }
+        let Some(ha) = record.ha.as_ref().filter(|ha| !ha.stopped) else {
+            return Ok(AuthReport::failed_auth(
+                FailureReason::MissingHaAuthorization,
+                old_validity,
+                (self.now)(),
+            ));
+        };
+        let Some(authorization) = ha.authorization.as_ref() else {
+            return Ok(AuthReport::failed_auth(
+                FailureReason::MissingHaAuthorization,
+                old_validity,
+                (self.now)(),
+            ));
+        };
         let mut session = CheckSession {
             auth: self,
-            redirect_uri: &record.redirect_uri,
-            tokens: record.tokens.clone(),
+            redirect_uri: &authorization.redirect_uri,
+            tokens: authorization.tokens.clone(),
             refreshed: false,
         };
 
@@ -49,19 +84,27 @@ impl AuthService {
         let Some(uid) = home.uid else {
             return Ok(AuthReport::failed_auth(
                 FailureReason::CannotDetermineAccountIdentity,
-                Some(old_validity),
+                old_validity,
                 (self.now)(),
             ));
         };
         if uid != record.uid {
             return Ok(AuthReport::failed_auth(
                 FailureReason::AccountIdentityMismatch,
-                Some(old_validity),
+                old_validity,
                 (self.now)(),
             ));
         }
 
         let renewal_time = (self.now)();
+        let Some(old_validity) = old_validity else {
+            return Ok(AuthReport {
+                authentication: AuthenticationState::Authenticated,
+                certificate: None,
+                certificate_update,
+                completed_at: renewal_time,
+            });
+        };
         if !old_validity.renewal_due(renewal_time) {
             return Ok(AuthReport {
                 authentication: AuthenticationState::Authenticated,
@@ -128,11 +171,12 @@ impl CheckSession<'_> {
         self.refreshed = true;
         let replacement = self
             .auth
-            .refresh_tokens_once(self.redirect_uri, &self.tokens.refresh_token, self.auth.now)
+            .refresh_tokens_once(self.redirect_uri, &self.tokens, self.auth.now)
             .await
             .map_err(|error| match error {
                 AuthError::Cloud(error) => RequestFailure::Refresh(error),
                 AuthError::Storage(error) => RequestFailure::Storage(error),
+                AuthError::Missing(message) => RequestFailure::Missing(message),
             })?;
         self.tokens = replacement;
         Ok(())
@@ -143,21 +187,21 @@ enum RequestFailure {
     Protected(CloudError),
     Refresh(CloudError),
     Storage(StorageError),
+    Missing(&'static str),
 }
 
 impl RequestFailure {
     fn auth_report(
         self,
-        validity: CertificateValidity,
+        validity: Option<CertificateValidity>,
         completed_at: i64,
     ) -> Result<AuthReport, AuthError> {
         match self {
-            Self::Protected(error) | Self::Refresh(error) => Ok(AuthReport::failed_cloud_auth(
-                error,
-                Some(validity),
-                completed_at,
-            )),
+            Self::Protected(error) | Self::Refresh(error) => {
+                Ok(AuthReport::failed_cloud_auth(error, validity, completed_at))
+            }
             Self::Storage(error) => Err(AuthError::Storage(error)),
+            Self::Missing(message) => Err(AuthError::Missing(message)),
         }
     }
 
@@ -179,6 +223,7 @@ impl RequestFailure {
                 Ok(report)
             }
             Self::Storage(error) => Err(AuthError::Storage(error)),
+            Self::Missing(message) => Err(AuthError::Missing(message)),
         }
     }
 }

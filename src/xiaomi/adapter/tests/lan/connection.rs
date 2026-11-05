@@ -88,6 +88,15 @@ fn removed_device_cancels_queued_authentication_before_first_poll() {
 
 #[test]
 fn cached_scope_restarts_offline_and_executes_real_reads_and_control() {
+    cached_scope_restarts_with_ha_state(false);
+}
+
+#[test]
+fn cached_scope_uses_direct_control_without_ha_authorization() {
+    cached_scope_restarts_with_ha_state(true);
+}
+
+fn cached_scope_restarts_with_ha_state(missing_ha: bool) {
     use crate::device::FanCommand;
     use std::sync::atomic::Ordering;
 
@@ -110,10 +119,26 @@ fn cached_scope_restarts_offline_and_executes_real_reads_and_control() {
             token,
         })
         .unwrap();
-    let mut tokens = rig.store.xiaomi().load().unwrap().unwrap().tokens;
-    tokens.refresh_at = 1;
-    tokens.expires_at = 1;
-    rig.store.xiaomi().update_tokens(&tokens).unwrap();
+    if missing_ha {
+        let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+        record.ha.as_mut().unwrap().authorization = None;
+        rig.store.xiaomi().replace(&record).unwrap();
+    } else {
+        let mut tokens = rig
+            .store
+            .xiaomi()
+            .load()
+            .unwrap()
+            .unwrap()
+            .ha
+            .unwrap()
+            .authorization
+            .unwrap()
+            .tokens;
+        tokens.refresh_at = 1;
+        tokens.expires_at = 1;
+        rig.store.xiaomi().update_tokens(&tokens).unwrap();
+    }
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.token_status = 503;

@@ -72,19 +72,26 @@ impl TlsFixture {
             credentials: XiaomiRecord {
                 uid: "isolated-account".into(),
                 region: "cn".into(),
-                oauth_client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-                redirect_uri:
-                    "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
-                        .into(),
-                tokens: TokenSet {
-                    access_token: "unused".into(),
-                    refresh_token: "unused".into(),
-                    expires_at: now.unix_timestamp() + 3600,
-                    refresh_at: now.unix_timestamp() + 3000,
-                },
-                virtual_did: identity.virtual_did,
-                private_key_pem: identity.private_key_pem,
-                certificate_pem,
+                recovery: None,
+                mijia: None,
+                ha: Some(crate::storage::HaClient {
+                    client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+                    authorization: Some(crate::storage::HaAuthorization {
+                        redirect_uri: "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef".into(),
+                        tokens: TokenSet {
+                            access_token: "unused".into(),
+                            refresh_token: "unused".into(),
+                            expires_at: now.unix_timestamp() + 3600,
+                            refresh_at: now.unix_timestamp() + 3000,
+                        },
+                    }),
+                    stopped: false,
+                }),
+                hub: Some(crate::storage::HubIdentity {
+                    virtual_did: identity.virtual_did,
+                    private_key_pem: identity.private_key_pem,
+                    certificate_pem: Some(certificate_pem),
+                }),
             },
         }
     }
@@ -175,7 +182,7 @@ pub(crate) async fn connect(
     let stream = tls::connect(address, credentials, ca).await?;
     session::start(
         Box::new(stream),
-        &credentials.virtual_did,
+        &credentials.hub.as_ref().unwrap().virtual_did,
         session::Timing {
             request,
             keepalive: None,

@@ -23,11 +23,13 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
             .borrow()
             .credentials
             .as_ref()
-            .map(|credentials| {
-                (
-                    credentials.uid.clone(),
-                    credentials.tokens.access_token.clone(),
-                )
+            .and_then(|credentials| {
+                credentials.ha_authorization().map(|authorization| {
+                    (
+                        credentials.uid.clone(),
+                        authorization.tokens.access_token.clone(),
+                    )
+                })
             });
         {
             let mut poll = poll.borrow_mut();

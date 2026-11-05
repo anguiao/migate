@@ -332,11 +332,7 @@ pub(super) struct Context {
 impl Context {
     pub(super) fn adopt_credentials(&self, credentials: XiaomiRecord) {
         let mut live = self.live.borrow_mut();
-        let changed = live.credentials.as_ref().is_none_or(|old| {
-            old.tokens != credentials.tokens
-                || old.certificate_pem != credentials.certificate_pem
-                || old.oauth_client_uuid != credentials.oauth_client_uuid
-        });
+        let changed = live.credentials.as_ref() != Some(&credentials);
         live.credentials = Some(credentials);
         drop(live);
         if changed {
@@ -367,6 +363,26 @@ impl Context {
         self.status_changed.notify(usize::MAX);
         self.update_all_availability();
         self.update_routing("hub certificate updated");
+        self.changed.notify(usize::MAX);
+    }
+
+    pub(super) fn certificate_unavailable(&self, update: CertificateUpdate) {
+        let mut status = self.status.borrow_mut();
+        if status.authentication.certificate.is_none()
+            && status.authentication.certificate_update == update
+        {
+            return;
+        }
+        status.authentication.certificate = None;
+        status.authentication.certificate_update = update;
+        status
+            .authentication
+            .set_completed_at(self.clock.unix_now());
+        drop(status);
+        self.status_changed.notify(usize::MAX);
+        self.update_all_availability();
+        self.update_routing("hub certificate unavailable");
+        self.refresh_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }
 }

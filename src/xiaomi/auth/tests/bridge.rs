@@ -19,12 +19,62 @@ fn bridge_refresh_saves_tokens_using_the_network_completion_clock_without_other_
     );
     let refreshed =
         block_on(auth.refresh_bridge_tokens(&original, || clock.load(Ordering::SeqCst))).unwrap();
-    assert_eq!(refreshed.tokens.access_token, "fresh-access");
-    assert_eq!(refreshed.tokens.refresh_token, "fresh-refresh");
-    assert_eq!(refreshed.tokens.expires_at, NOW + 1050);
-    assert_eq!(refreshed.tokens.refresh_at, NOW + 750);
-    assert_eq!(refreshed.certificate_pem, original.certificate_pem);
-    assert_eq!(refreshed.private_key_pem, original.private_key_pem);
+    assert_eq!(
+        refreshed
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .tokens
+            .access_token,
+        "fresh-access"
+    );
+    assert_eq!(
+        refreshed
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .tokens
+            .refresh_token,
+        "fresh-refresh"
+    );
+    assert_eq!(
+        refreshed
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .tokens
+            .expires_at,
+        NOW + 1050
+    );
+    assert_eq!(
+        refreshed
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
+            .tokens
+            .refresh_at,
+        NOW + 750
+    );
+    assert_eq!(
+        refreshed.hub.as_ref().unwrap().certificate_pem,
+        original.hub.as_ref().unwrap().certificate_pem
+    );
+    assert_eq!(
+        refreshed.hub.as_ref().unwrap().private_key_pem,
+        original.hub.as_ref().unwrap().private_key_pem
+    );
     assert_eq!(store.xiaomi().load().unwrap(), Some(refreshed));
     let seen = requests.try_iter().collect::<Vec<_>>();
     assert_eq!(seen.len(), 1);
@@ -49,7 +99,15 @@ fn bridge_helpers_return_a_single_unauthorized_response_without_refresh_or_retry
             block_on(auth.refresh_bridge_tokens(&original, || NOW)).unwrap_err()
         };
         assert!(matches!(error, AuthError::Cloud(error) if error.is_unauthorized()));
-        assert_eq!(store.xiaomi().load().unwrap(), Some(original));
+        let mut expected = original.clone();
+        expected.ha.as_mut().unwrap().stopped = !certificate;
+        assert_eq!(store.xiaomi().load().unwrap(), Some(expected));
+        if !certificate {
+            assert!(matches!(
+                block_on(auth.refresh_bridge_tokens(&original, || NOW)),
+                Err(AuthError::Missing(_))
+            ));
+        }
         let seen = requests.try_iter().collect::<Vec<_>>();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].target.contains("get_token"), !certificate);
@@ -91,20 +149,140 @@ fn a_late_bridge_certificate_preserves_tokens_saved_while_its_response_was_held(
         release.send(()).unwrap();
         let renewed = renewal.await.unwrap();
         assert_eq!(renewed.update, CertificateUpdate::Updated);
-        assert_eq!(renewed.credentials.tokens, fresh);
         assert_eq!(
-            renewed.credentials.private_key_pem,
-            original.private_key_pem
+            renewed
+                .credentials
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
+                .tokens,
+            fresh
         );
-        assert_eq!(renewed.credentials.virtual_did, original.virtual_did);
+        assert_eq!(
+            renewed.credentials.hub.as_ref().unwrap().private_key_pem,
+            original.hub.as_ref().unwrap().private_key_pem
+        );
+        assert_eq!(
+            renewed.credentials.hub.as_ref().unwrap().virtual_did,
+            original.hub.as_ref().unwrap().virtual_did
+        );
         assert_ne!(
-            renewed.credentials.certificate_pem,
-            original.certificate_pem
+            renewed.credentials.hub.as_ref().unwrap().certificate_pem,
+            original.hub.as_ref().unwrap().certificate_pem
         );
-        assert_eq!(renewed.validity.not_after, NOW + 10 * 24 * 60 * 60);
+        assert_eq!(renewed.validity.unwrap().not_after, NOW + 10 * 24 * 60 * 60);
         assert_eq!(store.xiaomi().load().unwrap(), Some(renewed.credentials));
         assert_eq!(requests.try_iter().count(), 0);
     });
+}
+
+#[test]
+fn a_late_refresh_rejection_does_not_stop_new_credentials() {
+    for same_values in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let original = valid_record("uid", "old-access", NOW, NOW + 60);
+        store.xiaomi().replace(&original).unwrap();
+        let (release, gate) = flume::bounded(1);
+        let (base, requests) = dynamic_mock_server(2, move |_| {
+            MockResponse::json(401, "denied").gated(gate.clone())
+        });
+        let auth = AuthService::new(
+            store.xiaomi(),
+            CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        );
+        let fresh = if same_values {
+            original
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
+                .tokens
+                .clone()
+        } else {
+            TokenSet {
+                access_token: "fresh-access".into(),
+                refresh_token: "fresh-refresh".into(),
+                expires_at: NOW + 2000,
+                refresh_at: NOW + 1400,
+            }
+        };
+        block_on(async {
+            let mut pending = Box::pin(auth.refresh_bridge_tokens(&original, || NOW));
+            assert!(poll_once(pending.as_mut()).await.is_none());
+            loop {
+                if requests.try_recv().is_ok() {
+                    break;
+                }
+                async_io::Timer::after(Duration::from_millis(1)).await;
+            }
+            store.xiaomi().update_tokens(&fresh).unwrap();
+            release.send(()).unwrap();
+            assert!(matches!(pending.await, Err(AuthError::Missing(_))));
+            let saved = store.xiaomi().load().unwrap().unwrap();
+            let ha = saved.ha.unwrap();
+            assert!(!ha.stopped);
+            assert_eq!(ha.authorization.unwrap().tokens, fresh);
+        });
+    }
+}
+
+#[test]
+fn a_late_refresh_success_does_not_replace_new_credentials() {
+    for same_values in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let original = valid_record("uid", "old-access", NOW, NOW + 60);
+        store.xiaomi().replace(&original).unwrap();
+        let (release, gate) = flume::bounded(1);
+        let (base, requests) = dynamic_mock_server(2, move |_| {
+            MockResponse::json(200, &token_body("stale-access", "stale-refresh"))
+                .gated(gate.clone())
+        });
+        let auth = AuthService::new(
+            store.xiaomi(),
+            CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        );
+        let fresh = if same_values {
+            original
+                .ha
+                .as_ref()
+                .unwrap()
+                .authorization
+                .as_ref()
+                .unwrap()
+                .tokens
+                .clone()
+        } else {
+            TokenSet {
+                access_token: "fresh-access".into(),
+                refresh_token: "fresh-refresh".into(),
+                expires_at: NOW + 2000,
+                refresh_at: NOW + 1400,
+            }
+        };
+        block_on(async {
+            let mut pending = Box::pin(auth.refresh_bridge_tokens(&original, || NOW));
+            assert!(poll_once(pending.as_mut()).await.is_none());
+            loop {
+                if requests.try_recv().is_ok() {
+                    break;
+                }
+                async_io::Timer::after(Duration::from_millis(1)).await;
+            }
+            store.xiaomi().update_tokens(&fresh).unwrap();
+            release.send(()).unwrap();
+            assert!(matches!(pending.await, Err(AuthError::Missing(_))));
+            let ha = store.xiaomi().load().unwrap().unwrap().ha.unwrap();
+            assert!(!ha.stopped);
+            assert_eq!(ha.authorization.unwrap().tokens, fresh);
+        });
+    }
 }
 
 #[test]
@@ -145,7 +323,7 @@ fn invalid_bridge_certificates_leave_saved_credentials_untouched() {
             })
         );
         assert_eq!(renewed.credentials, original);
-        assert_eq!(renewed.validity.not_after, NOW + 60);
+        assert_eq!(renewed.validity.unwrap().not_after, NOW + 60);
         assert_eq!(store.xiaomi().load().unwrap(), Some(original));
         assert_eq!(requests.try_iter().count(), 1);
     }

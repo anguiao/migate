@@ -64,17 +64,28 @@ fn changing_account_erases_old_lan_records_atomically() {
     let credentials = |uid: &str| XiaomiRecord {
         uid: uid.into(),
         region: "cn".into(),
-        oauth_client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-        redirect_uri: "http://homeassistant.local:8123/api/webhook/callback".into(),
-        tokens: TokenSet {
-            access_token: "access".into(),
-            refresh_token: "refresh".into(),
-            expires_at: 10,
-            refresh_at: 5,
-        },
-        virtual_did: "18446744073709551615".into(),
-        private_key_pem: "private".into(),
-        certificate_pem: "certificate".into(),
+        recovery: None,
+        mijia: None,
+        ha: Some(crate::storage::HaClient {
+            client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            authorization: Some(crate::storage::HaAuthorization {
+                redirect_uri:
+                    "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
+                        .into(),
+                tokens: TokenSet {
+                    access_token: "access".into(),
+                    refresh_token: "refresh".into(),
+                    expires_at: 10,
+                    refresh_at: 5,
+                },
+            }),
+            stopped: false,
+        }),
+        hub: Some(crate::storage::HubIdentity {
+            virtual_did: "18446744073709551615".into(),
+            private_key_pem: "private".into(),
+            certificate_pem: Some("certificate".into()),
+        }),
     };
     store.xiaomi().replace(&credentials("owner")).unwrap();
     let scope = Scope {
@@ -95,7 +106,7 @@ fn changing_account_erases_old_lan_records_atomically() {
         Some(record.clone())
     );
     let db = rusqlite::Connection::open(store.path()).unwrap();
-    db.execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_auth BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
+    db.execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_account BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
     assert!(
         store
             .xiaomi()

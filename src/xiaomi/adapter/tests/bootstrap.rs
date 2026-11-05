@@ -636,13 +636,13 @@ fn cached_build_dropped_before_run_releases_its_context_and_closes_commands() {
 }
 
 #[test]
-fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
+fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails() {
     for corrupt_credentials in [false, true] {
         let rig = Rig::new(true, &["one"]);
         let database = rusqlite::Connection::open(rig.store.path()).unwrap();
         if corrupt_credentials {
             database
-                .execute("UPDATE xiaomi_auth SET certificate_pem='broken'", [])
+                .execute("UPDATE xiaomi_hub SET certificate_pem='broken'", [])
                 .unwrap();
         } else {
             database
@@ -655,8 +655,70 @@ fn corrupt_saved_credentials_or_cached_topology_fail_before_network_requests() {
             rig.discovery.clone(),
             rig.clock.clone(),
         );
-        assert!(matches!(result, Err(AdapterError::Storage(_))));
+        if corrupt_credentials {
+            let (adapter, ready) = result.unwrap();
+            block_on(poll_once(ready.wait())).unwrap().unwrap();
+            assert_eq!(
+                adapter.context.status.borrow().authentication.certificate,
+                None
+            );
+            assert!(adapter.context.live.borrow().scope.is_some());
+            assert!(adapter.context.live.borrow().devices.contains_key("one"));
+        } else {
+            assert!(matches!(result, Err(AdapterError::Storage(_))));
+        }
         assert_eq!(rig.cloud.lock().unwrap().homes, 0);
+    }
+}
+
+#[test]
+fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
+    for missing_ha in [true, false] {
+        let rig = Rig::new(true, &["one"]);
+        let mut saved = rig.store.xiaomi().load().unwrap().unwrap();
+        if missing_ha {
+            saved.ha.as_mut().unwrap().authorization = None;
+        } else {
+            saved.hub.as_mut().unwrap().certificate_pem = None;
+        }
+        rig.store.xiaomi().replace(&saved).unwrap();
+        let (adapter, ready) = XiaomiAdapter::build(
+            rig.store.clone(),
+            rig.source.cloud.clone(),
+            rig.discovery.clone(),
+            rig.clock.clone(),
+        )
+        .unwrap();
+        block_on(poll_once(ready.wait())).unwrap().unwrap();
+        assert!(adapter.context.live.borrow().scope.is_some());
+        assert!(adapter.context.live.borrow().devices.contains_key("one"));
+        let report = adapter.context.status.borrow().authentication.clone();
+        assert_eq!(report.certificate.is_some(), missing_ha);
+        if missing_ha {
+            assert!(matches!(
+                report.authentication,
+                crate::xiaomi::auth::AuthenticationState::Unavailable(
+                    crate::xiaomi::auth::FailureReason::MissingHaAuthorization
+                )
+            ));
+        }
+        let result = block_on(future::or(
+            async { Some(adapter.run(|_| {}).await) },
+            async {
+                async_io::Timer::after(Duration::from_millis(30)).await;
+                None
+            },
+        ));
+        assert!(
+            result.is_none(),
+            "adapter exited on missing credentials: {result:?}"
+        );
+        assert_eq!(rig.store.xiaomi().load().unwrap(), Some(saved));
+        assert_eq!(rig.cloud.lock().unwrap().certs, 0);
+        if missing_ha {
+            assert_eq!(rig.cloud.lock().unwrap().tokens, 0);
+            assert_eq!(rig.cloud.lock().unwrap().homes, 0);
+        }
     }
 }
 

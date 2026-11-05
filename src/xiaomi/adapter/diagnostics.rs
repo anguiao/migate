@@ -30,7 +30,10 @@ impl Context {
                 .borrow()
                 .credentials
                 .as_ref()
-                .is_some_and(|record| record.tokens.expires_at <= self.clock.unix_now());
+                .and_then(|record| record.ha_authorization())
+                .is_some_and(|authorization| {
+                    authorization.tokens.expires_at <= self.clock.unix_now()
+                });
             if expired {
                 "access token expired"
             } else if self.live.borrow().session.is_some()

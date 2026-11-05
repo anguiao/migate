@@ -238,6 +238,12 @@ fn foreground_cloud_read_unauthorized_rejects_current_credentials() {
             .credentials
             .as_ref()
             .unwrap()
+            .ha
+            .as_ref()
+            .unwrap()
+            .authorization
+            .as_ref()
+            .unwrap()
             .tokens
             .access_token
             .clone();

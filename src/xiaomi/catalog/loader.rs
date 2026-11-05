@@ -16,6 +16,7 @@ use crate::{
 pub enum CatalogError {
     NoLocalHome,
     InvalidScope,
+    MissingAuthorization,
     TargetMissing,
     Cloud(CloudError),
     Capability(CapabilityError),
@@ -31,6 +32,9 @@ impl fmt::Display for CatalogError {
                 formatter.write_str("target device is missing from locally matched Xiaomi homes")
             }
             Self::InvalidScope => formatter.write_str("invalid Xiaomi account or home scope"),
+            Self::MissingAuthorization => {
+                formatter.write_str("HA OAuth credentials are unavailable")
+            }
             Self::Cloud(error) => error.fmt(formatter),
             Self::Capability(error) => error.fmt(formatter),
         }
@@ -91,8 +95,11 @@ pub(crate) async fn load_device(
     if !home.dids.iter().any(|member| member == did) {
         return Err(CatalogError::TargetMissing);
     }
+    let authorization = credentials
+        .ha_authorization()
+        .ok_or(CatalogError::MissingAuthorization)?;
     let details = cloud
-        .get_device(&credentials.tokens.access_token, home, did)
+        .get_device(&authorization.tokens.access_token, home, did)
         .await
         .map_err(CatalogError::Cloud)?
         .ok_or(CatalogError::TargetMissing)?;

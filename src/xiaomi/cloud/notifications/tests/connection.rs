@@ -139,8 +139,18 @@ fn cloud_connect_authentication_rejections_are_sanitized() {
         match field {
             "region" => record.region = "us".into(),
             "uid" => record.uid.clear(),
-            "uuid" => record.oauth_client_uuid = "invalid".into(),
-            "token" => record.tokens.access_token = "token\n".into(),
+            "uuid" => record.ha.as_mut().unwrap().client_uuid = "invalid".into(),
+            "token" => {
+                record
+                    .ha
+                    .as_mut()
+                    .unwrap()
+                    .authorization
+                    .as_mut()
+                    .unwrap()
+                    .tokens
+                    .access_token = "token\n".into()
+            }
             _ => unreachable!(),
         }
         let error = PreparedConnection::new(&record, timing()).err().unwrap();

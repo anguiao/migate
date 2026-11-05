@@ -201,8 +201,24 @@ impl Rig {
         let uid = tls.credentials.uid.clone();
         let mut credentials = tls.credentials.clone();
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        credentials.tokens.refresh_at = now + 1_000_000;
-        credentials.tokens.expires_at = now + 2_000_000;
+        credentials
+            .ha
+            .as_mut()
+            .unwrap()
+            .authorization
+            .as_mut()
+            .unwrap()
+            .tokens
+            .refresh_at = now + 1_000_000;
+        credentials
+            .ha
+            .as_mut()
+            .unwrap()
+            .authorization
+            .as_mut()
+            .unwrap()
+            .tokens
+            .expires_at = now + 2_000_000;
         store.xiaomi().replace(&credentials).unwrap();
         let mut data = vec![
             cached(&uid, "one", false),
@@ -286,7 +302,14 @@ impl Rig {
         let responses = cloud.clone();
         let records = data.clone();
         let account_uid = uid.clone();
-        let certificate = tls.credentials.certificate_pem.clone();
+        let certificate = tls
+            .credentials
+            .hub
+            .as_ref()
+            .unwrap()
+            .certificate_pem
+            .clone()
+            .unwrap();
         let (base, _requests) = dynamic_mock_server(200, move |request| {
             let detail_finished = responses.clone();
             let token_finished = responses.clone();
