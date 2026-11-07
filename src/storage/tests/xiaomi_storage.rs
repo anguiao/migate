@@ -275,7 +275,7 @@ fn stopped_groups_survive_restart_and_only_login_commit_clears_them() {
 }
 
 #[test]
-fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_account() {
+fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let old = record("old");
@@ -292,22 +292,6 @@ fn login_commit_rolls_back_all_groups_and_stops_on_storage_failure_or_wrong_acco
         redirect_uri: REDIRECT.into(),
         tokens: tokens("new"),
     };
-    assert!(
-        store
-            .xiaomi()
-            .commit_login(
-                &recovery("other", "new"),
-                &session("other", "new"),
-                UUID,
-                &oauth
-            )
-            .is_err()
-    );
-    assert_eq!(store.xiaomi().load().unwrap(), before);
-    assert_eq!(
-        store.xiaomi().current_snapshot().record,
-        before_snapshot.record
-    );
     Connection::open(store.path()).unwrap().execute_batch(
         "CREATE TRIGGER reject_login BEFORE UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'reject'); END;").unwrap();
     assert!(

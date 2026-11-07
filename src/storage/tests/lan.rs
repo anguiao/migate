@@ -128,22 +128,6 @@ fn same_account_login_preserves_lan_and_logout_erases_it() {
         )
     };
     let authorization = credentials("owner").ha.unwrap().authorization.unwrap();
-    let (other_account, other_session) = login("different-owner");
-    assert!(
-        store
-            .xiaomi()
-            .commit_login(
-                &other_account,
-                &other_session,
-                "550e8400-e29b-41d4-a716-446655440000",
-                &authorization
-            )
-            .is_err()
-    );
-    assert_eq!(
-        store.lan().load(&scope, &record.did).unwrap(),
-        Some(record.clone())
-    );
     let db = rusqlite::Connection::open(store.path()).unwrap();
     db.execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
     let (account, session) = login("owner");

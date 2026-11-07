@@ -170,10 +170,9 @@ impl AuthService {
     }
 
     pub(super) fn reload_credentials(&self) -> Result<StoredRecord, AuthError> {
-        self.load_validated()?.ok_or_else(|| {
-            self.corrupt_record("Xiaomi credentials disappeared after an update")
-                .into()
-        })
+        Ok(self
+            .load_validated()?
+            .expect("credentials saved before reload"))
     }
 
     pub(super) fn load_validated(&self) -> Result<Option<StoredRecord>, AuthError> {

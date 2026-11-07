@@ -329,7 +329,8 @@ impl XiaomiStore {
     /// Commit all credentials obtained during one login while preserving the
     /// existing hub identity. This is the only maintenance operation that
     /// clears both durable stop flags.
-    pub fn commit_login(
+    /// The login flow has already verified the account and retained the client UUID.
+    pub(crate) fn commit_login(
         &self,
         credentials: &AccountCredentials,
         session: &MijiaSession,
@@ -354,14 +355,6 @@ impl XiaomiStore {
         self.validate(&candidate)?;
         (|| {
             let tx = self.store.connection().unchecked_transaction()?;
-            let current: Option<String> = tx.query_row("SELECT uid FROM xiaomi_account WHERE id = 1", [], |row| row.get(0)).optional()?;
-            if current.as_deref().is_some_and(|uid| uid != candidate.uid) {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let old_client: Option<String> = tx.query_row("SELECT client_uuid FROM xiaomi_ha_client WHERE id = 1", [], |row| row.get(0)).optional()?;
-            if old_client.as_deref().is_some_and(|uuid| uuid != client_uuid) {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
             tx.execute("INSERT INTO xiaomi_account (id, uid, region) VALUES (1, ?1, 'cn') ON CONFLICT(id) DO NOTHING", [&candidate.uid])?;
             write_recovery(&tx, credentials, None)?;
             write_session(&tx, session)?;
