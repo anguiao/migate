@@ -39,7 +39,6 @@ pub struct HomePage {
 pub struct CloudClient {
     client: HttpClient,
     base_url: String,
-    timeout: Duration,
     pub(super) instance_base_url: String,
 }
 
@@ -67,7 +66,6 @@ impl CloudClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_owned(),
-            timeout,
             instance_base_url: "https://miot-spec.org".to_owned(),
         })
     }
@@ -195,53 +193,29 @@ impl CloudClient {
         Ok(result.cert)
     }
 
-    pub(super) async fn protected_post<T: DeserializeOwned>(
+    async fn protected_post<T: DeserializeOwned>(
         &self,
         operation: &'static str,
         path: &str,
         access_token: &str,
         body: Value,
     ) -> Result<T, CloudError> {
-        self.protected_post_with_timeout(operation, path, access_token, body, self.timeout)
-            .await
-    }
-
-    pub(super) async fn protected_post_with_timeout<T: DeserializeOwned>(
-        &self,
-        operation: &'static str,
-        path: &str,
-        access_token: &str,
-        body: Value,
-        timeout: Duration,
-    ) -> Result<T, CloudError> {
-        let request = self.protected_request(operation, path, access_token, body, timeout)?;
-        self.send::<ApiResponse>(request, operation)
-            .await?
-            .into_result(operation)
-    }
-
-    fn protected_request(
-        &self,
-        operation: &'static str,
-        path: &str,
-        access_token: &str,
-        body: Value,
-        timeout: Duration,
-    ) -> Result<Request<String>, CloudError> {
         if access_token.is_empty() {
             return Err(CloudError::input(operation));
         }
         let url = self.endpoint(path, operation)?;
-        Request::builder()
+        let request = Request::builder()
             .method("POST")
             .uri(url.as_str())
-            .timeout(timeout.min(self.timeout))
             .header("Content-Type", "application/json")
             .header("X-Client-BizId", "haapi")
             .header("X-Client-AppId", CLIENT_ID.to_string())
             .header("Authorization", format!("Bearer{access_token}"))
             .body(body.to_string())
-            .map_err(|_| CloudError::protocol(operation))
+            .map_err(|_| CloudError::protocol(operation))?;
+        self.send::<ApiResponse>(request, operation)
+            .await?
+            .into_result(operation)
     }
 
     fn endpoint(&self, path: &str, operation: &'static str) -> Result<Url, CloudError> {
