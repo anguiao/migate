@@ -78,7 +78,7 @@ fn directory_rejects_bad_or_failed_later_page_instead_of_returning_partial() {
 fn home_lookup_never_requests_a_device_outside_the_selected_home() {
     let (base, requests) = mock_server(vec![response(json!({"list":[]}))]);
     let client = client(&base, Duration::from_secs(1));
-    let home = crate::xiaomi::cloud::OwnedHome {
+    let home = crate::xiaomi::mijia::OwnedHome {
         uid: "123".into(),
         home_id: "9".into(),
         group_id: "group".into(),

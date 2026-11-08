@@ -6,12 +6,6 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use url::Url;
 
-use support::*;
-
-mod catalog;
 mod client;
-mod device_info;
-mod light_groups;
+mod identity;
 mod oauth;
-mod properties;
-mod support;

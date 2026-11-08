@@ -1,7 +1,5 @@
-use super::{
-    AuthorizationAttempt, CLIENT_ID, CloudError, CloudErrorKind,
-    response::{ApiResponse, Identifier},
-};
+use super::{AuthorizationAttempt, CLIENT_ID, CloudError, CloudErrorKind, response::ApiResponse};
+use crate::xiaomi::http::{Identifier, response_read_error_kind};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use isahc::{
     AsyncReadResponseExt, HttpClient, Request,
@@ -9,7 +7,7 @@ use isahc::{
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{error::Error as StdError, fmt, time::Duration};
+use std::{fmt, time::Duration};
 use url::Url;
 
 pub const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
@@ -291,23 +289,6 @@ fn validate_token(value: &str, operation: &'static str) -> Result<(), CloudError
         return Err(CloudError::protocol(operation));
     }
     Ok(())
-}
-
-pub(in crate::xiaomi) fn response_read_error_kind(error: &std::io::Error) -> CloudErrorKind {
-    if error.kind() == std::io::ErrorKind::TimedOut {
-        return CloudErrorKind::Timeout;
-    }
-    let mut source = error.source();
-    while let Some(current) = source {
-        if current
-            .downcast_ref::<isahc::Error>()
-            .is_some_and(isahc::Error::is_timeout)
-        {
-            return CloudErrorKind::Timeout;
-        }
-        source = current.source();
-    }
-    CloudErrorKind::Network
 }
 
 #[cfg(test)]

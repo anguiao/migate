@@ -1,6 +1,6 @@
 use super::super::relations::Relations;
 use crate::configuration::Scope;
-use crate::xiaomi::cloud::{
+use crate::xiaomi::mijia::{
     CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
 };
 use std::collections::BTreeSet;

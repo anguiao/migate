@@ -66,8 +66,8 @@ cargo run --locked
 | `src/matter/` | 显式发布形状、协议命令规划、单位换算、属性投影、版本与报告、配对。 |
 | `src/storage/` | 完整配置的私有编码与事务、独立撤权记录、认证、桥接身份及协议数据存储。 |
 | `src/xiaomi/auth/` | 米家扫码登录、HA OAuth 授权衔接、凭据恢复与分项状态报告。 |
-| `src/xiaomi/mijia/` | 米家会话、设备 HTTP 签名与传输、Action 和旧 miIO RPC 通信。 |
-| `src/xiaomi/cloud/` | 米家设备目录与属性接口及解析、原始 MIoT 描述加载、HA OAuth、证书接口和云端 MQTT 通知。 |
+| `src/xiaomi/mijia/` | 米家会话、设备 HTTP 签名与传输、设备目录、属性、Action 和旧 miIO RPC 接口及解析。 |
+| `src/xiaomi/cloud/` | HA OAuth、证书接口、云端 MQTT 通知与独立的原始 MIoT 描述加载。 |
 | `src/xiaomi/capability/`、`src/xiaomi/catalog/` | MIoT 能力解析与当前本地家庭的设备描述加载。 |
 | `src/xiaomi/discovery/` | mDNS 浏览、公告解析与合并、网关路由选择。 |
 | `src/xiaomi/lan/` | IP 直连握手、加密通信、发现及请求关联。 |

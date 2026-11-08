@@ -2,7 +2,7 @@ use super::{
     LIMIT, NotificationError, NotificationEvent, NotificationHandle, Timing, Transport,
     request::{Request, RequestKind, Shared, Target},
 };
-use crate::xiaomi::{cloud::response::Identifier, mqtt};
+use crate::xiaomi::{http::Identifier, mqtt};
 use futures_lite::{future, io::AsyncRead};
 use mqttbytes::{QoS, v5::*};
 use serde_json::Value;

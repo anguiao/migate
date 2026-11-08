@@ -1,19 +1,12 @@
-mod catalog;
-pub(super) mod client;
+mod client;
+mod description;
 mod error;
-mod light_groups;
 mod notifications;
 mod oauth;
-mod properties;
 mod response;
 
-pub use catalog::{CloudDevice, CloudDeviceInfo, OwnedHome, OwnedHomes, group_id};
-pub(crate) use catalog::{LanCandidate, LanCredentials};
 pub use client::{CLOUD_BASE_URL, CloudClient, HomePage, TokenResponse};
 pub use error::{CloudError, CloudErrorKind};
-pub use light_groups::{
-    CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
-};
 pub use notifications::{
     NotificationDriver, NotificationError, NotificationEvent, NotificationHandle,
     connect_notifications,

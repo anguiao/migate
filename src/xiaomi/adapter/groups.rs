@@ -10,7 +10,7 @@ use super::{model::AdapterError, relations::ConfirmedGroup, state::Context};
 use crate::{
     device::DeviceKey,
     xiaomi::capability::RawDescription,
-    xiaomi::cloud::{CloudClient, CloudDeviceInfo},
+    xiaomi::{cloud::CloudClient, mijia::CloudDeviceInfo},
 };
 use futures_lite::future;
 use std::rc::Rc;
@@ -101,7 +101,7 @@ impl Context {
                             model: group.model.clone(),
                             instance_type: instance_type.clone(),
                             online: group.online,
-                            lan: crate::xiaomi::cloud::LanCredentials::NotIp,
+                            lan: crate::xiaomi::mijia::LanCredentials::NotIp,
                         });
                 group.membership.is_physical
                     && known.is_none_or(|(physical, model, instance_type)| {

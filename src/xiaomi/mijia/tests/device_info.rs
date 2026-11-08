@@ -1,3 +1,4 @@
+use super::support::*;
 use super::*;
 use crate::xiaomi::test_support::{dynamic_mock_server, mock_server};
 use futures_lite::future;
@@ -287,7 +288,7 @@ fn home_device_info_limits_requests_and_strict_validation_to_selected_members() 
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     let selected_home = home(["target", "router"]);
     let devices = future::block_on(cloud.get_home_devices(
-        &session("token"),
+        &token_session("token"),
         &selected_home,
         &["target".into()],
     ))
@@ -305,7 +306,7 @@ fn home_device_info_rejects_requested_devices_outside_the_selected_home() {
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
         future::block_on(cloud.get_home_devices(
-            &session("token"),
+            &token_session("token"),
             &home(["target"]),
             &["foreign".into()]
         ))
@@ -321,16 +322,20 @@ fn home_device_info_skips_http_for_no_requested_members() {
     let (base, requests) = mock_server(vec![response(json!({}))]);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert!(
-        future::block_on(cloud.get_home_devices(&session("token"), &home(["unrequested"]), &[]))
-            .unwrap()
-            .is_empty()
+        future::block_on(cloud.get_home_devices(
+            &token_session("token"),
+            &home(["unrequested"]),
+            &[]
+        ))
+        .unwrap()
+        .is_empty()
     );
     assert!(requests.try_recv().is_err());
 }
 
 #[test]
 fn home_directory_extracts_only_valid_ip_device_credentials_without_exposing_tokens() {
-    use crate::xiaomi::cloud::catalog::LanCredentials;
+    use crate::xiaomi::mijia::catalog::LanCredentials;
     let mut valid = device("656878122", true);
     valid["model"] = json!("dmaker.fan.p5c");
     valid["pid"] = json!(0);

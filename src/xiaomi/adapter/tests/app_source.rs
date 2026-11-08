@@ -193,12 +193,12 @@ impl AppSource {
         for (did, slot) in &mut self.handle.0.live.borrow_mut().devices {
             slot.confirmed = true;
             let raw = &slot.committed.as_ref().unwrap().raw;
-            slot.cloud_access = Some(crate::xiaomi::cloud::CloudDeviceInfo {
+            slot.cloud_access = Some(crate::xiaomi::mijia::CloudDeviceInfo {
                 did: did.clone(),
                 model: raw.model.clone(),
                 instance_type: raw.instance_type.clone(),
                 online: false,
-                lan: crate::xiaomi::cloud::LanCredentials::NotIp,
+                lan: crate::xiaomi::mijia::LanCredentials::NotIp,
             });
         }
     }

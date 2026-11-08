@@ -614,7 +614,7 @@ fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
     use super::super::super::routing::ControlPath;
     use crate::xiaomi::{
         capability::PropertyBinding,
-        cloud::{CloudDeviceInfo, LanCredentials},
+        mijia::{CloudDeviceInfo, LanCredentials},
     };
 
     let did = "308540429";

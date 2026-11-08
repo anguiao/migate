@@ -6,11 +6,11 @@
 //! the caller, which owns the authoritative home directory.
 
 use super::{
-    CloudError,
+    MijiaClient, MijiaSession,
     catalog::Pagination,
     response::{description, null_list, valid_description},
 };
-use crate::xiaomi::mijia::{MijiaClient, MijiaSession};
+use crate::xiaomi::cloud::CloudError;
 use serde::{
     Deserialize, Deserializer,
     de::{self, MapAccess, Visitor},

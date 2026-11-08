@@ -9,7 +9,7 @@
 
 use crate::{
     configuration::{GroupRelation, Scope},
-    xiaomi::cloud::{
+    xiaomi::mijia::{
         CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
     },
 };

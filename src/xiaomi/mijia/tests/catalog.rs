@@ -1,3 +1,4 @@
+use super::support::*;
 use super::*;
 
 #[test]
@@ -13,7 +14,7 @@ fn owned_catalog_rejects_incomplete_initial_room_membership() {
         )]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -33,7 +34,7 @@ fn owned_catalog_rejects_undeclared_home_on_any_member_page() {
         ]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -89,7 +90,7 @@ fn owned_catalog_validates_identifiers_in_initial_and_paged_membership() {
         let (base, _) = mock_server(responses);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -109,7 +110,7 @@ fn owned_catalog_accepts_legal_empty_membership_and_terminal_page() {
         )]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap()
                 .homes[0]
                 .dids
@@ -126,7 +127,7 @@ fn owned_catalog_accepts_legal_empty_membership_and_terminal_page() {
         ]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap()
                 .homes[0]
                 .dids
@@ -146,7 +147,7 @@ fn owned_catalog_rejects_failed_or_truncated_member_page_without_partial_result(
             page,
         ]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-        assert!(future::block_on(cloud.get_owned_homes(&session("token"))).is_err());
+        assert!(future::block_on(cloud.get_owned_homes(&token_session("token"))).is_err());
         assert_eq!(requests.try_iter().count(), 2);
     }
 }
@@ -171,7 +172,7 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
             .collect(),
     );
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    let catalog = future::block_on(cloud.get_owned_homes(&session("token"))).unwrap();
+    let catalog = future::block_on(cloud.get_owned_homes(&token_session("token"))).unwrap();
     assert_eq!(catalog.uid.as_deref(), Some("account"));
     let local = catalog
         .homes
@@ -180,11 +181,11 @@ fn owned_catalog_paginates_and_only_loads_the_matched_homes_device() {
         .unwrap();
     assert_eq!(local.dids, ["first", "target"]);
     assert!(
-        future::block_on(cloud.get_device(&session("token"), local, "remote-did"))
+        future::block_on(cloud.get_device(&token_session("token"), local, "remote-did"))
             .unwrap()
             .is_none()
     );
-    let device = future::block_on(cloud.get_device(&session("token"), local, "target"))
+    let device = future::block_on(cloud.get_device(&token_session("token"), local, "target"))
         .unwrap()
         .unwrap();
     assert_eq!(device.did, "target");
@@ -213,7 +214,7 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
         )]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap()
                 .homes
                 .is_empty()
@@ -232,7 +233,7 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
         )]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_owned_homes(&session("token")))
+            future::block_on(cloud.get_owned_homes(&token_session("token")))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -246,7 +247,7 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
     ]);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_owned_homes(&session("token")))
+        future::block_on(cloud.get_owned_homes(&token_session("token")))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -260,7 +261,7 @@ fn catalog_rejects_invalid_or_repeated_cursors_and_accepts_null_lists() {
     ]);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_owned_homes(&session("token")))
+        future::block_on(cloud.get_owned_homes(&token_session("token")))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -289,7 +290,7 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
         )]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(
-            future::block_on(cloud.get_device(&session("token"), &home, "target"))
+            future::block_on(cloud.get_device(&token_session("token"), &home, "target"))
                 .unwrap_err()
                 .kind(),
             &CloudErrorKind::Protocol
@@ -307,7 +308,7 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
     );
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_device(&session("token"), &home, "target"))
+        future::block_on(cloud.get_device(&token_session("token"), &home, "target"))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -319,7 +320,7 @@ fn device_pages_reject_missing_fields_and_repeated_cursors() {
     )]);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert!(
-        future::block_on(cloud.get_device(&session("token"), &home, "target"))
+        future::block_on(cloud.get_device(&token_session("token"), &home, "target"))
             .unwrap()
             .is_none()
     );
@@ -340,7 +341,7 @@ fn owned_catalog_reads_past_empty_and_overlapping_pages_before_returning_members
             .collect(),
     );
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    let catalog = future::block_on(cloud.get_owned_homes(&session("token"))).unwrap();
+    let catalog = future::block_on(cloud.get_owned_homes(&token_session("token"))).unwrap();
     assert_eq!(catalog.homes[0].dids, ["first", "last"]);
     assert_eq!(requests.try_iter().count(), 4);
 }
@@ -366,7 +367,7 @@ fn device_lookup_reads_past_empty_and_overlapping_pages_without_broadening_dids(
             .collect(),
     );
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    let device = future::block_on(cloud.get_device(&session("token"), &home, "target"))
+    let device = future::block_on(cloud.get_device(&token_session("token"), &home, "target"))
         .unwrap()
         .unwrap();
     assert_eq!(device.did, "target");
@@ -394,45 +395,9 @@ fn device_lookup_leaves_missing_or_unusable_names_unset() {
             &json!({"code":0,"result":result}).to_string(),
         )]);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-        let device = future::block_on(cloud.get_device(&session("token"), &home, "target"))
+        let device = future::block_on(cloud.get_device(&token_session("token"), &home, "target"))
             .unwrap()
             .unwrap();
         assert_eq!(device.name, None);
     }
-}
-
-#[test]
-fn ha_identity_probe_is_minimal() {
-    let dids = (0..160)
-        .map(|index| format!("did-{index}"))
-        .collect::<Vec<_>>();
-    let home = json!({"code":0,"result":{"homelist":[{"uid":123,"dids":dids,"roomlist":[{"dids":["did-0","room-only"]}]}],"share_home_list":[{"uid":"shared"}],"has_more":true}});
-    let (base, requests) = mock_server(vec![MockResponse::json(200, &home.to_string())]);
-    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let page = future::block_on(client.get_home("access-secret")).unwrap();
-    assert_eq!(page.uid.as_deref(), Some("123"));
-    let home_request = requests.recv().unwrap();
-    assert!(home_request.target.ends_with("/app/v2/homeroom/gethome"));
-    assert!(
-        home_request
-            .headers
-            .to_ascii_lowercase()
-            .contains("authorization: beareraccess-secret")
-    );
-    assert_eq!(
-        serde_json::from_str::<Value>(&home_request.body).unwrap(),
-        json!({"limit":150,"fetch_share":false,"fetch_share_dev":false,"plat_form":0,"app_ver":9})
-    );
-    assert!(requests.try_recv().is_err());
-}
-
-#[test]
-fn floating_point_uid_is_a_protocol_error() {
-    let (base, _) = mock_server(vec![MockResponse::json(
-        200,
-        r#"{"code":0,"result":{"homelist":[{"uid":12.5}]}}"#,
-    )]);
-    let client = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let error = future::block_on(client.get_home("access")).unwrap_err();
-    assert_eq!(error.kind(), &CloudErrorKind::Protocol);
 }

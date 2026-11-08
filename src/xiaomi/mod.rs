@@ -6,6 +6,7 @@ pub(crate) mod central;
 pub(crate) mod certificate;
 pub mod cloud;
 pub mod discovery;
+mod http;
 pub(crate) mod lan;
 mod legacy_miio;
 pub mod mijia;

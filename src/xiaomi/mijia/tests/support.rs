@@ -13,21 +13,17 @@ pub(super) fn device(did: &str, online: bool) -> Value {
     json!({"did":did,"model":"vendor.plug","spec_type":"instance-type","isOnline":online})
 }
 
-pub(super) fn response(result: Value) -> MockResponse {
-    MockResponse::json(200, &json!({"code":0,"result":result}).to_string())
-}
-
 pub(super) async fn get_home_devices(
     cloud: &crate::xiaomi::mijia::MijiaClient,
     token: &str,
     home: &OwnedHome,
 ) -> Result<Vec<CloudDeviceInfo>, CloudError> {
     cloud
-        .get_home_devices(&session(token), home, &home.dids)
+        .get_home_devices(&token_session(token), home, &home.dids)
         .await
 }
 
-pub(super) fn session(token: &str) -> crate::xiaomi::mijia::MijiaSession {
+pub(super) fn token_session(token: &str) -> crate::xiaomi::mijia::MijiaSession {
     crate::xiaomi::mijia::MijiaSession::new(
         "account".into(),
         token.into(),

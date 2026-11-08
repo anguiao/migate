@@ -7,9 +7,9 @@ use crate::{
     storage::LanRecord,
     xiaomi::{
         capability::{NativeDescription, PropertyBinding},
-        cloud::{LanCandidate, LanCredentials},
         lan::{Client, Failure, RequestError, SendStage},
         legacy_miio::Mapping,
+        mijia::{LanCandidate, LanCredentials},
     },
 };
 use futures_lite::future;

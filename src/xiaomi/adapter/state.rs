@@ -16,7 +16,7 @@ use crate::{
         auth::{AuthenticationState, CertificateUpdate, FailureReason},
         central::{CentralError, DeviceAccess, SessionHandle},
         certificate::CertificateValidity,
-        cloud::CloudDeviceInfo,
+        mijia::CloudDeviceInfo,
         mijia::MijiaClient,
     },
 };

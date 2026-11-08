@@ -2,7 +2,7 @@ use super::{
     ACCOUNT_URL, AccountClient, AccountClientIdentity, AccountCredentials, AccountError,
     AccountErrorKind, AccountStage, MijiaSession, check_response, field,
 };
-use crate::xiaomi::cloud::{CloudErrorKind, client::response_read_error_kind};
+use crate::xiaomi::{cloud::CloudErrorKind, http::response_read_error_kind};
 use isahc::{
     AsyncBody, AsyncReadResponseExt, HttpClient, Request, Response,
     config::{Configurable as _, RedirectPolicy},

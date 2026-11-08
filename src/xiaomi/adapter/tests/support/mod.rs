@@ -12,8 +12,9 @@ pub(super) use crate::{
     storage::Store,
     xiaomi::{
         central::test_support::TlsFixture,
-        cloud::{CloudClient, group_id},
+        cloud::CloudClient,
         discovery::Discovery,
+        mijia::group_id,
         test_support::{MockResponse, dynamic_mock_server},
     },
 };

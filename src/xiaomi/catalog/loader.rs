@@ -7,9 +7,9 @@ use crate::{
     storage::XiaomiRecord,
     xiaomi::{
         capability::CapabilityError,
-        cloud::{CloudClient, CloudError, OwnedHome},
+        cloud::{CloudClient, CloudError},
         discovery::DiscoverySnapshot,
-        mijia::MijiaClient,
+        mijia::{MijiaClient, OwnedHome},
     },
 };
 

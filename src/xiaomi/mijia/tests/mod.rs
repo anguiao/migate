@@ -1,15 +1,23 @@
 use super::*;
 use crate::xiaomi::{
     capability::PropertyBinding,
-    cloud::{CloudErrorKind, CloudGroupStatus, LanCredentials},
+    cloud::{CloudError, CloudErrorKind},
     test_support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
 };
-use futures_lite::future::block_on;
-use serde_json::json;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use futures_lite::future::{self, block_on};
+use hmac::{Hmac, KeyInit, Mac};
+use serde_json::{Value, json};
+use sha2::Sha256;
 use std::{collections::HashMap, time::Duration};
 
+mod catalog;
+mod device_info;
 mod directory;
+mod light_groups;
+mod properties;
 mod requests;
+mod support;
 
 fn session() -> MijiaSession {
     MijiaSession::new(
@@ -22,9 +30,7 @@ fn session() -> MijiaSession {
 }
 
 fn client(base: &str, timeout: Duration) -> MijiaClient {
-    let mut client = MijiaClient::build(base, timeout).unwrap();
-    client.fixed_nonce = Some(([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77], 28_333_333));
-    client
+    MijiaClient::for_signed_test(base, timeout)
 }
 
 fn form(request: &ReceivedRequest) -> HashMap<String, String> {
@@ -61,19 +67,6 @@ fn assert_signed(request: &ReceivedRequest) {
 
 fn response(result: Value) -> MockResponse {
     MockResponse::json(200, &json!({"code":0,"result":result}).to_string())
-}
-
-#[test]
-fn signed_form_uses_binary_hmac_key_and_exact_json_path_and_minute_nonce() {
-    let (nonce, signature) = signed_fields(
-        b"0123456789abcdef",
-        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77],
-        28_333_333,
-        "/app/miotspec/prop/get",
-        "{\"name\":\"A&B + /中文\",\"value\":true}",
-    );
-    assert_eq!(nonce, "ABEiM0RVZncBsFUV");
-    assert_eq!(signature, "2nnuksC5chgtjTkiegPnjtWkm0pcVQgTZKunQIrtM2Y=");
 }
 
 #[test]

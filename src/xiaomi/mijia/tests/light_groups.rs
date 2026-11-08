@@ -1,3 +1,4 @@
+use super::support::*;
 use super::*;
 
 const GROUP_MODEL: &str = "mijia.light.group3";
@@ -43,7 +44,7 @@ fn catalog_page(records: Vec<Value>, has_more: bool, cursor: Option<&str>) -> Va
 fn read_catalog(responses: Vec<MockResponse>) -> Result<CloudDeviceCatalog, CloudError> {
     let (base, _) = mock_server(responses);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    future::block_on(cloud.get_device_catalog(&session("access-secret")))
+    future::block_on(cloud.get_device_catalog(&token_session("access-secret")))
 }
 
 fn confirmed(catalog: &CloudDeviceCatalog, did: &str) -> CloudGroupMembership {
@@ -112,7 +113,8 @@ fn device_catalog_reads_the_full_account_directory_without_dids_filter() {
     ];
     let (base, requests) = mock_server(responses);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    let catalog = future::block_on(cloud.get_device_catalog(&session("access-secret"))).unwrap();
+    let catalog =
+        future::block_on(cloud.get_device_catalog(&token_session("access-secret"))).unwrap();
 
     assert_eq!(
         catalog
@@ -613,7 +615,7 @@ fn device_catalog_rejects_duplicate_records_and_invalidates_duplicate_group_iden
     let (base, requests) = mock_server(responses);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
     assert_eq!(
-        future::block_on(cloud.get_device_catalog(&session("token")))
+        future::block_on(cloud.get_device_catalog(&token_session("token")))
             .unwrap_err()
             .kind(),
         &CloudErrorKind::Protocol
@@ -735,7 +737,8 @@ fn device_catalog_invalidates_the_snapshot_when_any_page_or_cursor_fails() {
     ] {
         let (base, requests) = mock_server(responses);
         let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-        let error = future::block_on(cloud.get_device_catalog(&session("token"))).unwrap_err();
+        let error =
+            future::block_on(cloud.get_device_catalog(&token_session("token"))).unwrap_err();
         assert_eq!(error.kind(), &expected_kind, "{label}");
         assert_eq!(requests.try_iter().count(), expected_requests, "{label}");
     }

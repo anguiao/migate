@@ -1,7 +1,7 @@
-use super::{CloudError, CloudErrorKind, response::valid_description};
+use super::{MijiaClient, MijiaSession, response::valid_description};
 use crate::xiaomi::{
     capability::PropertyBinding,
-    mijia::{MijiaClient, MijiaSession},
+    cloud::{CloudError, CloudErrorKind},
     property::{
         PropertyReading, PropertyResults, correlate, update_time, valid_bindings,
         valid_observation, valid_value,

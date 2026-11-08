@@ -4,16 +4,14 @@ use crate::{
     configuration::Scope,
     device::DeviceKey,
     storage::XiaomiRecord,
-    xiaomi::{
-        cloud::{CloudClient, OwnedHome},
-        discovery::DiscoverySnapshot,
-    },
+    xiaomi::{cloud::CloudClient, discovery::DiscoverySnapshot, mijia::OwnedHome},
 };
 use crate::{
     storage::TokenSet,
     xiaomi::{
-        cloud::{CloudErrorKind, group_id},
+        cloud::CloudErrorKind,
         discovery::Gateway,
+        mijia::group_id,
         test_support::{MockResponse, mock_server},
     },
 };

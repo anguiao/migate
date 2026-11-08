@@ -25,7 +25,7 @@ pub(crate) struct Scope {
 }
 impl Scope {
     pub(crate) fn group_id(&self) -> String {
-        crate::xiaomi::cloud::group_id(&self.uid, &self.home_id)
+        crate::xiaomi::mijia::group_id(&self.uid, &self.home_id)
     }
 }
 
