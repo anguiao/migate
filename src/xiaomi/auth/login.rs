@@ -1,7 +1,9 @@
 use super::{
     AccountClientIdentity, AccountError, AccountErrorKind, AccountStage, AuthError, AuthReport,
-    AuthService, AuthenticationState, FailureReason, LoginFailure, QrAttempt, check::CheckSession,
-    service::StoredRecord, tokens,
+    AuthService, AuthenticationState, FailureReason, LoginFailure, QrAttempt,
+    check::CheckSession,
+    service::{StoredRecord, verify_account_uid},
+    tokens,
 };
 use crate::{storage::HaAuthorization, xiaomi::cloud::AuthorizationAttempt};
 use std::{fmt, time::Duration};
@@ -93,20 +95,8 @@ impl AuthService {
                     .login_failure("HA OAuth account verification", FailureReason::Cloud(error));
             }
         };
-        match home.uid.as_deref() {
-            Some(actual) if actual == uid => (),
-            Some(_) => {
-                return self.login_failure(
-                    "HA OAuth account verification",
-                    FailureReason::AccountIdentityMismatch,
-                );
-            }
-            None => {
-                return self.login_failure(
-                    "HA OAuth account verification",
-                    FailureReason::CannotDetermineAccountIdentity,
-                );
-            }
+        if let Err(reason) = verify_account_uid(&uid, home.uid.as_deref()) {
+            return self.login_failure("HA OAuth account verification", reason);
         }
         let (credentials, mijia, _) = grant.into_parts();
         let authorization = HaAuthorization {

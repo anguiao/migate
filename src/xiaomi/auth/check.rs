@@ -1,13 +1,11 @@
 use super::{
     AccountErrorKind, AccountStage, AuthError, AuthReport, AuthService, AuthenticationState,
-    CertificateUpdate, FailureReason, service::StoredRecord,
+    CertificateUpdate, FailureReason,
+    service::{StoredRecord, verify_account_uid},
 };
 use crate::{
-    storage::{HubIdentity, TokenSet, XiaomiRecord},
-    xiaomi::{
-        certificate::{CertificateValidity, ClientIdentity},
-        cloud::CloudError,
-    },
+    storage::{TokenSet, XiaomiRecord},
+    xiaomi::{certificate::CertificateValidity, cloud::CloudError},
 };
 
 impl AuthService {
@@ -59,21 +57,11 @@ impl AuthService {
                 .request(async |token| self.cloud.get_home(token).await)
                 .await
             {
-                Ok(home) => match home.uid.as_deref() {
-                    Some(uid) if uid == record.uid => {
-                        report.ha = AuthenticationState::Authenticated
-                    }
-                    Some(_) => {
+                Ok(home) => match verify_account_uid(&record.uid, home.uid.as_deref()) {
+                    Ok(()) => report.ha = AuthenticationState::Authenticated,
+                    Err(reason) => {
                         trusted_identity = false;
-                        report.ha = AuthenticationState::Unavailable(
-                            FailureReason::AccountIdentityMismatch,
-                        );
-                    }
-                    None => {
-                        trusted_identity = false;
-                        report.ha = AuthenticationState::Unavailable(
-                            FailureReason::CannotDetermineAccountIdentity,
-                        );
+                        report.ha = AuthenticationState::Unavailable(reason);
                     }
                 },
                 Err(error) => maintenance_failure = Some(state_for_error(error.into_error())?),
@@ -103,24 +91,14 @@ impl AuthService {
             return Ok(());
         }
         let mut record = record.clone();
-        if record.hub.is_none() {
-            let identity = match ClientIdentity::generate(&record.uid) {
-                Ok(identity) => identity,
-                Err(_) => {
-                    report.certificate_update =
-                        CertificateUpdate::Failed(FailureReason::InvalidClientIdentity);
-                    return Ok(());
-                }
-            };
-            let hub = HubIdentity {
-                virtual_did: identity.virtual_did,
-                private_key_pem: identity.private_key_pem,
-                certificate_pem: None,
-            };
-            self.store.create_hub(&hub)?;
-            record.hub = Some(hub);
-        }
-        let identity = self.client_identity(&record)?;
+        let identity = match self.prepare_client_identity(&mut record) {
+            Ok(identity) => identity,
+            Err(AuthError::Failure(reason)) => {
+                report.certificate_update = CertificateUpdate::Failed(reason);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let response = session
             .request(async |token| self.cloud.get_certificate(token, &identity.csr_pem).await)
             .await;

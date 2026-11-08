@@ -3,7 +3,7 @@ use super::{
     FailureReason, tokens,
 };
 use crate::{
-    storage::{StorageError, TokenSet, XiaomiRecord, XiaomiStore},
+    storage::{HubIdentity, StorageError, TokenSet, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
         cloud::{CloudClient, CloudError},
@@ -135,16 +135,28 @@ impl AuthService {
         Ok(replacement)
     }
 
-    pub(super) fn client_identity(
+    pub(super) fn prepare_client_identity(
         &self,
-        record: &XiaomiRecord,
+        record: &mut XiaomiRecord,
     ) -> Result<ClientIdentity, AuthError> {
-        let hub = record
-            .hub
-            .as_ref()
-            .ok_or(AuthError::Missing("Gateway identity is unavailable"))?;
-        ClientIdentity::from_private_key(&record.uid, &hub.virtual_did, &hub.private_key_pem)
-            .map_err(|error| self.corrupt_record(error).into())
+        if let Some(hub) = &record.hub {
+            return ClientIdentity::from_private_key(
+                &record.uid,
+                &hub.virtual_did,
+                &hub.private_key_pem,
+            )
+            .map_err(|error| self.corrupt_record(error).into());
+        }
+        let identity = ClientIdentity::generate(&record.uid)
+            .map_err(|_| AuthError::Failure(FailureReason::InvalidClientIdentity))?;
+        let hub = HubIdentity {
+            virtual_did: identity.virtual_did.clone(),
+            private_key_pem: identity.private_key_pem.clone(),
+            certificate_pem: None,
+        };
+        self.store.create_hub(&hub)?;
+        record.hub = Some(hub);
+        Ok(identity)
     }
 
     pub(super) fn save_certificate_response(
@@ -224,6 +236,17 @@ impl AuthService {
             "validate Xiaomi authentication credentials",
             source,
         )
+    }
+}
+
+pub(super) fn verify_account_uid(
+    expected: &str,
+    actual: Option<&str>,
+) -> Result<(), FailureReason> {
+    match actual {
+        Some(uid) if uid == expected => Ok(()),
+        Some(_) => Err(FailureReason::AccountIdentityMismatch),
+        None => Err(FailureReason::CannotDetermineAccountIdentity),
     }
 }
 

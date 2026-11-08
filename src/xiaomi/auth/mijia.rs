@@ -1,4 +1,7 @@
-use super::{AccountErrorKind, AccountStage, AuthError, AuthService, FailureReason};
+use super::{
+    AccountErrorKind, AccountStage, AuthError, AuthService, FailureReason,
+    service::verify_account_uid,
+};
 use crate::{
     storage::{AccountRecovery, RecoveryStop, XiaomiRecord},
     xiaomi::mijia::MijiaSession,
@@ -14,13 +17,7 @@ impl AuthService {
             return Err(AuthError::Failure(FailureReason::AccountIdentityMismatch));
         }
         let homes = self.mijia.get_owned_homes(session).await?;
-        match homes.uid.as_deref() {
-            Some(actual) if actual == uid => Ok(()),
-            Some(_) => Err(AuthError::Failure(FailureReason::AccountIdentityMismatch)),
-            None => Err(AuthError::Failure(
-                FailureReason::CannotDetermineAccountIdentity,
-            )),
-        }
+        verify_account_uid(uid, homes.uid.as_deref()).map_err(AuthError::Failure)
     }
 
     /// Validate the saved session and make at most one independent recovery attempt.

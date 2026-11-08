@@ -1,8 +1,5 @@
-use super::{AuthError, AuthService, CertificateUpdate, FailureReason};
-use crate::{
-    storage::{HubIdentity, XiaomiRecord},
-    xiaomi::certificate::{CertificateValidity, ClientIdentity},
-};
+use super::{AuthError, AuthService, CertificateUpdate, service::verify_account_uid};
+use crate::{storage::XiaomiRecord, xiaomi::certificate::CertificateValidity};
 
 #[derive(Debug)]
 pub(crate) struct BridgeCertificate {
@@ -20,13 +17,7 @@ impl AuthService {
             .cloud
             .get_home(&authorization.tokens.access_token)
             .await?;
-        match home.uid.as_deref() {
-            Some(uid) if uid == record.uid => Ok(()),
-            Some(_) => Err(AuthError::Failure(FailureReason::AccountIdentityMismatch)),
-            None => Err(AuthError::Failure(
-                FailureReason::CannotDetermineAccountIdentity,
-            )),
-        }
+        verify_account_uid(&record.uid, home.uid.as_deref()).map_err(AuthError::Failure)
     }
 
     pub(crate) async fn refresh_bridge_tokens(
@@ -35,10 +26,7 @@ impl AuthService {
         now: impl Fn() -> i64,
     ) -> Result<XiaomiRecord, AuthError> {
         let authorization = record
-            .ha
-            .as_ref()
-            .filter(|ha| !ha.stopped)
-            .and_then(|ha| ha.authorization.as_ref())
+            .ha_authorization()
             .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
         self.refresh_tokens_once(&authorization.redirect_uri, &authorization.tokens, now)
             .await?;
@@ -56,23 +44,9 @@ impl AuthService {
         now: impl Fn() -> i64,
     ) -> Result<super::BridgeCertificate, AuthError> {
         let mut record = record.clone();
-        if record.hub.is_none() {
-            let identity = ClientIdentity::generate(&record.uid)
-                .map_err(|_| AuthError::Failure(FailureReason::InvalidClientIdentity))?;
-            let hub = HubIdentity {
-                virtual_did: identity.virtual_did,
-                private_key_pem: identity.private_key_pem,
-                certificate_pem: None,
-            };
-            self.store.create_hub(&hub)?;
-            record.hub = Some(hub);
-        }
-        let identity = self.client_identity(&record)?;
+        let identity = self.prepare_client_identity(&mut record)?;
         let authorization = record
-            .ha
-            .as_ref()
-            .filter(|ha| !ha.stopped)
-            .and_then(|ha| ha.authorization.as_ref())
+            .ha_authorization()
             .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
         let certificate = self
             .cloud
