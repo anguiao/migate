@@ -42,7 +42,11 @@ impl AuthService {
             .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
         self.refresh_tokens_once(&authorization.redirect_uri, &authorization.tokens, now)
             .await?;
-        Ok(self.reload_credentials()?.record)
+        Ok(self
+            .store
+            .current_snapshot()
+            .record
+            .expect("credentials saved before reload"))
     }
 
     pub(crate) async fn renew_bridge_certificate(

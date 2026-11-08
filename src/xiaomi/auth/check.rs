@@ -12,10 +12,11 @@ use crate::{
 
 impl AuthService {
     pub async fn check(&self) -> Result<AuthReport, AuthError> {
-        let Some(stored) = self.load_validated()? else {
-            return self.local_status();
+        let stored = self.load_validated()?;
+        let mut report = self.report_for(stored.as_ref());
+        let Some(stored) = stored else {
+            return Ok(report);
         };
-        let mut report = self.local_status()?;
         report.mijia = match self.maintain_mijia(&stored.record).await {
             Ok(_) => AuthenticationState::Authenticated,
             Err(error) => state_for_error(error)?,

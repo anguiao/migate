@@ -125,9 +125,7 @@ impl AuthService {
         let stored = self
             .reload_credentials()
             .map_err(|error| login_step("certificate preparation", error))?;
-        let mut report = self
-            .local_status()
-            .map_err(|error| login_step("certificate preparation", error))?;
+        let mut report = self.report_for(Some(&stored));
         report.mijia = AuthenticationState::Authenticated;
         report.ha = AuthenticationState::Authenticated;
         let mut session = CheckSession {

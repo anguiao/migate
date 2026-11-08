@@ -52,8 +52,12 @@ impl AuthService {
     }
 
     pub fn local_status(&self) -> Result<AuthReport, AuthError> {
-        let status = self.load_validated()?;
-        Ok(match status {
+        let stored = self.load_validated()?;
+        Ok(self.report_for(stored.as_ref()))
+    }
+
+    pub(super) fn report_for(&self, stored: Option<&StoredRecord>) -> AuthReport {
+        match stored {
             Some(stored) => AuthReport {
                 account: Some(AccountIdentity {
                     uid: stored.record.uid.clone(),
@@ -84,7 +88,7 @@ impl AuthService {
                     _ => AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization),
                 },
                 certificate: stored.validity,
-                certificate_update: stored.certificate_update,
+                certificate_update: stored.certificate_update.clone(),
                 login_failure: None,
                 completed_at: (self.now)(),
             },
@@ -98,13 +102,13 @@ impl AuthService {
                 login_failure: None,
                 completed_at: (self.now)(),
             },
-        })
+        }
     }
 
     /// Saved local credentials remain useful when cloud preparation is pending
     /// or unavailable. Gateway TLS performs current validity and authorization.
     pub fn saved_bridge_credentials(&self) -> Result<Option<XiaomiRecord>, AuthError> {
-        Ok(self.load_validated()?.map(|stored| stored.record))
+        Ok(self.store.snapshot()?.record)
     }
 
     pub(super) async fn refresh_tokens_once(

@@ -192,13 +192,14 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
     let mut due = context.clock.now();
     let mut last_expiry = None;
     let mut last_hub = None;
+    let mut validity = None;
     let mut maintained = None;
     loop {
         let changed = context.changed.listen();
         let record = saved(auth, &context)?;
-        let report = auth.local_status()?;
-        let validity = report.certificate;
         if last_hub.as_ref() != Some(&record.hub) {
+            let report = auth.local_status()?;
+            validity = report.certificate;
             last_hub = Some(record.hub.clone());
             if let Some(validity) = validity {
                 context.certificate(validity, CertificateUpdate::NotNeeded);
@@ -281,6 +282,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                             .clone(),
                     );
                     let failed = matches!(renewed.update, CertificateUpdate::Failed(_));
+                    validity = renewed.validity;
                     if let Some(validity) = renewed.validity {
                         context.certificate(validity, renewed.update);
                     } else {
