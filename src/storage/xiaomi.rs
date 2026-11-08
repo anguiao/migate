@@ -76,7 +76,7 @@ impl fmt::Debug for HaAuthorization {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HaClient {
     pub client_uuid: String,
-    pub authorization: Option<HaAuthorization>,
+    pub authorization: HaAuthorization,
     pub stopped: bool,
 }
 
@@ -105,19 +105,15 @@ impl fmt::Debug for HubIdentity {
 pub struct XiaomiRecord {
     pub uid: String,
     pub region: String,
-    pub recovery: Option<AccountRecovery>,
-    pub mijia: Option<MijiaSession>,
-    pub ha: Option<HaClient>,
+    pub recovery: AccountRecovery,
+    pub mijia: MijiaSession,
+    pub ha: HaClient,
     pub hub: Option<HubIdentity>,
 }
 
 impl XiaomiRecord {
     pub fn ha_authorization(&self) -> Option<&HaAuthorization> {
-        self.ha
-            .as_ref()
-            .filter(|ha| !ha.stopped)?
-            .authorization
-            .as_ref()
+        (!self.ha.stopped).then_some(&self.ha.authorization)
     }
 }
 
@@ -282,37 +278,27 @@ impl XiaomiStore {
             }
             return Ok(None);
         };
-        let recovery = recovery_row
-            .map(
-                |(user_id, c_user_id, pass_token, device_id, user_agent, stop)| {
-                    let identity = AccountClientIdentity::new(device_id, user_agent)
-                        .map_err(|_| LoadError::Invalid)?;
-                    let credentials =
-                        AccountCredentials::new(user_id, c_user_id, pass_token, identity)
-                            .map_err(|_| LoadError::Invalid)?;
-                    let stop = stop
-                        .as_deref()
-                        .map(RecoveryStop::parse)
-                        .transpose()
-                        .map_err(|_| LoadError::Invalid)?;
-                    Ok::<_, LoadError>(AccountRecovery { credentials, stop })
-                },
-            )
-            .transpose()?;
-        let mijia = session_row
-            .map(|(user_id, service_token, ssecurity, user_agent)| {
-                MijiaSession::new(user_id, service_token, ssecurity, user_agent)
-                    .map_err(|_| LoadError::Invalid)
-            })
-            .transpose()?;
-        let ha = match (client_row, authorization) {
-            (Some((client_uuid, stopped)), authorization) => Some(HaClient {
-                client_uuid,
-                authorization,
-                stopped,
-            }),
-            (None, None) => None,
-            (None, Some(_)) => return Err(LoadError::Invalid),
+        let (user_id, c_user_id, pass_token, device_id, user_agent, stop) =
+            recovery_row.ok_or(LoadError::Invalid)?;
+        let identity =
+            AccountClientIdentity::new(device_id, user_agent).map_err(|_| LoadError::Invalid)?;
+        let credentials = AccountCredentials::new(user_id, c_user_id, pass_token, identity)
+            .map_err(|_| LoadError::Invalid)?;
+        let stop = stop
+            .as_deref()
+            .map(RecoveryStop::parse)
+            .transpose()
+            .map_err(|_| LoadError::Invalid)?;
+        let recovery = AccountRecovery { credentials, stop };
+        let (user_id, service_token, ssecurity, user_agent) =
+            session_row.ok_or(LoadError::Invalid)?;
+        let mijia = MijiaSession::new(user_id, service_token, ssecurity, user_agent)
+            .map_err(|_| LoadError::Invalid)?;
+        let (client_uuid, stopped) = client_row.ok_or(LoadError::Invalid)?;
+        let ha = HaClient {
+            client_uuid,
+            authorization: authorization.ok_or(LoadError::Invalid)?,
+            stopped,
         };
         let record = XiaomiRecord {
             uid,
@@ -340,16 +326,16 @@ impl XiaomiStore {
         let candidate = XiaomiRecord {
             uid: credentials.user_id().to_owned(),
             region: "cn".into(),
-            recovery: Some(AccountRecovery {
+            recovery: AccountRecovery {
                 credentials: credentials.clone(),
                 stop: None,
-            }),
-            mijia: Some(session.clone()),
-            ha: Some(HaClient {
+            },
+            mijia: session.clone(),
+            ha: HaClient {
                 client_uuid: client_uuid.to_owned(),
-                authorization: Some(authorization.clone()),
+                authorization: authorization.clone(),
                 stopped: false,
-            }),
+            },
             hub: None,
         };
         self.validate(&candidate)?;
@@ -358,7 +344,7 @@ impl XiaomiStore {
             tx.execute("INSERT INTO xiaomi_account (id, uid, region) VALUES (1, ?1, 'cn') ON CONFLICT(id) DO NOTHING", [&candidate.uid])?;
             write_recovery(&tx, credentials, None)?;
             write_session(&tx, session)?;
-            write_ha(&tx, candidate.ha.as_ref().expect("candidate includes HA client"))?;
+            write_ha(&tx, &candidate.ha)?;
             tx.commit()
         })().map_err(|error| self.store.database_error("commit Xiaomi login", error))?;
         if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
@@ -392,11 +378,11 @@ impl XiaomiStore {
         .map_err(|error| self.store.database_error("update Xiaomi recovery", error))?;
         if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
             let record = state.record.as_mut().expect("initialized account");
-            record.recovery = Some(AccountRecovery {
+            record.recovery = AccountRecovery {
                 credentials: credentials.clone(),
                 stop: None,
-            });
-            record.mijia = Some(session.clone());
+            };
+            record.mijia = session.clone();
             state.mijia_generation = state.mijia_generation.wrapping_add(1);
         }
         Ok(())
@@ -416,8 +402,6 @@ impl XiaomiStore {
                 .as_mut()
                 .expect("initialized account")
                 .recovery
-                .as_mut()
-                .expect("recovery credentials")
                 .stop = Some(stop);
         }
         Ok(())
@@ -434,8 +418,6 @@ impl XiaomiStore {
                 .as_mut()
                 .expect("initialized account")
                 .ha
-                .as_mut()
-                .expect("HA client")
                 .stopped = true;
         }
         Ok(())
@@ -463,11 +445,7 @@ impl XiaomiStore {
                 .as_mut()
                 .expect("initialized account")
                 .ha
-                .as_mut()
-                .expect("HA client")
                 .authorization
-                .as_mut()
-                .expect("HA authorization")
                 .tokens = tokens.clone();
             state.ha_generation = state.ha_generation.wrapping_add(1);
         }
@@ -573,12 +551,11 @@ fn write_ha(db: &Connection, ha: &HaClient) -> rusqlite::Result<()> {
         ON CONFLICT(id) DO UPDATE SET client_uuid=excluded.client_uuid, stopped=excluded.stopped",
         (&ha.client_uuid, ha.stopped),
     )?;
-    if let Some(authorization) = &ha.authorization {
-        let tokens = &authorization.tokens;
-        db.execute("INSERT INTO xiaomi_ha_oauth (id, redirect_uri, access_token, refresh_token, expires_at, refresh_at) VALUES (1, ?1, ?2, ?3, ?4, ?5)
+    let authorization = &ha.authorization;
+    let tokens = &authorization.tokens;
+    db.execute("INSERT INTO xiaomi_ha_oauth (id, redirect_uri, access_token, refresh_token, expires_at, refresh_at) VALUES (1, ?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(id) DO UPDATE SET redirect_uri=excluded.redirect_uri, access_token=excluded.access_token, refresh_token=excluded.refresh_token, expires_at=excluded.expires_at, refresh_at=excluded.refresh_at",
             (&authorization.redirect_uri, &tokens.access_token, &tokens.refresh_token, tokens.expires_at, tokens.refresh_at))?;
-    }
     Ok(())
 }
 
@@ -606,24 +583,13 @@ fn validate_record(record: &XiaomiRecord) -> Result<(), InvalidCredentials> {
     if record.region != "cn" {
         return Err(InvalidCredentials);
     }
-    if let Some(recovery) = &record.recovery
-        && recovery.credentials.user_id() != record.uid
-    {
+    if record.recovery.credentials.user_id() != record.uid || record.mijia.user_id() != record.uid {
         return Err(InvalidCredentials);
     }
-    if let Some(session) = &record.mijia
-        && session.user_id() != record.uid
-    {
-        return Err(InvalidCredentials);
-    }
-    if let Some(ha) = &record.ha {
-        validate_uuid(&ha.client_uuid)?;
-        if let Some(authorization) = &ha.authorization {
-            validate_saved_redirect_uri(&authorization.redirect_uri)
-                .map_err(|_| InvalidCredentials)?;
-            validate_tokens(&authorization.tokens)?;
-        }
-    }
+    validate_uuid(&record.ha.client_uuid)?;
+    validate_saved_redirect_uri(&record.ha.authorization.redirect_uri)
+        .map_err(|_| InvalidCredentials)?;
+    validate_tokens(&record.ha.authorization.tokens)?;
     if let Some(hub) = &record.hub {
         validate_hub(hub)?;
     }

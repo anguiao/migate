@@ -23,7 +23,7 @@ impl AuthService {
             .store
             .current_snapshot()
             .record
-            .and_then(|record| record.recovery.and_then(|recovery| recovery.stop));
+            .and_then(|record| record.recovery.stop);
         self.check_ha_and_certificate(stored, &mut report).await?;
         report.set_completed_at((self.now)());
         Ok(report)
@@ -146,10 +146,7 @@ pub(super) fn state_for_error(error: AuthError) -> Result<AuthenticationState, A
             (FailureReason::Account(error), rejected)
         }
         AuthError::Failure(reason) => {
-            let rejected = matches!(
-                reason,
-                FailureReason::MissingMijiaSession | FailureReason::RecoveryStopped(_)
-            );
+            let rejected = matches!(reason, FailureReason::RecoveryStopped(_));
             (reason, rejected)
         }
         error => return Err(error),

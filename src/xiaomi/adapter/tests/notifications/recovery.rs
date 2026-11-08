@@ -23,15 +23,7 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             let capped = c.clock.now() + Duration::from_secs(600);
             until(|| c.context.mqtt_retry_deadline.get() == Some(capped)).await;
             let mut record = c.store.xiaomi().load().unwrap().unwrap();
-            record
-                .ha
-                .as_mut()
-                .unwrap()
-                .authorization
-                .as_mut()
-                .unwrap()
-                .tokens
-                .access_token = "replacement-token".into();
+            record.ha.authorization.tokens.access_token = "replacement-token".into();
             c.store
                 .xiaomi()
                 .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)

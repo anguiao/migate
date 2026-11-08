@@ -205,11 +205,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
         .unwrap()
         .unwrap()
         .ha
-        .as_ref()
-        .unwrap()
         .authorization
-        .as_ref()
-        .unwrap()
         .tokens
         .clone();
     tokens.refresh_at = 1;

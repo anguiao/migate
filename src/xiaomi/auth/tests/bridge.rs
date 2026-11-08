@@ -22,53 +22,15 @@ fn bridge_refresh_saves_tokens_using_the_network_completion_clock_without_other_
     let refreshed =
         block_on(auth.refresh_bridge_tokens(&original, || clock.load(Ordering::SeqCst))).unwrap();
     assert_eq!(
-        refreshed
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token,
+        refreshed.ha.authorization.tokens.access_token,
         "fresh-access"
     );
     assert_eq!(
-        refreshed
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .refresh_token,
+        refreshed.ha.authorization.tokens.refresh_token,
         "fresh-refresh"
     );
-    assert_eq!(
-        refreshed
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .expires_at,
-        NOW + 1050
-    );
-    assert_eq!(
-        refreshed
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .refresh_at,
-        NOW + 750
-    );
+    assert_eq!(refreshed.ha.authorization.tokens.expires_at, NOW + 1050);
+    assert_eq!(refreshed.ha.authorization.tokens.refresh_at, NOW + 750);
     assert_eq!(
         refreshed.hub.as_ref().unwrap().certificate_pem,
         original.hub.as_ref().unwrap().certificate_pem
@@ -104,7 +66,7 @@ fn bridge_helpers_return_a_single_unauthorized_response_without_refresh_or_retry
         };
         assert!(matches!(error, AuthError::Cloud(error) if error.is_unauthorized()));
         let mut expected = original.clone();
-        expected.ha.as_mut().unwrap().stopped = !certificate;
+        expected.ha.stopped = !certificate;
         assert_eq!(store.xiaomi().load().unwrap(), Some(expected));
         if !certificate {
             let stopped = store.xiaomi().current_snapshot().record.unwrap();
@@ -371,7 +333,7 @@ fn late_certificate_error_is_not_reported_after_identical_token_refresh() {
                 .unwrap();
             release.send(()).unwrap();
             assert!(matches!(pending.await, Err(AuthError::Missing(_))));
-            assert!(!store.xiaomi().load().unwrap().unwrap().ha.unwrap().stopped);
+            assert!(!store.xiaomi().load().unwrap().unwrap().ha.stopped);
         });
     }
 }

@@ -337,24 +337,8 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record
-        .ha
-        .as_mut()
-        .unwrap()
-        .authorization
-        .as_mut()
-        .unwrap()
-        .tokens
-        .refresh_at = rig.clock.wall() + 5;
-    record
-        .ha
-        .as_mut()
-        .unwrap()
-        .authorization
-        .as_mut()
-        .unwrap()
-        .tokens
-        .expires_at = rig.clock.wall() + 10;
+    record.ha.authorization.tokens.refresh_at = rig.clock.wall() + 5;
+    record.ha.authorization.tokens.expires_at = rig.clock.wall() + 10;
     rig.store.xiaomi().fixture_replace(&record).unwrap();
     rig.source.context.adopt_credentials(record);
     let (release, gate) = flume::bounded(1);

@@ -72,7 +72,7 @@ impl Context {
             uid: credentials.uid.clone(),
             generation: *generation,
             home_id: live.scope.as_ref().map(|scope| scope.home_id.clone()),
-            session: credentials.mijia.clone()?,
+            session: credentials.mijia.clone(),
         })
     }
     pub(in crate::xiaomi::adapter) fn current_mijia(&self, path: &super::CloudPath) -> bool {

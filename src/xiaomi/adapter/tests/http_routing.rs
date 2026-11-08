@@ -36,10 +36,7 @@ fn successful_write_from_replaced_identical_session_does_not_change_new_generati
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.as_ref().unwrap().credentials,
-                record.mijia.as_ref().unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.adopt_credentials(record);
         release.send(()).unwrap();
@@ -106,11 +103,11 @@ fn concurrent_unauthorized_writes_share_one_mijia_recovery_without_replay() {
 }
 
 #[test]
-fn device_http_remains_usable_without_ha_authorization() {
+fn device_http_remains_usable_with_stopped_ha_authorization() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record.ha = None;
+    record.ha.stopped = true;
     rig.store.xiaomi().fixture_replace(&record).unwrap();
     rig.source.context.adopt_credentials(record);
     block_on(rig.run(|c| async move {
@@ -497,7 +494,6 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
                 .unwrap()
                 .unwrap()
                 .recovery
-                .unwrap()
                 .stop
                 .is_some()
         );

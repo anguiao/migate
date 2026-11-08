@@ -162,7 +162,7 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
 }
 fn previous_record() -> XiaomiRecord {
     let mut previous = valid_record("uid", "access-old", NOW + 500, NOW + 1_000_000);
-    previous.recovery = Some(AccountRecovery {
+    previous.recovery = AccountRecovery {
         credentials: AccountCredentials::new(
             "uid".into(),
             "cuser-old".into(),
@@ -171,8 +171,8 @@ fn previous_record() -> XiaomiRecord {
         )
         .unwrap(),
         stop: Some(RecoveryStop::Rejected),
-    });
-    previous.ha.as_mut().unwrap().stopped = true;
+    };
+    previous.ha.stopped = true;
     previous
 }
 
@@ -191,13 +191,10 @@ fn every_login_scans_and_exchanges_a_new_grant_even_when_credentials_exist() {
         assert!(report.is_success(), "{report:?}");
     }
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(
-        saved.recovery.as_ref().unwrap().credentials.pass_token(),
-        "pass-new"
-    );
-    assert_eq!(saved.recovery.as_ref().unwrap().stop, None);
-    assert!(!saved.ha.as_ref().unwrap().stopped);
-    assert_eq!(saved.ha.as_ref().unwrap().client_uuid, UUID);
+    assert_eq!(saved.recovery.credentials.pass_token(), "pass-new");
+    assert_eq!(saved.recovery.stop, None);
+    assert!(!saved.ha.stopped);
+    assert_eq!(saved.ha.client_uuid, UUID);
     assert_eq!(saved.hub, previous.hub);
     let account: Vec<_> = peers.account.try_iter().collect();
     assert_eq!(
@@ -438,23 +435,9 @@ fn cancelling_during_certificate_request_reports_saved_credentials_and_check_can
         assert!(peers.ha.try_recv().is_err());
     });
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(
-        saved.recovery.as_ref().unwrap().credentials.pass_token(),
-        "pass-new"
-    );
-    assert_eq!(saved.mijia.as_ref().unwrap().service_token(), "service-new");
-    assert_eq!(
-        saved
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token,
-        "access-new"
-    );
+    assert_eq!(saved.recovery.credentials.pass_token(), "pass-new");
+    assert_eq!(saved.mijia.service_token(), "service-new");
+    assert_eq!(saved.ha.authorization.tokens.access_token, "access-new");
     let hub = saved.hub.as_ref().unwrap();
     assert!(!hub.virtual_did.is_empty() && !hub.private_key_pem.is_empty());
     assert!(hub.certificate_pem.is_none());
@@ -525,10 +508,7 @@ fn failed_certificate_keeps_committed_credentials_and_hub_and_check_retries() {
         CertificateUpdate::Failed(FailureReason::Cloud(_))
     ));
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(
-        saved.recovery.as_ref().unwrap().credentials.pass_token(),
-        "pass-new"
-    );
+    assert_eq!(saved.recovery.credentials.pass_token(), "pass-new");
     assert!(saved.hub.as_ref().unwrap().certificate_pem.is_none());
     let report = block_on(peers.auth.check()).unwrap();
     assert!(report.is_success(), "{report:?}");

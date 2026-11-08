@@ -24,14 +24,9 @@ pub async fn connect_notifications(
 }
 
 fn validate_credentials(credentials: &XiaomiRecord) -> Result<String, NotificationError> {
-    let ha = credentials
-        .ha
-        .as_ref()
-        .filter(|ha| !ha.stopped)
-        .ok_or(NotificationError::InvalidInput)?;
-    let authorization = ha
-        .authorization
-        .as_ref()
+    let ha = &credentials.ha;
+    let authorization = credentials
+        .ha_authorization()
         .ok_or(NotificationError::InvalidInput)?;
     if credentials.region != REGION
         || !valid_identifier(&credentials.uid)

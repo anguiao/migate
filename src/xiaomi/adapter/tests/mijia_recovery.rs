@@ -2,24 +2,32 @@ use super::*;
 use crate::storage::RecoveryStop;
 use crate::xiaomi::auth::AuthenticationState;
 
-fn set_missing(rig: &Rig, stop: Option<RecoveryStop>) {
+fn set_rejected(rig: &Rig, stop: Option<RecoveryStop>) {
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record.mijia = None;
-    record.recovery.as_mut().unwrap().stop = stop;
+    record.recovery.stop = stop;
     rig.store.xiaomi().fixture_replace(&record).unwrap();
     rig.source.context.adopt_credentials(record);
+    let path = rig.source.context.mijia_path().unwrap();
+    rig.source.context.cloud_error(
+        &path,
+        None,
+        &crate::xiaomi::cloud::CloudError::new(
+            "test",
+            crate::xiaomi::cloud::CloudErrorKind::Unauthorized,
+        ),
+    );
 }
 
 #[test]
-fn missing_session_recovers_without_probing_old_session() {
+fn rejected_session_recovers_without_probing_old_session() {
     let rig = Rig::new(true, &["one"]);
     rig.enable_recovery();
-    set_missing(&rig, None);
+    set_rejected(&rig, None);
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         until(|| c.context.cloud_candidate("one", true).is_ok()).await;
         let record = c.store.xiaomi().load().unwrap().unwrap();
-        assert_eq!(record.mijia.unwrap().service_token(), "restored-service");
+        assert_eq!(record.mijia.service_token(), "restored-service");
         let cloud = c.cloud.lock().unwrap();
         assert_eq!(cloud.restores, 1);
         assert_eq!(cloud.sts_requests, 1);
@@ -91,10 +99,7 @@ fn late_unauthorized_from_identical_old_session_cannot_stop_new_generation() {
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.as_ref().unwrap().credentials,
-                record.mijia.as_ref().unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.adopt_credentials(record);
         c.cloud.lock().unwrap().property_status = 200;
@@ -123,10 +128,7 @@ fn replaced_session_cannot_send_the_next_old_directory_page() {
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.as_ref().unwrap().credentials,
-                record.mijia.as_ref().unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.reload_credentials();
         {
@@ -163,10 +165,7 @@ fn replaced_session_restarts_an_interrupted_manual_directory_round_without_waiti
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.as_ref().unwrap().credentials,
-                record.mijia.as_ref().unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.reload_credentials();
         {
@@ -182,14 +181,14 @@ fn replaced_session_restarts_an_interrupted_manual_directory_round_without_waiti
 
 #[test]
 fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
-    for has_session in [false, true] {
+    for rejected in [false, true] {
         let rig = Rig::new(true, &["one"]);
         rig.enable_recovery();
         let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-        if !has_session {
-            record.mijia = None;
+        if rejected {
+            rig.cloud.lock().unwrap().home_status = 401;
         }
-        record.recovery.as_mut().unwrap().stop = Some(RecoveryStop::Rejected);
+        record.recovery.stop = Some(RecoveryStop::Rejected);
         rig.store.xiaomi().fixture_replace(&record).unwrap();
         let (adapter, _) = XiaomiAdapter::build(
             rig.store.clone(),
@@ -206,16 +205,9 @@ fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
         .unwrap();
         let cloud = rig.cloud.lock().unwrap();
         assert_eq!(cloud.restores, 0);
-        assert_eq!(cloud.homes > 0, has_session);
+        assert!(cloud.homes > 0);
         assert_eq!(
-            rig.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .recovery
-                .unwrap()
-                .stop,
+            rig.store.xiaomi().load().unwrap().unwrap().recovery.stop,
             Some(RecoveryStop::Rejected)
         );
     }
@@ -225,7 +217,7 @@ fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
 fn temporary_recovery_failure_backs_off_without_stopping_credentials() {
     let rig = Rig::new(true, &["one"]);
     rig.enable_recovery();
-    set_missing(&rig, None);
+    set_rejected(&rig, None);
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -256,14 +248,7 @@ fn temporary_recovery_failure_backs_off_without_stopping_credentials() {
         c.clock.advance(Duration::from_millis(1));
         until(|| c.cloud.lock().unwrap().restores == 2).await;
         assert_eq!(
-            c.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .recovery
-                .unwrap()
-                .stop,
+            c.store.xiaomi().load().unwrap().unwrap().recovery.stop,
             None
         );
     }));
@@ -288,14 +273,7 @@ fn signature_failure_does_not_attempt_account_recovery() {
         assert_eq!(cloud.restores, 0);
         assert_eq!(cloud.tokens, 0);
         assert_eq!(
-            c.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .recovery
-                .unwrap()
-                .stop,
+            c.store.xiaomi().load().unwrap().unwrap().recovery.stop,
             None
         );
     }));
@@ -336,7 +314,7 @@ fn miot_description_service_unauthorized_does_not_recover_mijia_session() {
 fn account_protocol_failure_does_not_repeat_on_unrelated_credential_events() {
     let rig = Rig::new(true, &["one"]);
     rig.enable_recovery();
-    set_missing(&rig, None);
+    set_rejected(&rig, None);
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -355,14 +333,7 @@ fn account_protocol_failure_does_not_repeat_on_unrelated_credential_events() {
         async_io::Timer::after(Duration::from_millis(20)).await;
         assert_eq!(c.cloud.lock().unwrap().restores, 1);
         assert_eq!(
-            c.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .recovery
-                .unwrap()
-                .stop,
+            c.store.xiaomi().load().unwrap().unwrap().recovery.stop,
             None
         );
     }));

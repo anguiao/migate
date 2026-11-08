@@ -1,12 +1,17 @@
 use super::*;
 
 #[test]
-fn restored_home_receives_ha_notifications_without_a_mijia_session() {
+fn restored_home_receives_ha_notifications_after_mijia_rejection() {
     let (rig, listener, peer) = with_cloud_peer(&["one"]);
-    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record.mijia = None;
-    rig.store.xiaomi().fixture_replace(&record).unwrap();
-    rig.source.context.adopt_credentials(record);
+    let path = rig.source.context.mijia_path().unwrap();
+    rig.source.context.cloud_error(
+        &path,
+        None,
+        &crate::xiaomi::cloud::CloudError::new(
+            "test",
+            crate::xiaomi::cloud::CloudErrorKind::Unauthorized,
+        ),
+    );
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
@@ -288,16 +293,7 @@ fn identical_new_ha_generation_retires_old_connection_and_its_events() {
                     ),
                 )
                 .unwrap();
-            assert!(
-                !c.store
-                    .xiaomi()
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .ha
-                    .unwrap()
-                    .stopped
-            );
+            assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);
             until(|| peer.state.borrow().connects.len() == 2 && cloud_active(&c, "one")).await;
             assert_eq!(
@@ -383,16 +379,7 @@ fn delayed_unauthorized_connack_cannot_stop_identical_new_generation() {
                 peer.state.borrow().connects[1]
             );
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);
-            assert!(
-                !c.store
-                    .xiaomi()
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .ha
-                    .unwrap()
-                    .stopped
-            );
+            assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
         })
         .await;
     }));
@@ -442,16 +429,7 @@ fn delayed_unauthorized_suback_cannot_stop_identical_new_generation() {
             c.context.reload_credentials();
             until(|| peer.state.borrow().connects.len() == 2 && cloud_active(&c, "one")).await;
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);
-            assert!(
-                !c.store
-                    .xiaomi()
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .ha
-                    .unwrap()
-                    .stopped
-            );
+            assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
         })
         .await;
     }));

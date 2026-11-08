@@ -72,33 +72,17 @@ fn ha_rejection_and_refresh_do_not_request_an_extra_mijia_directory_round() {
 
 fn token_deadlines(rig: &Rig, refresh: i64, expiry: i64) {
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record
-        .ha
-        .as_mut()
-        .unwrap()
-        .authorization
-        .as_mut()
-        .unwrap()
-        .tokens
-        .refresh_at = rig.clock.wall() + refresh;
-    record
-        .ha
-        .as_mut()
-        .unwrap()
-        .authorization
-        .as_mut()
-        .unwrap()
-        .tokens
-        .expires_at = rig.clock.wall() + expiry;
+    record.ha.authorization.tokens.refresh_at = rig.clock.wall() + refresh;
+    record.ha.authorization.tokens.expires_at = rig.clock.wall() + expiry;
     rig.store.xiaomi().fixture_replace(&record).unwrap();
     rig.source.context.adopt_credentials(record);
 }
 
 #[test]
-fn saved_hub_control_works_without_ha_authorization() {
+fn saved_hub_control_works_with_stopped_ha_authorization() {
     let rig = Rig::new(true, &["one"]);
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record.ha.as_mut().unwrap().authorization = None;
+    record.ha.stopped = true;
     rig.store.xiaomi().fixture_replace(&record).unwrap();
     rig.source.context.adopt_credentials(record);
     block_on(rig.run(|control| async move {
@@ -147,11 +131,7 @@ fn token_deadline_is_polled_while_initial_home_identity_is_pending() {
                 .as_ref()
                 .unwrap()
                 .ha
-                .as_ref()
-                .unwrap()
                 .authorization
-                .as_ref()
-                .unwrap()
                 .tokens
                 .access_token
                 == "fresh-access"
@@ -167,11 +147,7 @@ fn token_deadline_is_polled_while_initial_home_identity_is_pending() {
                 .as_ref()
                 .unwrap()
                 .ha
-                .as_ref()
-                .unwrap()
                 .authorization
-                .as_ref()
-                .unwrap()
                 .tokens
                 .access_token,
             "fresh-access"
@@ -228,11 +204,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .as_ref()
                     .unwrap()
                     .ha
-                    .as_ref()
-                    .unwrap()
                     .authorization
-                    .as_ref()
-                    .unwrap()
                     .tokens
                     .access_token,
                 "fresh-access"
@@ -264,11 +236,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .unwrap()
                     .unwrap()
                     .ha
-                    .as_ref()
-                    .unwrap()
                     .authorization
-                    .as_ref()
-                    .unwrap()
                     .tokens
                     .access_token,
                 "fresh-access"
@@ -281,11 +249,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .as_ref()
                     .unwrap()
                     .ha
-                    .as_ref()
-                    .unwrap()
                     .authorization
-                    .as_ref()
-                    .unwrap()
                     .tokens
                     .access_token,
                 "fresh-access"
@@ -349,24 +313,8 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let mut record = control.store.xiaomi().load().unwrap().unwrap();
-            record
-                .ha
-                .as_mut()
-                .unwrap()
-                .authorization
-                .as_mut()
-                .unwrap()
-                .tokens
-                .refresh_at = control.clock.wall() + 5;
-            record
-                .ha
-                .as_mut()
-                .unwrap()
-                .authorization
-                .as_mut()
-                .unwrap()
-                .tokens
-                .expires_at = control.clock.wall() + 10;
+            record.ha.authorization.tokens.refresh_at = control.clock.wall() + 5;
+            record.ha.authorization.tokens.expires_at = control.clock.wall() + 10;
             control.store.xiaomi().fixture_replace(&record).unwrap();
             control.context.adopt_credentials(record);
             control.cloud.lock().unwrap().token_status = 503;
@@ -466,14 +414,7 @@ fn home_and_info_rejection_stop_only_mijia_recovery_after_account_rejection() {
             assert_eq!(c.cloud.lock().unwrap().restores, 1);
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);
             assert_eq!(
-                c.store
-                    .xiaomi()
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .recovery
-                    .unwrap()
-                    .stop,
+                c.store.xiaomi().load().unwrap().unwrap().recovery.stop,
                 Some(crate::storage::RecoveryStop::Rejected)
             );
             c.context.request_sync();
@@ -523,11 +464,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
                 .as_ref()
                 .unwrap()
                 .ha
-                .as_ref()
-                .unwrap()
                 .authorization
-                .as_ref()
-                .unwrap()
                 .tokens
                 .access_token
                 == "fresh-access"
@@ -591,10 +528,7 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.as_ref().unwrap().credentials,
-                record.mijia.as_ref().unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.adopt_credentials(record);
         until(|| c.cloud.lock().unwrap().infos == before + 2).await;
@@ -739,7 +673,6 @@ fn candidate_unauthorized_requests_coalesce_into_one_mijia_recovery_and_resume_p
                     .unwrap()
                     .unwrap()
                     .mijia
-                    .unwrap()
                     .service_token(),
                 "restored-service"
             );
@@ -778,10 +711,7 @@ fn stale_candidate_401_cannot_pause_identical_replacement_session() {
             control
                 .store
                 .xiaomi()
-                .update_recovery(
-                    &record.recovery.as_ref().unwrap().credentials,
-                    record.mijia.as_ref().unwrap(),
-                )
+                .update_recovery(&record.recovery.credentials, &record.mijia)
                 .unwrap();
             control.context.adopt_credentials(record);
             release.send(()).unwrap();
@@ -830,7 +760,6 @@ fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia
                         .unwrap()
                         .unwrap()
                         .recovery
-                        .unwrap()
                         .stop,
                     Some(expected)
                 );
@@ -1006,10 +935,7 @@ fn ha_identity_retry_waits_through_unrelated_mijia_changes() {
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.unwrap().credentials,
-                &record.mijia.unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.reload_credentials();
         c.context.request_sync();
@@ -1096,16 +1022,7 @@ fn old_ha_probe_cannot_confirm_or_reject_identical_new_generation() {
             .await;
             assert!(!c.context.token_usable());
             assert_eq!(c.cloud.lock().unwrap().tokens, 0);
-            assert!(
-                !c.store
-                    .xiaomi()
-                    .load()
-                    .unwrap()
-                    .unwrap()
-                    .ha
-                    .unwrap()
-                    .stopped
-            );
+            assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
         }));
     }
 }
@@ -1149,23 +1066,11 @@ fn temporary_refresh_failure_and_late_unauthorized_do_not_stop_ha() {
                 ),
             )
             .unwrap();
-        assert!(
-            !c.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .ha
-                .unwrap()
-                .stopped
-        );
+        assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
         let record = c.store.xiaomi().load().unwrap().unwrap();
         c.store
             .xiaomi()
-            .update_recovery(
-                &record.recovery.unwrap().credentials,
-                &record.mijia.unwrap(),
-            )
+            .update_recovery(&record.recovery.credentials, &record.mijia)
             .unwrap();
         c.context.reload_credentials();
         c.cloud.lock().unwrap().token_status = 200;
@@ -1174,16 +1079,7 @@ fn temporary_refresh_failure_and_late_unauthorized_do_not_stop_ha() {
         assert_eq!(c.cloud.lock().unwrap().tokens, 2);
         c.clock.advance(Duration::from_millis(1));
         until(|| c.cloud.lock().unwrap().tokens == 3 && c.context.token_usable()).await;
-        assert!(
-            !c.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .ha
-                .unwrap()
-                .stopped
-        );
+        assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
     }));
 }
 
@@ -1223,16 +1119,7 @@ fn late_certificate_rejection_cannot_stop_identical_replacement_generation() {
         .await;
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
         assert!(c.context.token_usable());
-        assert!(
-            !c.store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .ha
-                .unwrap()
-                .stopped
-        );
+        assert!(!c.store.xiaomi().load().unwrap().unwrap().ha.stopped);
     }));
 }
 

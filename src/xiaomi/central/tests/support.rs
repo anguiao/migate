@@ -70,13 +70,9 @@ impl TlsFixture {
             server_key: server_key.serialize_pem(),
             force_tls12: false,
             credentials: XiaomiRecord {
-                uid: "isolated-account".into(),
-                region: "cn".into(),
-                recovery: None,
-                mijia: None,
-                ha: Some(crate::storage::HaClient {
+                ha: crate::storage::HaClient {
                     client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-                    authorization: Some(crate::storage::HaAuthorization {
+                    authorization: crate::storage::HaAuthorization {
                         redirect_uri: "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef".into(),
                         tokens: TokenSet {
                             access_token: "unused".into(),
@@ -84,14 +80,15 @@ impl TlsFixture {
                             expires_at: now.unix_timestamp() + 3600,
                             refresh_at: now.unix_timestamp() + 3000,
                         },
-                    }),
+                    },
                     stopped: false,
-                }),
+                },
                 hub: Some(crate::storage::HubIdentity {
                     virtual_did: identity.virtual_did,
                     private_key_pem: identity.private_key_pem,
                     certificate_pem: Some(certificate_pem),
                 }),
+                ..crate::storage::tests::xiaomi_credentials("isolated-account")
             },
         }
     }

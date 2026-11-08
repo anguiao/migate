@@ -92,11 +92,11 @@ fn cached_scope_restarts_offline_and_executes_real_reads_and_control() {
 }
 
 #[test]
-fn cached_scope_uses_direct_control_without_ha_authorization() {
+fn cached_scope_uses_direct_control_with_stopped_ha_authorization() {
     cached_scope_restarts_with_ha_state(true);
 }
 
-fn cached_scope_restarts_with_ha_state(missing_ha: bool) {
+fn cached_scope_restarts_with_ha_state(ha_stopped: bool) {
     use crate::device::FanCommand;
     use std::sync::atomic::Ordering;
 
@@ -119,9 +119,9 @@ fn cached_scope_restarts_with_ha_state(missing_ha: bool) {
             token,
         })
         .unwrap();
-    if missing_ha {
+    if ha_stopped {
         let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-        record.ha.as_mut().unwrap().authorization = None;
+        record.ha.stopped = true;
         rig.store.xiaomi().fixture_replace(&record).unwrap();
     } else {
         let mut tokens = rig
@@ -131,9 +131,7 @@ fn cached_scope_restarts_with_ha_state(missing_ha: bool) {
             .unwrap()
             .unwrap()
             .ha
-            .unwrap()
             .authorization
-            .unwrap()
             .tokens;
         tokens.refresh_at = 1;
         tokens.expires_at = 1;

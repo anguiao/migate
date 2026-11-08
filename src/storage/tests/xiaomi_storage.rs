@@ -50,19 +50,19 @@ fn record(suffix: &str) -> XiaomiRecord {
     XiaomiRecord {
         uid: uid.clone(),
         region: "cn".into(),
-        recovery: Some(AccountRecovery {
+        recovery: AccountRecovery {
             credentials: recovery(&uid, suffix),
             stop: None,
-        }),
-        mijia: Some(session(&uid, suffix)),
-        ha: Some(HaClient {
+        },
+        mijia: session(&uid, suffix),
+        ha: HaClient {
             client_uuid: UUID.into(),
-            authorization: Some(HaAuthorization {
+            authorization: HaAuthorization {
                 redirect_uri: REDIRECT.into(),
                 tokens: tokens(suffix),
-            }),
+            },
             stopped: false,
-        }),
+        },
         hub: Some(HubIdentity {
             virtual_did: "18446744073709551615".into(),
             private_key_pem: format!("private-{suffix}"),
@@ -72,23 +72,28 @@ fn record(suffix: &str) -> XiaomiRecord {
 }
 
 #[test]
-fn account_identity_can_exist_without_any_service_credentials() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    Connection::open(store.path())
-        .unwrap()
-        .execute(
-            "INSERT INTO xiaomi_account (id, uid, region) VALUES (1, 'uid-only', 'cn')",
-            [],
-        )
-        .unwrap();
-    let record = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(record.uid, "uid-only");
-    assert_eq!(record.region, "cn");
-    assert!(record.recovery.is_none());
-    assert!(record.mijia.is_none());
-    assert!(record.ha.is_none());
-    assert!(record.hub.is_none());
+fn missing_core_credentials_are_rejected_at_load() {
+    for table in [
+        "xiaomi_account",
+        "xiaomi_account_recovery",
+        "xiaomi_mijia_session",
+        "xiaomi_ha_client",
+        "xiaomi_ha_oauth",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.xiaomi().fixture_replace(&record("complete")).unwrap();
+        Connection::open(store.path())
+            .unwrap()
+            .execute(&format!("DELETE FROM {table}"), [])
+            .unwrap();
+        let error = store.xiaomi().load().unwrap_err();
+        assert_eq!(
+            error.source().unwrap().to_string(),
+            "Stored Xiaomi credentials are invalid",
+            "{table}"
+        );
+    }
 }
 
 #[test]
@@ -100,23 +105,16 @@ fn login_credentials_persist_and_replace_atomically() {
     store.xiaomi().fixture_replace(&first).unwrap();
     assert_eq!(store.xiaomi().load().unwrap(), Some(first.clone()));
     let mut second = first.clone();
-    second.recovery.as_mut().unwrap().credentials = recovery(&first.uid, "second");
-    second.mijia = Some(session(&first.uid, "second"));
-    second
-        .ha
-        .as_mut()
-        .unwrap()
-        .authorization
-        .as_mut()
-        .unwrap()
-        .tokens = tokens("second");
+    second.recovery.credentials = recovery(&first.uid, "second");
+    second.mijia = session(&first.uid, "second");
+    second.ha.authorization.tokens = tokens("second");
     store
         .xiaomi()
         .commit_login(
-            &second.recovery.as_ref().unwrap().credentials,
-            second.mijia.as_ref().unwrap(),
+            &second.recovery.credentials,
+            &second.mijia,
             UUID,
-            second.ha.as_ref().unwrap().authorization.as_ref().unwrap(),
+            &second.ha.authorization,
         )
         .unwrap();
     drop(store);
@@ -137,16 +135,10 @@ fn pem_line_breaks_are_persisted_without_exposing_secrets_in_debug() {
     hub.certificate_pem =
         Some("-----BEGIN CERTIFICATE-----\nMIIBAA==\n-----END CERTIFICATE-----\n".into());
     let debug = format!("{credentials:?}");
-    let ha = credentials
-        .ha
-        .as_ref()
-        .unwrap()
-        .authorization
-        .as_ref()
-        .unwrap();
+    let ha = &credentials.ha.authorization;
     let hub = credentials.hub.as_ref().unwrap();
-    let account = credentials.recovery.as_ref().unwrap();
-    let session = credentials.mijia.as_ref().unwrap();
+    let account = &credentials.recovery;
+    let session = &credentials.mijia;
     for secret in [
         ha.tokens.access_token.as_str(),
         ha.tokens.refresh_token.as_str(),
@@ -246,10 +238,10 @@ fn stopped_groups_survive_restart_and_only_login_commit_clears_them() {
     let store = Store::open(dir.path()).unwrap();
     let stopped = store.xiaomi().load().unwrap().unwrap();
     assert_eq!(
-        stopped.recovery.as_ref().unwrap().stop,
+        stopped.recovery.stop,
         Some(RecoveryStop::VerificationRequired)
     );
-    assert!(stopped.ha.as_ref().unwrap().stopped);
+    assert!(stopped.ha.stopped);
     let oauth = HaAuthorization {
         redirect_uri: REDIRECT.into(),
         tokens: tokens("login"),
@@ -264,14 +256,11 @@ fn stopped_groups_survive_restart_and_only_login_commit_clears_them() {
         )
         .unwrap();
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(saved.recovery.as_ref().unwrap().stop, None);
-    assert!(!saved.ha.as_ref().unwrap().stopped);
+    assert_eq!(saved.recovery.stop, None);
+    assert!(!saved.ha.stopped);
     assert_eq!(saved.hub, old.hub);
-    assert_eq!(saved.mijia, Some(session(&uid, "login")));
-    assert_eq!(
-        saved.ha.as_ref().unwrap().authorization.as_ref(),
-        Some(&oauth)
-    );
+    assert_eq!(saved.mijia, session(&uid, "login"));
+    assert_eq!(saved.ha.authorization, oauth);
 }
 
 #[test]
@@ -336,39 +325,26 @@ fn recovery_credentials_and_mijia_session_roll_back_together() {
 }
 
 #[test]
-fn ha_client_and_hub_identity_can_exist_without_token_or_certificate() {
+fn hub_identity_can_be_prepared_before_its_certificate() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let mut partial = record("partial");
-    partial.recovery = None;
-    partial.mijia = None;
-    let mut hub = partial.hub.take().unwrap();
+    let mut pending = record("pending");
+    let mut hub = pending.hub.take().unwrap();
     hub.certificate_pem = None;
-    store.xiaomi().fixture_replace(&partial).unwrap();
+    store.xiaomi().fixture_replace(&pending).unwrap();
     store.xiaomi().create_hub(&hub).unwrap();
-    partial.hub = Some(hub);
+    pending.hub = Some(hub);
     drop(store);
     let reopened = Store::open(dir.path()).unwrap();
-    assert_eq!(reopened.xiaomi().load().unwrap(), Some(partial.clone()));
+    assert_eq!(reopened.xiaomi().load().unwrap(), Some(pending.clone()));
     reopened
         .xiaomi()
         .update_certificate("new-certificate")
         .unwrap();
-    let mut saved = reopened.xiaomi().load().unwrap().unwrap();
-    saved.ha.as_mut().unwrap().authorization = None;
-    reopened.xiaomi().fixture_replace(&saved).unwrap();
-    assert_eq!(reopened.xiaomi().load().unwrap(), Some(saved.clone()));
-    assert_eq!(saved.ha.as_ref().unwrap().client_uuid, UUID);
+    let saved = reopened.xiaomi().load().unwrap().unwrap();
     assert_eq!(
         saved.hub.as_ref().unwrap().certificate_pem.as_deref(),
         Some("new-certificate")
-    );
-    saved.hub.as_mut().unwrap().certificate_pem = None;
-    reopened.xiaomi().fixture_replace(&saved).unwrap();
-    drop(reopened);
-    assert_eq!(
-        Store::open(dir.path()).unwrap().xiaomi().load().unwrap(),
-        Some(saved)
     );
 }
 
@@ -434,20 +410,20 @@ fn rejects_invalid_semantics_without_overwriting_credentials() {
         store
             .xiaomi()
             .update_recovery(
-                &original.recovery.as_ref().unwrap().credentials,
+                &original.recovery.credentials,
                 &session("other-uid", "other"),
             )
             .is_err()
     );
-    let mut invalid_redirect = original.ha.as_ref().unwrap().authorization.clone().unwrap();
+    let mut invalid_redirect = original.ha.authorization.clone();
     invalid_redirect.redirect_uri =
         "http://evil.invalid/api/webhook/0123456789abcdef0123456789abcdef".into();
     assert!(
         store
             .xiaomi()
             .commit_login(
-                &original.recovery.as_ref().unwrap().credentials,
-                original.mijia.as_ref().unwrap(),
+                &original.recovery.credentials,
+                &original.mijia,
                 UUID,
                 &invalid_redirect
             )

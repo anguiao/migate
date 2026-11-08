@@ -62,12 +62,11 @@ fn corrupt_credentials_block_login_and_check_but_logout_does_not_load() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
-        record.mijia = None;
+        let record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
         store.xiaomi().fixture_replace(&record).unwrap();
         Connection::open(store.path())
             .unwrap()
-            .execute(corruption, [])
+            .execute_batch(corruption)
             .unwrap();
         let (auth, _) = service(&store, vec![]);
         assert!(matches!(
@@ -85,16 +84,15 @@ fn certificate_binding_failures_do_not_remove_the_account() {
     for corruption in [
         "UPDATE xiaomi_hub SET certificate_pem = 'not a certificate'",
         "UPDATE xiaomi_hub SET virtual_did = '1'",
-        "UPDATE xiaomi_account SET uid = 'other-account'",
+        "UPDATE xiaomi_account SET uid = 'other-account'; UPDATE xiaomi_account_recovery SET user_id = 'other-account'; UPDATE xiaomi_mijia_session SET user_id = 'other-account'",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
-        record.mijia = None;
+        let record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
         store.xiaomi().fixture_replace(&record).unwrap();
         Connection::open(store.path())
             .unwrap()
-            .execute(corruption, [])
+            .execute_batch(corruption)
             .unwrap();
         let (auth, _) = service(&store, vec![]);
         let report = auth.local_status().unwrap();
@@ -136,17 +134,6 @@ fn dropping_pending_check_keeps_prior_refresh_and_certificate() {
     ));
     thread::sleep(Duration::from_millis(120));
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(
-        saved
-            .ha
-            .as_ref()
-            .unwrap()
-            .authorization
-            .as_ref()
-            .unwrap()
-            .tokens
-            .access_token,
-        "fresh"
-    );
+    assert_eq!(saved.ha.authorization.tokens.access_token, "fresh");
     assert_eq!(saved.hub.as_ref().unwrap().certificate_pem, old_certificate);
 }

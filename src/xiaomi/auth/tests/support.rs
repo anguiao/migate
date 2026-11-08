@@ -42,21 +42,16 @@ pub(super) fn valid_record(
     let identity = ClientIdentity::generate(uid).unwrap();
     let certificate = sign_csr(&identity.csr_pem, NOW - 60, not_after).unwrap();
     XiaomiRecord {
-        uid: uid.into(),
-        region: "cn".into(),
-        recovery: None,
-        mijia: Some(
-            crate::xiaomi::mijia::MijiaSession::new(
-                uid.into(),
-                "service-old".into(),
-                "c2VjdXJpdHk=".into(),
-                "test-agent".into(),
-            )
-            .unwrap(),
-        ),
-        ha: Some(crate::storage::HaClient {
+        mijia: crate::xiaomi::mijia::MijiaSession::new(
+            uid.into(),
+            "service-old".into(),
+            "c2VjdXJpdHk=".into(),
+            "test-agent".into(),
+        )
+        .unwrap(),
+        ha: crate::storage::HaClient {
             client_uuid: UUID.into(),
-            authorization: Some(crate::storage::HaAuthorization {
+            authorization: crate::storage::HaAuthorization {
                 redirect_uri:
                     "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
                         .into(),
@@ -66,14 +61,15 @@ pub(super) fn valid_record(
                     expires_at: NOW + 1000,
                     refresh_at,
                 },
-            }),
+            },
             stopped: false,
-        }),
+        },
         hub: Some(crate::storage::HubIdentity {
             virtual_did: identity.virtual_did,
             private_key_pem: identity.private_key_pem,
             certificate_pem: Some(certificate),
         }),
+        ..crate::storage::tests::xiaomi_credentials(uid)
     }
 }
 

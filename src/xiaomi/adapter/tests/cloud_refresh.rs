@@ -6,15 +6,13 @@ mod errors;
 fn directory_uses_mijia_session_and_signed_form() {
     let rig = Rig::new(true, &["one"]);
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
-    record.mijia = Some(
-        crate::xiaomi::mijia::MijiaSession::new(
-            record.uid.clone(),
-            "device-session".into(),
-            "c2VjdXJpdHk=".into(),
-            "test-agent".into(),
-        )
-        .unwrap(),
-    );
+    record.mijia = crate::xiaomi::mijia::MijiaSession::new(
+        record.uid.clone(),
+        "device-session".into(),
+        "c2VjdXJpdHk=".into(),
+        "test-agent".into(),
+    )
+    .unwrap();
     rig.store.xiaomi().fixture_replace(&record).unwrap();
     rig.source.context.adopt_credentials(record);
     block_on(rig.run(|c| async move {

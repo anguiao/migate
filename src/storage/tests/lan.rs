@@ -68,13 +68,9 @@ fn same_account_login_preserves_lan_and_logout_erases_it() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let credentials = |uid: &str| XiaomiRecord {
-        uid: uid.into(),
-        region: "cn".into(),
-        recovery: None,
-        mijia: None,
-        ha: Some(crate::storage::HaClient {
+        ha: crate::storage::HaClient {
             client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-            authorization: Some(crate::storage::HaAuthorization {
+            authorization: crate::storage::HaAuthorization {
                 redirect_uri:
                     "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
                         .into(),
@@ -84,14 +80,15 @@ fn same_account_login_preserves_lan_and_logout_erases_it() {
                     expires_at: 10,
                     refresh_at: 5,
                 },
-            }),
+            },
             stopped: false,
-        }),
+        },
         hub: Some(crate::storage::HubIdentity {
             virtual_did: "18446744073709551615".into(),
             private_key_pem: "private".into(),
             certificate_pem: Some("certificate".into()),
         }),
+        ..crate::storage::tests::xiaomi_credentials(uid)
     };
     store
         .xiaomi()
@@ -127,7 +124,7 @@ fn same_account_login_preserves_lan_and_logout_erases_it() {
             .unwrap(),
         )
     };
-    let authorization = credentials("owner").ha.unwrap().authorization.unwrap();
+    let authorization = credentials("owner").ha.authorization;
     let db = rusqlite::Connection::open(store.path()).unwrap();
     db.execute_batch("CREATE TRIGGER reject_auth BEFORE UPDATE ON xiaomi_ha_oauth BEGIN SELECT RAISE(ABORT, 'rejected'); END;").unwrap();
     let (account, session) = login("owner");

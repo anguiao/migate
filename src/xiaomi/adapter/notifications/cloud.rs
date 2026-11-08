@@ -62,14 +62,13 @@ pub(super) fn connection_key(context: &Context) -> Option<ConnectionKey> {
     }
     let live = context.live.borrow();
     let credentials = live.credentials.as_ref()?;
-    let ha = credentials.ha.as_ref().filter(|ha| !ha.stopped)?;
-    let authorization = ha.authorization.as_ref()?;
+    let authorization = credentials.ha_authorization()?;
     let scope = live.scope.as_ref()?;
     Some(ConnectionKey {
         uid: credentials.uid.clone(),
         token: authorization.tokens.access_token.clone(),
         generation: key.generation,
-        client: ha.client_uuid.clone(),
+        client: credentials.ha.client_uuid.clone(),
         home: scope.home_id.clone(),
     })
 }

@@ -117,7 +117,7 @@ impl Rig {
     pub(in super::super) fn enable_recovery(&self) {
         use crate::xiaomi::auth::{AccountClientIdentity, AccountCredentials};
         let mut record = self.store.xiaomi().load().unwrap().unwrap();
-        record.recovery = Some(crate::storage::AccountRecovery {
+        record.recovery = crate::storage::AccountRecovery {
             credentials: AccountCredentials::new(
                 record.uid.clone(),
                 "cuser".into(),
@@ -126,7 +126,7 @@ impl Rig {
             )
             .unwrap(),
             stop: None,
-        });
+        };
         self.store.xiaomi().fixture_replace(&record).unwrap();
         self.source.context.adopt_credentials(record);
     }
@@ -230,34 +230,17 @@ impl Rig {
         let tls = TlsFixture::new(false);
         let uid = tls.credentials.uid.clone();
         let mut credentials = tls.credentials.clone();
+        credentials.recovery.stop = Some(crate::storage::RecoveryStop::Rejected);
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
-        credentials
-            .ha
-            .as_mut()
-            .unwrap()
-            .authorization
-            .as_mut()
-            .unwrap()
-            .tokens
-            .refresh_at = now + 1_000_000;
-        credentials
-            .ha
-            .as_mut()
-            .unwrap()
-            .authorization
-            .as_mut()
-            .unwrap()
-            .tokens
-            .expires_at = now + 2_000_000;
-        credentials.mijia = Some(
-            crate::xiaomi::mijia::MijiaSession::new(
-                uid.clone(),
-                "device-session".into(),
-                "c2VjdXJpdHk=".into(),
-                "test-agent".into(),
-            )
-            .unwrap(),
-        );
+        credentials.ha.authorization.tokens.refresh_at = now + 1_000_000;
+        credentials.ha.authorization.tokens.expires_at = now + 2_000_000;
+        credentials.mijia = crate::xiaomi::mijia::MijiaSession::new(
+            uid.clone(),
+            "device-session".into(),
+            "c2VjdXJpdHk=".into(),
+            "test-agent".into(),
+        )
+        .unwrap();
         store.xiaomi().fixture_replace(&credentials).unwrap();
         let mut data = vec![
             cached(&uid, "one", false),

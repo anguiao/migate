@@ -21,21 +21,16 @@ use std::time::Duration;
 
 fn credentials() -> XiaomiRecord {
     XiaomiRecord {
-        uid: "account".into(),
-        region: "cn".into(),
-        recovery: None,
-        mijia: Some(
-            crate::xiaomi::mijia::MijiaSession::new(
-                "account".into(),
-                "processed-token".into(),
-                "c2VjdXJpdHk=".into(),
-                "test-agent".into(),
-            )
-            .unwrap(),
-        ),
-        ha: Some(crate::storage::HaClient {
+        mijia: crate::xiaomi::mijia::MijiaSession::new(
+            "account".into(),
+            "processed-token".into(),
+            "c2VjdXJpdHk=".into(),
+            "test-agent".into(),
+        )
+        .unwrap(),
+        ha: crate::storage::HaClient {
             client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-            authorization: Some(crate::storage::HaAuthorization {
+            authorization: crate::storage::HaAuthorization {
                 redirect_uri:
                     "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
                         .into(),
@@ -45,10 +40,11 @@ fn credentials() -> XiaomiRecord {
                     expires_at: 10,
                     refresh_at: 9,
                 },
-            }),
+            },
             stopped: false,
-        }),
+        },
         hub: None,
+        ..crate::storage::tests::xiaomi_credentials("account")
     }
 }
 

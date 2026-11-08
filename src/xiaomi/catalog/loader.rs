@@ -17,7 +17,6 @@ use crate::{
 pub enum CatalogError {
     NoLocalHome,
     InvalidScope,
-    MissingAuthorization,
     TargetMissing,
     Cloud(CloudError),
     Description(CloudError),
@@ -34,7 +33,6 @@ impl fmt::Display for CatalogError {
                 formatter.write_str("target device is missing from locally matched Xiaomi homes")
             }
             Self::InvalidScope => formatter.write_str("invalid Xiaomi account or home scope"),
-            Self::MissingAuthorization => formatter.write_str("Mijia session is unavailable"),
             Self::Cloud(error) | Self::Description(error) => error.fmt(formatter),
             Self::Capability(error) => error.fmt(formatter),
         }
@@ -96,10 +94,7 @@ pub(crate) async fn load_device(
     if !home.dids.iter().any(|member| member == did) {
         return Err(CatalogError::TargetMissing);
     }
-    let session = credentials
-        .mijia
-        .as_ref()
-        .ok_or(CatalogError::MissingAuthorization)?;
+    let session = &credentials.mijia;
     let details = mijia
         .get_device(session, home, did)
         .await

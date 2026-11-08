@@ -135,36 +135,13 @@ fn logout_clears_corrupt_credentials_and_preserves_identity_and_matter_data() {
     let store = migate::storage::Store::open(directory.path()).unwrap();
     let identity = store.load_identity().unwrap();
     store.matter().put(7, b"paired").unwrap();
-    xiaomi_fixture::seed(
-        &store.xiaomi(),
-        &XiaomiRecord {
-            uid: "uid".into(),
-            region: "cn".into(),
-            recovery: None,
-            mijia: None,
-            ha: Some(migate::storage::HaClient {
-                client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-                authorization: Some(migate::storage::HaAuthorization {
-                    redirect_uri: "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef".into(),
-                    tokens: TokenSet {
-                        access_token: "access".into(),
-                        refresh_token: "refresh".into(),
-                        expires_at: 2_000_000_000,
-                        refresh_at: 1_900_000_000,
-                    },
-                }),
-                stopped: false,
-            }),
-            hub: Some(migate::storage::HubIdentity {
-                virtual_did: "1".into(),
-                private_key_pem: "broken-key".into(),
-                certificate_pem: Some("broken-certificate".into()),
-            }),
-        },
-    );
     Connection::open(store.path())
         .unwrap()
-        .execute("UPDATE xiaomi_account SET region = 'us'", [])
+        .execute_batch(
+            "INSERT INTO xiaomi_account (id, uid, region) VALUES (1, 'uid', 'us');
+             INSERT INTO xiaomi_hub (id, virtual_did, private_key_pem, certificate_pem)
+             VALUES (1, '1', 'broken-key', 'broken-certificate');",
+        )
         .unwrap();
     drop(store);
 
@@ -264,7 +241,7 @@ fn login_signal_reports_and_preserves_existing_credential_groups() {
     let previous = XiaomiRecord {
         uid: "uid".into(),
         region: "cn".into(),
-        recovery: Some(AccountRecovery {
+        recovery: AccountRecovery {
             credentials: AccountCredentials::new(
                 "uid".into(),
                 "cuser-secret".into(),
@@ -273,19 +250,17 @@ fn login_signal_reports_and_preserves_existing_credential_groups() {
             )
             .unwrap(),
             stop: Some(RecoveryStop::VerificationRequired),
-        }),
-        mijia: Some(
-            MijiaSession::new(
-                "uid".into(),
-                "service-secret".into(),
-                "c2VjdXJpdHk=".into(),
-                "agent".into(),
-            )
-            .unwrap(),
-        ),
-        ha: Some(HaClient {
+        },
+        mijia: MijiaSession::new(
+            "uid".into(),
+            "service-secret".into(),
+            "c2VjdXJpdHk=".into(),
+            "agent".into(),
+        )
+        .unwrap(),
+        ha: HaClient {
             client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
-            authorization: Some(HaAuthorization {
+            authorization: HaAuthorization {
                 redirect_uri:
                     "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
                         .into(),
@@ -295,9 +270,9 @@ fn login_signal_reports_and_preserves_existing_credential_groups() {
                     expires_at: 2_000_000_000,
                     refresh_at: 1_900_000_000,
                 },
-            }),
+            },
             stopped: true,
-        }),
+        },
         hub: None,
     };
     xiaomi_fixture::seed(&store.xiaomi(), &previous);

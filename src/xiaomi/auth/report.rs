@@ -30,8 +30,7 @@ pub enum FailureReason {
     Cloud(CloudError),
     CloudNotification(crate::xiaomi::cloud::NotificationError),
     AccessTokenExpired,
-    MissingMijiaSession,
-    MissingHaAuthorization,
+    HaAuthorizationStopped,
     RecoveryStopped(RecoveryStop),
     MissingCertificate,
     CannotDetermineAccountIdentity,
@@ -49,9 +48,8 @@ impl fmt::Display for FailureReason {
             Self::Cloud(error) => error.fmt(formatter),
             Self::CloudNotification(error) => error.fmt(formatter),
             Self::AccessTokenExpired => formatter.write_str("Xiaomi access token has expired"),
-            Self::MissingMijiaSession => formatter.write_str("Mijia session is unavailable"),
-            Self::MissingHaAuthorization => {
-                formatter.write_str("HA OAuth credentials are unavailable")
+            Self::HaAuthorizationStopped => {
+                formatter.write_str("HA OAuth authorization requires a new login")
             }
             Self::RecoveryStopped(RecoveryStop::Rejected) => {
                 formatter.write_str("Account recovery was rejected")

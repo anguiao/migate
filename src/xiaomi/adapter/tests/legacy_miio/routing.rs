@@ -204,11 +204,7 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
         .unwrap()
         .unwrap()
         .ha
-        .as_ref()
-        .unwrap()
         .authorization
-        .as_ref()
-        .unwrap()
         .tokens
         .clone();
     tokens.refresh_at = 1;

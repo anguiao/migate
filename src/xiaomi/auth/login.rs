@@ -37,13 +37,11 @@ impl AuthService {
         let authorization = AuthorizationAttempt::new(
             previous
                 .as_ref()
-                .and_then(|value| value.record.ha.as_ref())
-                .map(|ha| ha.client_uuid.as_str()),
+                .map(|value| value.record.ha.client_uuid.as_str()),
         )?;
         let identity = previous
             .as_ref()
-            .and_then(|value| value.record.recovery.as_ref())
-            .map(|recovery| recovery.credentials.identity().clone())
+            .map(|value| value.record.recovery.credentials.identity().clone())
             .unwrap_or_else(AccountClientIdentity::generate);
         let qr = self.account.start_qr(identity).await?;
         Ok(LoginAttempt {

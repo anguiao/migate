@@ -63,29 +63,12 @@ impl AuthService {
                     uid: stored.record.uid.clone(),
                     region: stored.record.region.clone(),
                 }),
-                recovery_stop: stored
-                    .record
-                    .recovery
-                    .as_ref()
-                    .and_then(|recovery| recovery.stop),
-                mijia: if stored.record.mijia.is_some() {
-                    AuthenticationState::Checking
-                } else if let Some(stop) = stored
-                    .record
-                    .recovery
-                    .as_ref()
-                    .and_then(|recovery| recovery.stop)
-                {
-                    AuthenticationState::SignInRequired(FailureReason::RecoveryStopped(stop))
+                recovery_stop: stored.record.recovery.stop,
+                mijia: AuthenticationState::Checking,
+                ha: if stored.record.ha.stopped {
+                    AuthenticationState::SignInRequired(FailureReason::HaAuthorizationStopped)
                 } else {
-                    AuthenticationState::Unavailable(FailureReason::MissingMijiaSession)
-                },
-                ha: match &stored.record.ha {
-                    Some(ha) if ha.stopped => {
-                        AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
-                    }
-                    Some(ha) if ha.authorization.is_some() => AuthenticationState::Checking,
-                    _ => AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization),
+                    AuthenticationState::Checking
                 },
                 certificate: stored.validity,
                 certificate_update: stored.certificate_update.clone(),

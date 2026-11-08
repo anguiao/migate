@@ -349,12 +349,8 @@ impl Context {
         let snapshot = self.store.xiaomi().current_snapshot();
         let generation = snapshot.mijia_generation();
         let ha_generation = snapshot.ha_generation();
-        let recovery_stop = credentials
-            .recovery
-            .as_ref()
-            .and_then(|recovery| recovery.stop);
-        let has_session = credentials.mijia.is_some();
-        let ha_stopped = credentials.ha.as_ref().is_some_and(|ha| ha.stopped);
+        let recovery_stop = credentials.recovery.stop;
+        let ha_stopped = credentials.ha.stopped;
         let mut live = self.live.borrow_mut();
         let generation_changed = live.mijia_generation != generation;
         let ha_generation_changed = live.ha_generation != ha_generation;
@@ -370,13 +366,7 @@ impl Context {
             let status_changed = status.auth.recovery_stop != recovery_stop || generation_changed;
             status.auth.recovery_stop = recovery_stop;
             if generation_changed {
-                status.auth.mijia = if has_session {
-                    AuthenticationState::Checking
-                } else if let Some(stop) = recovery_stop {
-                    AuthenticationState::SignInRequired(FailureReason::RecoveryStopped(stop))
-                } else {
-                    AuthenticationState::Unavailable(FailureReason::MissingMijiaSession)
-                };
+                status.auth.mijia = AuthenticationState::Checking;
             }
             if status_changed {
                 status.auth.set_completed_at(self.clock.unix_now());
@@ -403,7 +393,7 @@ impl Context {
             let authentication = if self.live.borrow().ha_generation.is_some() {
                 AuthenticationState::Checking
             } else {
-                AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
+                AuthenticationState::SignInRequired(FailureReason::HaAuthorizationStopped)
             };
             self.ha_authentication(authentication);
             self.ha_changed.notify(usize::MAX);

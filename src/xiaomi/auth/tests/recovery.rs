@@ -27,10 +27,10 @@ fn credentials() -> AccountCredentials {
 }
 fn recovery_record() -> XiaomiRecord {
     let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
-    record.recovery = Some(AccountRecovery {
+    record.recovery = AccountRecovery {
         credentials: credentials(),
         stop: None,
-    });
+    };
     record
 }
 fn recovery_service(
@@ -117,36 +117,11 @@ fn rejected_saved_session_is_restored_once_and_saved_as_one_pair() {
     let report = block_on(auth.check()).unwrap();
     assert!(report.is_success(), "{report:?}");
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert_eq!(saved.recovery.unwrap().credentials.pass_token(), "new-pass");
-    assert_eq!(saved.mijia.unwrap().service_token(), "restored-service");
+    assert_eq!(saved.recovery.credentials.pass_token(), "new-pass");
+    assert_eq!(saved.mijia.service_token(), "restored-service");
     assert_eq!(account.try_iter().count(), 2);
     assert_eq!(mijia.try_iter().count(), 2);
     assert_eq!(ha.try_iter().count(), 1);
-}
-
-#[test]
-fn missing_session_can_be_restored_without_an_initial_device_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let mut original = recovery_record();
-    original.mijia = None;
-    store.xiaomi().fixture_replace(&original).unwrap();
-    let (auth, account, mijia, _) = recovery_service(&store, RecoveryResponse::Success);
-    let report = block_on(auth.check()).unwrap();
-    assert!(report.is_success(), "{report:?}");
-    assert_eq!(account.try_iter().count(), 2);
-    assert_eq!(mijia.try_iter().count(), 1);
-    assert_eq!(
-        store
-            .xiaomi()
-            .load()
-            .unwrap()
-            .unwrap()
-            .mijia
-            .unwrap()
-            .service_token(),
-        "restored-service"
-    );
 }
 
 #[test]
@@ -213,14 +188,7 @@ fn rejected_or_verification_recovery_stops_across_reopen_but_not_ha_or_certifica
         drop(store);
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(
-            store
-                .xiaomi()
-                .load()
-                .unwrap()
-                .unwrap()
-                .recovery
-                .unwrap()
-                .stop,
+            store.xiaomi().load().unwrap().unwrap().recovery.stop,
             Some(stop)
         );
         let (auth, account, _, ha) = recovery_service(&store, scenario);
@@ -265,16 +233,14 @@ fn stopped_recovery_does_not_invalidate_a_working_saved_session() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let mut original = recovery_record();
-    original.recovery.as_mut().unwrap().stop = Some(RecoveryStop::VerificationRequired);
-    original.mijia = Some(
-        crate::xiaomi::mijia::MijiaSession::new(
-            "uid".into(),
-            "working".into(),
-            "c2VjdXJpdHk=".into(),
-            "agent".into(),
-        )
-        .unwrap(),
-    );
+    original.recovery.stop = Some(RecoveryStop::VerificationRequired);
+    original.mijia = crate::xiaomi::mijia::MijiaSession::new(
+        "uid".into(),
+        "working".into(),
+        "c2VjdXJpdHk=".into(),
+        "agent".into(),
+    )
+    .unwrap();
     store.xiaomi().fixture_replace(&original).unwrap();
     let (auth, account, _, _) = recovery_service(&store, RecoveryResponse::Rejected);
     let report = block_on(auth.check()).unwrap();

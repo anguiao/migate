@@ -80,7 +80,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                 AuthenticationState::SignInRequired(_)
             ) {
                 context.ha_authentication(AuthenticationState::SignInRequired(
-                    FailureReason::MissingHaAuthorization,
+                    FailureReason::HaAuthorizationStopped,
                 ));
             }
             changed.await;
@@ -470,18 +470,11 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
         let changed = context.mijia_changed.listen();
         let credentials_changed = context.credentials_changed.listen();
         let rejected = context.mijia_rejected.borrow().as_ref() == Some(&generation);
-        if record.mijia.is_some() && !rejected {
+        if !rejected {
             future::or(changed, credentials_changed).await;
             continue;
         }
-        let Some(recovery) = &record.recovery else {
-            context.mijia_authentication(AuthenticationState::SignInRequired(
-                FailureReason::MissingMijiaSession,
-            ));
-            future::or(changed, credentials_changed).await;
-            continue;
-        };
-        if let Some(stop) = recovery.stop {
+        if let Some(stop) = record.recovery.stop {
             context.status.borrow_mut().auth.recovery_stop = Some(stop);
             context.mijia_authentication(AuthenticationState::SignInRequired(
                 FailureReason::RecoveryStopped(stop),
@@ -517,7 +510,7 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
             Err(AuthError::Storage(error)) => return Err(error.into()),
             Err(error) => {
                 let current = saved(auth, &context)?;
-                let stop = current.recovery.as_ref().and_then(|recovery| recovery.stop);
+                let stop = current.recovery.stop;
                 context.status.borrow_mut().auth.recovery_stop = stop;
                 let (reason, retry) = match error {
                     AuthError::Account(error) => {

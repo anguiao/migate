@@ -76,10 +76,7 @@ impl XiaomiAdapter {
         let snapshot = store.xiaomi().current_snapshot();
         let mijia_generation = snapshot.mijia_generation();
         let ha_generation = snapshot.ha_generation();
-        let ha_stopped = credentials
-            .as_ref()
-            .and_then(|record| record.ha.as_ref())
-            .is_some_and(|ha| ha.stopped);
+        let ha_stopped = credentials.as_ref().is_some_and(|record| record.ha.stopped);
         let stored = store.devices().load_configuration()?;
         let scope = credentials
             .as_ref()

@@ -26,19 +26,16 @@ impl AuthService {
         &self,
         record: &XiaomiRecord,
     ) -> Result<MijiaSession, AuthError> {
-        if let Some(session) = &record.mijia {
-            let result = self.validate_mijia(&record.uid, session).await;
-            match result {
-                Ok(()) => return Ok(session.clone()),
-                Err(AuthError::Cloud(error)) if error.is_unauthorized() => (),
-                Err(error) => return Err(error),
+        match self.validate_mijia(&record.uid, &record.mijia).await {
+            Ok(()) => Ok(record.mijia.clone()),
+            Err(AuthError::Cloud(error)) if error.is_unauthorized() => {
+                self.recover_mijia(record).await
             }
+            Err(error) => Err(error),
         }
-        self.recover_mijia(record).await
     }
 
-    /// Perform one restoration after the caller has identified a rejected or
-    /// missing session.
+    /// Perform one restoration after the caller has identified a rejected session.
     pub(crate) async fn recover_mijia(
         &self,
         record: &XiaomiRecord,
@@ -78,8 +75,8 @@ impl AuthService {
             .store
             .current_snapshot()
             .record
-            .and_then(|record| record.recovery)
-            .ok_or(AuthError::Failure(FailureReason::MissingMijiaSession))?;
+            .ok_or(AuthError::Missing("Xiaomi account is unavailable"))?
+            .recovery;
         if let Some(stop) = recovery.stop {
             return Err(AuthError::Failure(FailureReason::RecoveryStopped(stop)));
         }

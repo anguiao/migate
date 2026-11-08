@@ -1,27 +1,6 @@
 use super::*;
 
 #[test]
-fn missing_mijia_session_does_not_make_ha_authorization_sufficient() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
-    record.mijia = None;
-    store.xiaomi().fixture_replace(&record).unwrap();
-    let (auth, requests) = service(
-        &store,
-        vec![MockResponse::json(200, &home_body(Some("uid"), &[]))],
-    );
-
-    let report = block_on(auth.check()).unwrap();
-
-    assert!(
-        !report.is_success(),
-        "missing Mijia session must fail check"
-    );
-    assert_eq!(requests.try_iter().count(), 1, "HA is still checked");
-}
-
-#[test]
 fn successful_certificate_renewal_does_not_hide_failed_due_refresh() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -48,7 +27,7 @@ fn successful_certificate_renewal_does_not_hide_failed_due_refresh() {
     ));
     assert_eq!(report.certificate_update, CertificateUpdate::Updated);
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert!(!saved.ha.unwrap().stopped);
+    assert!(!saved.ha.stopped);
     assert_ne!(
         saved.hub.unwrap().certificate_pem,
         original.hub.unwrap().certificate_pem
@@ -86,7 +65,7 @@ fn failed_refresh_followed_by_old_certificate_token_rejection_does_not_stop_ha()
         report.certificate_update,
         CertificateUpdate::Failed(_)
     ));
-    assert!(!store.xiaomi().load().unwrap().unwrap().ha.unwrap().stopped);
+    assert!(!store.xiaomi().load().unwrap().unwrap().ha.stopped);
     assert_eq!(requests.try_iter().count(), 2);
 }
 
@@ -99,16 +78,13 @@ fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
             FailureReason::InvalidCertificate,
         ),
     ] {
-        for ha_state in ["ok", "missing", "stopped", "network", "mismatch"] {
+        for ha_state in ["ok", "stopped", "network", "mismatch"] {
             let dir = tempfile::tempdir().unwrap();
             let store = Store::open(dir.path()).unwrap();
             let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
             record.hub.as_mut().unwrap().certificate_pem = certificate.clone();
-            if ha_state == "missing" {
-                record.ha.as_mut().unwrap().authorization = None;
-            }
             if ha_state == "stopped" {
-                record.ha.as_mut().unwrap().stopped = true;
+                record.ha.stopped = true;
             }
             store.xiaomi().fixture_replace(&record).unwrap();
             let home = match ha_state {
@@ -135,13 +111,9 @@ fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
             }
             match ha_state {
                 "ok" => assert!(matches!(report.ha, AuthenticationState::Authenticated)),
-                "missing" => assert!(matches!(
-                    report.ha,
-                    AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
-                )),
                 "stopped" => assert!(matches!(
                     report.ha,
-                    AuthenticationState::SignInRequired(FailureReason::MissingHaAuthorization)
+                    AuthenticationState::SignInRequired(FailureReason::HaAuthorizationStopped)
                 )),
                 "network" => assert!(matches!(
                     report.ha,
@@ -154,7 +126,7 @@ fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
                 _ => unreachable!(),
             }
             let count = match ha_state {
-                "missing" | "stopped" => 0,
+                "stopped" => 0,
                 "mismatch" => 1,
                 _ => 2,
             };
@@ -219,16 +191,7 @@ fn stopped_refresh_survives_reopening_and_check_does_not_retry() {
         assert_eq!(report.certificate.unwrap().not_after, NOW + 1_000_000);
     }
     assert!(requests.try_recv().is_err());
-    assert!(
-        reopened
-            .xiaomi()
-            .load()
-            .unwrap()
-            .unwrap()
-            .ha
-            .unwrap()
-            .stopped
-    );
+    assert!(reopened.xiaomi().load().unwrap().unwrap().ha.stopped);
 }
 
 #[test]
@@ -272,11 +235,8 @@ fn proactive_refresh_followed_by_rejected_home_stops_the_new_generation() {
     let report = block_on(auth.check()).unwrap();
     assert!(matches!(report.ha, AuthenticationState::SignInRequired(_)));
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert!(saved.ha.as_ref().unwrap().stopped);
-    assert_eq!(
-        saved.ha.unwrap().authorization.unwrap().tokens.access_token,
-        "fresh"
-    );
+    assert!(saved.ha.stopped);
+    assert_eq!(saved.ha.authorization.tokens.access_token, "fresh");
     let requests: Vec<_> = requests.try_iter().collect();
     assert_eq!(requests.len(), 2);
     assert_eq!(
@@ -343,17 +303,8 @@ fn home_refresh_exhausts_the_certificate_refresh_allowance() {
         CertificateUpdate::Failed(_)
     ));
     let saved = store.xiaomi().load().unwrap().unwrap();
-    assert!(saved.ha.as_ref().unwrap().stopped);
-    assert_eq!(
-        saved
-            .ha
-            .unwrap()
-            .authorization
-            .unwrap()
-            .tokens
-            .refresh_token,
-        "rotated"
-    );
+    assert!(saved.ha.stopped);
+    assert_eq!(saved.ha.authorization.tokens.refresh_token, "rotated");
     assert_eq!(
         saved.hub.unwrap().certificate_pem,
         original.hub.unwrap().certificate_pem
@@ -396,9 +347,7 @@ fn refresh_is_saved_before_later_certificate_failure() {
             .unwrap()
             .unwrap()
             .ha
-            .unwrap()
             .authorization
-            .unwrap()
             .tokens
             .refresh_token,
         "rotated"

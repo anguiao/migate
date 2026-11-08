@@ -695,12 +695,12 @@ fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails()
 }
 
 #[test]
-fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
-    for missing_ha in [true, false] {
+fn stopped_ha_or_missing_certificate_preserves_topology_and_maintenance() {
+    for ha_stopped in [true, false] {
         let rig = Rig::new(true, &["one"]);
         let mut saved = rig.store.xiaomi().load().unwrap().unwrap();
-        if missing_ha {
-            saved.ha.as_mut().unwrap().authorization = None;
+        if ha_stopped {
+            saved.ha.stopped = true;
         } else {
             saved.hub.as_mut().unwrap().certificate_pem = None;
         }
@@ -716,12 +716,12 @@ fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
         assert!(adapter.context.live.borrow().scope.is_some());
         assert!(adapter.context.live.borrow().devices.contains_key("one"));
         let report = adapter.context.status.borrow().auth.clone();
-        assert_eq!(report.certificate.is_some(), missing_ha);
-        if missing_ha {
+        assert_eq!(report.certificate.is_some(), ha_stopped);
+        if ha_stopped {
             assert!(matches!(
                 report.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(
-                    crate::xiaomi::auth::FailureReason::MissingHaAuthorization
+                    crate::xiaomi::auth::FailureReason::HaAuthorizationStopped
                 )
             ));
         }
@@ -729,7 +729,7 @@ fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
         let result = block_on(future::or(
             async { Some(adapter.run(|_| {}).await) },
             async {
-                if missing_ha {
+                if ha_stopped {
                     async_io::Timer::after(Duration::from_millis(30)).await;
                 } else {
                     future::or(
@@ -755,10 +755,10 @@ fn partial_credentials_restore_topology_and_maintenance_tasks_keep_running() {
         ));
         assert!(
             result.is_none(),
-            "adapter exited on missing credentials: {result:?}"
+            "adapter exited during independent credential maintenance: {result:?}"
         );
         let current = rig.store.xiaomi().load().unwrap().unwrap();
-        if missing_ha {
+        if ha_stopped {
             assert_eq!(current, saved);
             assert_eq!(rig.cloud.lock().unwrap().certs, 0);
             assert_eq!(rig.cloud.lock().unwrap().tokens, 0);

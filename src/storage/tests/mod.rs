@@ -5,7 +5,7 @@ mod configuration_fan;
 mod configuration_sensors;
 mod configuration_temperature_bindings;
 pub(crate) mod fixtures;
-pub(crate) use super::xiaomi::fixture::XiaomiTestFixture;
+pub(crate) use super::xiaomi::fixture::{XiaomiTestFixture, credentials as xiaomi_credentials};
 mod validity;
 
 mod configuration_states;
