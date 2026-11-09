@@ -77,6 +77,12 @@ enum Mutation {
     PostVerification,
     CallbackRejected,
     CallbackRejectedBadState,
+    JsonCallback,
+    JsonCallbackWrongState,
+    JsonCallbackForeign,
+    JsonCallbackWrongStatus,
+    JsonCallbackWrongSource,
+    JsonCallbackDuplicateJson,
 }
 
 fn happy_peer(
@@ -103,6 +109,14 @@ fn happy_peer(
         followup.query_pairs_mut().extend_pairs(pairs);
     }
     let redirect_uri = attempt.redirect_uri().to_owned();
+    let mut json_followup = original.clone();
+    json_followup.query_pairs_mut().append_pair("_json", "true");
+    if matches!(mutation, Mutation::JsonCallbackDuplicateJson) {
+        json_followup
+            .query_pairs_mut()
+            .append_pair("_json", "false");
+    }
+    let json_followup = json_followup.to_string();
     let state = if matches!(
         mutation,
         Mutation::CallbackState | Mutation::CallbackRejectedBadState
@@ -133,7 +147,14 @@ fn happy_peer(
                 "followup":followup.as_str(),"scope_id":"1 2","_ssign":"ssign-secret"}}).to_string()),
             8 if matches!(mutation, Mutation::PostRejected) => MockResponse::json(200, &json!({"code":96012}).to_string()),
             8 if matches!(mutation, Mutation::PostVerification) => MockResponse::json(200, &json!({"code":0,"data":{"notificationUrl":"https://account.xiaomi.com/pass/notification?ticket=secret"}}).to_string()),
+            8 if matches!(mutation, Mutation::JsonCallback | Mutation::JsonCallbackWrongState | Mutation::JsonCallbackForeign | Mutation::JsonCallbackWrongStatus | Mutation::JsonCallbackDuplicateJson) => MockResponse::json(200, &json!({"code":0,"data":{"followup":json_followup}}).to_string()),
             8 => MockResponse::json(200, &json!({"code":0,"data":{"followup":"https://account.xiaomi.com/sts/oauth?ticket=grant-secret"}}).to_string()),
+            9 if matches!(mutation, Mutation::JsonCallback | Mutation::JsonCallbackWrongState | Mutation::JsonCallbackForeign | Mutation::JsonCallbackWrongStatus | Mutation::JsonCallbackWrongSource | Mutation::JsonCallbackDuplicateJson) => {
+                let target = if matches!(mutation, Mutation::JsonCallbackForeign) { "http://evil.invalid/api/webhook/other" } else { &redirect_uri };
+                let callback_state = if matches!(mutation, Mutation::JsonCallbackWrongState) { "wrong-state" } else { &state };
+                let nested_code = if matches!(mutation, Mutation::JsonCallbackWrongStatus) { 400 } else { 302 };
+                MockResponse::json(200, &json!({"code":0,"data":{"code":nested_code,"redirectUrl":format!("{target}?code=code-secret&state={callback_state}")}}).to_string())
+            }
             9 if matches!(mutation, Mutation::CallbackRejected | Mutation::CallbackRejectedBadState) => {
                 redirect(&format!("{redirect_uri}?error=access_denied&state={state}"))
             }
@@ -141,6 +162,36 @@ fn happy_peer(
             _ => panic!("unexpected request: {}", request.target),
         }
     })
+}
+
+#[test]
+fn oauth_json_redirect_requires_the_current_authorization() {
+    for (mutation, succeeds) in [
+        (Mutation::JsonCallback, true),
+        (Mutation::JsonCallbackWrongState, false),
+        (Mutation::JsonCallbackForeign, false),
+        (Mutation::JsonCallbackWrongStatus, false),
+        (Mutation::JsonCallbackWrongSource, false),
+        (Mutation::JsonCallbackDuplicateJson, false),
+    ] {
+        let authorization = AuthorizationAttempt::new(None).unwrap();
+        let (base, requests) = happy_peer(&authorization, mutation);
+        let client = AccountClient::for_test(&base, Duration::from_secs(1));
+        let qr = block_on(client.start_qr(identity())).unwrap();
+        let account = block_on(qr.poll(Some(UID))).unwrap();
+        let result = block_on(account.authorize(&authorization));
+        if succeeds {
+            assert_eq!(result.unwrap().code(), "code-secret");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(
+                (error.stage(), error.kind()),
+                (AccountStage::HaAuthorization, AccountErrorKind::Protocol)
+            );
+            assert!(!format!("{error:?} {error}").contains("secret"));
+        }
+        assert_eq!(requests.try_iter().count(), 10);
+    }
 }
 
 #[test]

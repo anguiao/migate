@@ -208,9 +208,28 @@ impl AccountFlow {
                     .map_err(|error| error.at("callback redirect JSON"))?;
                 check_response(&data, stage)
                     .map_err(|error| error.at("callback redirect result"))?;
-                return Err(
-                    AccountError::protocol(stage).at("callback redirect non-redirect response")
-                );
+                let mut json = url
+                    .query_pairs()
+                    .filter(|(key, _)| key == "_json")
+                    .map(|(_, value)| value);
+                if url.path() != "/oauth2/authorize"
+                    || json.next().as_deref() != Some("true")
+                    || json.next().is_some()
+                {
+                    return Err(AccountError::protocol(stage).at("callback redirect response"));
+                }
+                validate_context_followup(url.as_str(), attempt)?;
+                let redirect = data
+                    .get("data")
+                    .filter(|value| value.get("code").and_then(|value| value.as_i64()) == Some(302))
+                    .ok_or_else(|| {
+                        AccountError::protocol(stage).at("callback redirect response")
+                    })?;
+                let callback = field(redirect, "redirectUrl", stage)
+                    .map_err(|error| error.at("callback redirect URL"))?;
+                return attempt
+                    .parse_callback(&callback)
+                    .map_err(|_| AccountError::protocol(stage).at("callback parameters"));
             }
             url = redirect_url(&url, &response, stage)
                 .map_err(|error| error.at("callback redirect"))?;
