@@ -1,6 +1,7 @@
 use super::{
     ACCOUNT_URL, AccountClient, AccountClientIdentity, AccountCredentials, AccountError,
-    AccountErrorKind, AccountStage, MijiaSession, check_response, field,
+    AccountErrorKind, AccountStage, MijiaSession, check_response, cookies::remove_expired_cookies,
+    field,
 };
 use crate::xiaomi::{cloud::CloudErrorKind, http::response_read_error_kind};
 use isahc::{
@@ -159,7 +160,7 @@ impl AccountFlow {
         let request = request
             .body(body.unwrap_or_default())
             .map_err(|_| AccountError::protocol(stage))?;
-        self.client.send_async(request).await.map_err(|error| {
+        let response = self.client.send_async(request).await.map_err(|error| {
             AccountError::new(
                 stage,
                 if error.is_timeout() {
@@ -168,7 +169,18 @@ impl AccountFlow {
                     AccountErrorKind::Network
                 },
             )
-        })
+        })?;
+        let uri: Uri = transport
+            .as_str()
+            .parse()
+            .map_err(|_| AccountError::protocol(stage))?;
+        remove_expired_cookies(
+            &self.jar,
+            &uri,
+            response.headers(),
+            std::time::SystemTime::now(),
+        );
+        Ok(response)
     }
 
     pub(super) async fn exchange_sts(

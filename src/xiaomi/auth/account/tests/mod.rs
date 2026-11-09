@@ -1,4 +1,6 @@
 use super::*;
+
+mod cookies;
 use crate::xiaomi::{
     cloud::CLIENT_ID,
     test_support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
@@ -250,6 +252,30 @@ fn qr_polling_accepts_the_reported_official_endpoint() {
         );
         assert_eq!(requests.try_iter().count(), 1);
     }
+}
+
+#[test]
+fn expired_account_cookies_are_not_sent_on_the_next_request() {
+    let (base, requests) = mock_server(vec![
+        response(
+            200,
+            "Set-Cookie: cUserId=; Domain=account.xiaomi.com; Path=/; Expires=Thu, 01-Jan-1970 00:00:00 GMT\r\nSet-Cookie: qrSession=qr-cookie; Domain=account.xiaomi.com; Path=/\r\n",
+            &qr_body(),
+        ),
+        MockResponse::json(200, &poll_body(UID)),
+        response(
+            200,
+            "Set-Cookie: serviceToken=service-secret; Path=/\r\n",
+            "",
+        ),
+    ]);
+    let client = AccountClient::for_test(&base, Duration::from_secs(1));
+    let attempt = block_on(client.start_qr(identity())).unwrap();
+    block_on(attempt.poll(Some(UID))).unwrap();
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 3);
+    assert!(cookie(&requests[1]).contains("qrSession=qr-cookie"));
+    assert!(!cookie(&requests[1]).contains("cUserId="));
 }
 
 #[test]
