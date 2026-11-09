@@ -41,14 +41,25 @@ pub enum AccountErrorKind {
 pub struct AccountError {
     stage: AccountStage,
     kind: AccountErrorKind,
+    detail: Option<&'static str>,
 }
 
 impl AccountError {
     fn new(stage: AccountStage, kind: AccountErrorKind) -> Self {
-        Self { stage, kind }
+        Self {
+            stage,
+            kind,
+            detail: None,
+        }
     }
     fn protocol(stage: AccountStage) -> Self {
         Self::new(stage, AccountErrorKind::Protocol)
+    }
+    fn at(mut self, detail: &'static str) -> Self {
+        if self.detail.is_none() {
+            self.detail = Some(detail);
+        }
+        self
     }
     pub fn stage(&self) -> AccountStage {
         self.stage
@@ -60,7 +71,11 @@ impl AccountError {
 
 impl fmt::Display for AccountError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Xiaomi account {:?}: {:?}", self.stage, self.kind)
+        write!(f, "Xiaomi account {:?}: {:?}", self.stage, self.kind)?;
+        if let Some(detail) = self.detail {
+            write!(f, " ({detail})")?;
+        }
+        Ok(())
     }
 }
 impl StdError for AccountError {}

@@ -264,14 +264,17 @@ fn qr_sts_and_ha_grant_use_one_isolated_account_session() {
 
 #[test]
 fn consent_and_callback_must_match_the_current_login() {
-    for mutation in [
-        Mutation::Uid,
-        Mutation::Client,
-        Mutation::Redirect,
-        Mutation::FollowupDevice,
-        Mutation::FollowupState,
-        Mutation::OpaqueDevice,
-        Mutation::CallbackState,
+    for (mutation, detail) in [
+        (Mutation::Uid, "authorization context user ID"),
+        (Mutation::Client, "authorization context client ID"),
+        (Mutation::Redirect, "authorization context callback"),
+        (
+            Mutation::FollowupDevice,
+            "authorization follow-up device ID",
+        ),
+        (Mutation::FollowupState, "authorization follow-up state"),
+        (Mutation::OpaqueDevice, "authorization context device ID"),
+        (Mutation::CallbackState, "callback parameters"),
     ] {
         let authorization = AuthorizationAttempt::new(None).unwrap();
         let (base, requests) = happy_peer(&authorization, mutation);
@@ -294,7 +297,9 @@ fn consent_and_callback_must_match_the_current_login() {
                 8
             }
         );
-        assert!(!format!("{error:?} {error}").contains("secret"));
+        let diagnostic = format!("{error:?} {error}");
+        assert!(diagnostic.contains(detail));
+        assert!(!diagnostic.contains("secret"));
     }
 }
 
@@ -559,6 +564,8 @@ fn untrusted_urls_never_receive_a_request_or_account_cookies() {
         (error.stage(), error.kind()),
         (AccountStage::HaAuthorization, AccountErrorKind::Protocol)
     );
+    assert!(error.to_string().contains("consent redirect target"));
+    assert!(!format!("{error:?} {error}").contains("secret"));
     assert_eq!(requests.try_iter().count(), 4);
 }
 
