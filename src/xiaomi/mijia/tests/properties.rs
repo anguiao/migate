@@ -439,38 +439,56 @@ fn property_outer_rejections_remain_distinct_from_correlated_device_rejections()
 
 #[test]
 fn property_timeouts_cover_headers_and_body_and_do_not_replay_writes() {
+    let request_timeout = Duration::from_secs(1);
+    let response_delay = Duration::from_secs(2);
+    let server_wait = Duration::from_secs(3);
     for response in [
         MockResponse::json(
             200,
             r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0}]}"#,
         )
-        .delayed(Duration::from_millis(100)),
+        .delayed(response_delay),
         MockResponse::delayed_body(
             200,
             r#"{"code":0,"result":[{"did":"target","siid":2,"piid":1,"code":0}]}"#,
             5,
-            Duration::from_millis(100),
+            response_delay,
         ),
     ] {
-        let (base, requests) = mock_server(vec![response, MockResponse::json(200, "{}")]);
-        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_millis(10));
-        let error =
+        let (finished, completed) = std::sync::mpsc::channel();
+        let (base, requests) = mock_server(vec![
+            response.on_sent(move || {
+                let _ = finished.send(());
+            }),
+            MockResponse::json(200, "{}"),
+        ]);
+        let request = std::thread::spawn(move || {
+            let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, request_timeout);
             future::block_on(cloud.set_property(&token_session("token"), "target", POWER, true))
-                .unwrap_err();
+                .unwrap_err()
+        });
+        requests
+            .recv_timeout(server_wait)
+            .expect("mock server did not receive the property write");
+        let error = request.join().unwrap();
         assert!(error.is_timeout());
         assert!(error.is_temporary());
-        requests.recv().unwrap();
+        // Let the server accept another request before checking for a replay.
+        completed
+            .recv_timeout(server_wait)
+            .expect("mock server did not finish the delayed response");
         assert!(requests.recv_timeout(Duration::from_millis(150)).is_err());
     }
-    let (base, _) = mock_server(vec![
-        MockResponse::json(200, "{}").delayed(Duration::from_millis(100)),
-    ]);
-    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_millis(10));
+    let (base, requests) = mock_server(vec![MockResponse::json(200, "{}").delayed(response_delay)]);
+    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, request_timeout);
     assert!(
         future::block_on(cloud.read_property_value(&token_session("token"), "target", POWER))
             .unwrap_err()
             .is_timeout()
     );
+    requests
+        .recv_timeout(server_wait)
+        .expect("mock server did not receive the property read");
 }
 
 #[test]
