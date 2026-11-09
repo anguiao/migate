@@ -444,5 +444,6 @@ fn value_outcome(outcome: RequestOutcome<PropertyReading>) -> RequestOutcome<Val
         result: outcome.result.map(|reading| reading.value),
         stage: outcome.stage,
         timeout: outcome.timeout,
+        response_timeout_id: outcome.response_timeout_id,
     }
 }

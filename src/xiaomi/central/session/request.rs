@@ -64,6 +64,7 @@ pub struct RequestOutcome<T> {
     pub result: Result<T, CentralError>,
     pub stage: RequestStage,
     pub timeout: Option<RequestTimeout>,
+    pub(crate) response_timeout_id: Option<u32>,
 }
 
 /// A last check made while the operation has written no socket bytes.
@@ -96,6 +97,8 @@ pub(super) enum Response {
     Unit,
 }
 pub(super) type ResultValue = Result<Response, CentralError>;
+type RequestCompletion =
+    Box<dyn FnOnce(ResultValue, RequestStage, Option<RequestTimeout>, Option<u32>)>;
 struct Completion<T> {
     result: RefCell<Option<RequestOutcome<T>>>,
     event: Event,
@@ -103,7 +106,7 @@ struct Completion<T> {
 pub(super) struct Request {
     pub(super) kind: RequestKind,
     pub(super) deadline: Instant,
-    pub(super) complete: Box<dyn FnOnce(ResultValue, RequestStage, Option<RequestTimeout>)>,
+    pub(super) complete: RequestCompletion,
     pub(super) id: Option<u32>,
     pub(super) stage: RequestStage,
     pub(super) hooks: Option<SendHooks>,
@@ -532,11 +535,12 @@ impl SessionHandle {
             deadline: Instant::now() + timeout,
             complete: Box::new({
                 let completion = completion.clone();
-                move |result, stage, timeout| {
+                move |result, stage, timeout, response_timeout_id| {
                     let outcome = RequestOutcome {
                         result: result.map(decode),
                         stage,
                         timeout,
+                        response_timeout_id,
                     };
                     on_result(outcome.clone());
                     *completion.result.borrow_mut() = Some(outcome);
@@ -557,7 +561,7 @@ impl SessionHandle {
             None
         };
         if let Some(error) = error {
-            (request.complete)(Err(error), RequestStage::NotSent, None);
+            (request.complete)(Err(error), RequestStage::NotSent, None, None);
         } else {
             self.shared
                 .outstanding

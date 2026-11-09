@@ -36,7 +36,10 @@ impl SessionDriver {
         self.shared
             .outstanding
             .set(self.shared.outstanding.get() - 1);
-        (request.complete)(result, request.stage, timeout);
+        let response_timeout_id = (timeout == Some(RequestTimeout::Response))
+            .then_some(request.id)
+            .flatten();
+        (request.complete)(result, request.stage, timeout, response_timeout_id);
     }
     pub(super) fn finish_all(&mut self, error: CentralError) {
         self.shared.closed.set(true);

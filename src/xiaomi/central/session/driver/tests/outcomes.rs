@@ -26,7 +26,8 @@ fn detailed_outcomes_keep_unsent_queue_and_output_timeouts_unsent() {
                 RequestOutcome {
                     result: Err(CentralError::Timeout),
                     stage: RequestStage::NotSent,
-                    timeout: Some(RequestTimeout::Queue)
+                    timeout: Some(RequestTimeout::Queue),
+                    response_timeout_id: None,
                 }
             );
             write_ready(&mut driver, &budget, usize::MAX).await;
@@ -62,7 +63,8 @@ fn detailed_outcomes_only_mark_possible_send_after_socket_bytes() {
             RequestOutcome {
                 result: Err(CentralError::Timeout),
                 stage: RequestStage::MayHaveBeenSent,
-                timeout: Some(RequestTimeout::Transport)
+                timeout: Some(RequestTimeout::Transport),
+                response_timeout_id: None,
             }
         );
         assert_eq!(written.get(), 3);
@@ -91,6 +93,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Timeout),
                         stage: RequestStage::MayHaveBeenSent,
                         timeout: Some(RequestTimeout::Response),
+                        response_timeout_id: Some(mid),
                     }
                 }
                 "transport" => {
@@ -102,6 +105,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Timeout),
                         stage: RequestStage::MayHaveBeenSent,
                         timeout: Some(RequestTimeout::Transport),
+                        response_timeout_id: None,
                     }
                 }
                 "rejected" => {
@@ -110,6 +114,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Rejected(-704042011)),
                         stage: RequestStage::BusinessResult,
                         timeout: None,
+                        response_timeout_id: None,
                     }
                 }
                 "accepted" => {
@@ -122,6 +127,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Ok(()),
                         stage: RequestStage::BusinessResult,
                         timeout: None,
+                        response_timeout_id: None,
                     }
                 }
                 _ => {
@@ -134,6 +140,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Protocol),
                         stage: RequestStage::MayHaveBeenSent,
                         timeout: None,
+                        response_timeout_id: None,
                     }
                 }
             };
@@ -149,6 +156,54 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
             );
             assert_eq!(callbacks.borrow().len(), 1);
         }
+    });
+}
+
+#[test]
+fn concurrent_response_timeouts_keep_their_own_request_ids() {
+    block_on(async {
+        let (handle, mut driver, budget, _) = rig();
+        let first = handle.set_property("first", BINDING, true, |_| {});
+        let second = handle.set_property("second", BINDING, true, |_| {});
+        driver.drain_requests().unwrap();
+        let id = |did: &str| {
+            *driver
+                .pending
+                .iter()
+                .find(|(_, request)| request.kind.did() == did)
+                .unwrap()
+                .0
+        };
+        let first_id = id("first");
+        let second_id = id("second");
+        assert_ne!(first_id, second_id);
+        for _ in 0..4 {
+            write_ready(&mut driver, &budget, usize::MAX).await;
+            if driver
+                .pending
+                .values()
+                .all(|request| request.stage == RequestStage::MayHaveBeenSent)
+            {
+                break;
+            }
+        }
+        assert!(
+            driver
+                .pending
+                .values()
+                .all(|request| request.stage == RequestStage::MayHaveBeenSent)
+        );
+
+        driver.pending.get_mut(&second_id).unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        driver.expire().unwrap();
+        assert_eq!(second.await.response_timeout_id, Some(second_id));
+        assert!(driver.pending.contains_key(&first_id));
+
+        driver.pending.get_mut(&first_id).unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        driver.expire().unwrap();
+        assert_eq!(first.await.response_timeout_id, Some(first_id));
     });
 }
 
@@ -231,6 +286,7 @@ fn accepted_bytes_mark_sent_even_when_the_same_poll_flush_fails() {
             result: Err(CentralError::Io),
             stage: RequestStage::MayHaveBeenSent,
             timeout: None,
+            response_timeout_id: None,
         };
         assert_eq!(write.await, expected);
         assert_eq!(
@@ -301,6 +357,7 @@ fn a_zero_byte_transport_write_ends_the_session_as_io() {
                 result: Err(CentralError::Io),
                 stage: RequestStage::NotSent,
                 timeout: None,
+                response_timeout_id: None,
             }
         );
         assert_eq!(handle.shared.outstanding.get(), 0);

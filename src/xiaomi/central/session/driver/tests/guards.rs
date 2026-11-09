@@ -134,6 +134,7 @@ fn guarded_write_locks_the_decision_and_reports_first_send_once() {
             result: Ok(()),
             stage: RequestStage::BusinessResult,
             timeout: None,
+            response_timeout_id: None,
         };
         assert_eq!(write.await, expected);
         assert_eq!(
@@ -181,6 +182,7 @@ fn guarded_read_locks_the_decision_after_first_bytes() {
                 result: Ok(json!(false)),
                 stage: RequestStage::BusinessResult,
                 timeout: None,
+                response_timeout_id: None,
             }
         );
         assert_eq!(callbacks.get(), 1);

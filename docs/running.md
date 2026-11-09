@@ -216,6 +216,8 @@ RUST_LOG=info,migate=debug cargo run --locked
 
 日志写入标准错误，终端命令结果和配对信息写入标准输出。
 
+Matter 属性读取失败日志显示端点、簇和属性编号及处理阶段，不包含属性值。排查中枢业务超时导致的路径降级时，可用 `RUST_LOG=info,migate::xiaomi::central::session::dispatch=debug` 启动，并用降级日志中的 `request_id` 对照 `Gateway request completed`，查看对应操作和设备。
+
 若默认端口被占用，可通过 `MIGATE_MATTER_PORT` 设置其他端口；设为 `0` 时由系统分配，启动日志会显示实际端口。运行多个网桥时，分别使用独立数据目录和不同端口。
 
 ## 数据目录与重新配对

@@ -122,6 +122,7 @@ fn response_timeout() -> RequestOutcome<()> {
         result: Err(CentralError::Timeout),
         stage: RequestStage::MayHaveBeenSent,
         timeout: Some(RequestTimeout::Response),
+        response_timeout_id: None,
     }
 }
 
@@ -146,6 +147,7 @@ fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revo
                     result: Err(CentralError::Rejected(code)),
                     stage: RequestStage::BusinessResult,
                     timeout: None,
+                    response_timeout_id: None,
                 },
             );
             assert_eq!(c.context.priority(), PathPriority::LocalFirst);
@@ -176,6 +178,7 @@ fn stale_background_property_errors_do_not_revoke_a_new_hub_connection() {
             result: Err(CentralError::Rejected(-704_042_011)),
             stage: RequestStage::BusinessResult,
             timeout: None,
+            response_timeout_id: None,
         };
         c.context
             .local_background_property_outcome(&old, &work, &offline);
@@ -218,6 +221,7 @@ fn stale_local_device_errors_cannot_revoke_current_access() {
                     result: Err(CentralError::Rejected(-704_042_011)),
                     stage: RequestStage::BusinessResult,
                     timeout: None,
+                    response_timeout_id: None,
                 },
             );
             assert!(
@@ -392,6 +396,7 @@ fn only_current_sent_response_timeouts_degrade_and_only_current_lists_restore() 
                     result: Err(error),
                     stage,
                     timeout,
+                    response_timeout_id: None,
                 },
             );
             assert_eq!(c.context.priority(), PathPriority::LocalFirst);

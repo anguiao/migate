@@ -189,6 +189,7 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                                 result: Err(crate::xiaomi::central::CentralError::Timeout),
                                 stage: crate::xiaomi::central::RequestStage::MayHaveBeenSent,
                                 timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
+                                response_timeout_id: None,
                             },
                         );
                     }

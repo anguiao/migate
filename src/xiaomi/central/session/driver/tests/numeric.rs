@@ -20,6 +20,7 @@ fn value_reads_validate_and_classify_the_business_result() {
                 result: Ok(expected_value),
                 stage: RequestStage::BusinessResult,
                 timeout: None,
+                response_timeout_id: None,
             };
             assert_eq!(outcome, expected);
             assert_eq!(*completed.borrow(), Some(expected));

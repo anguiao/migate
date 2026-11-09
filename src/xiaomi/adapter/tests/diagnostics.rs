@@ -70,6 +70,7 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
                     result: Err(CentralError::Timeout),
                     stage: RequestStage::MayHaveBeenSent,
                     timeout: Some(RequestTimeout::Response),
+                    response_timeout_id: None,
                 },
             );
             let status = control.context.diagnostics();
@@ -235,6 +236,7 @@ fn command_diagnostics_keep_inflight_actual_path_when_control_selection_changes(
                     result: Err(CentralError::Timeout),
                     stage: RequestStage::MayHaveBeenSent,
                     timeout: Some(RequestTimeout::Response),
+                    response_timeout_id: None,
                 },
             );
             let status = control.context.diagnostics();

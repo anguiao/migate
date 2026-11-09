@@ -80,7 +80,10 @@ impl Context {
         {
             self.priority.set(PathPriority::CloudFirst);
             log::warn!(
-                "Gateway business response timed out; cloud control now preferred, recovery in 60s"
+                "Gateway business response timed out: request_id={:?}, stage={:?}, timeout={:?}; cloud control now preferred, recovery in 60s",
+                outcome.response_timeout_id,
+                outcome.stage,
+                outcome.timeout
             );
             handle.cancel_unsent_business();
             for work in self

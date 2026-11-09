@@ -131,6 +131,7 @@ pub(super) fn unsent<T>(error: CentralError) -> RequestOutcome<T> {
         result: Err(error),
         stage: RequestStage::NotSent,
         timeout: None,
+        response_timeout_id: None,
     }
 }
 
@@ -220,5 +221,6 @@ fn value_outcome(
         result: outcome.result.map(|reading| reading.value),
         stage: outcome.stage,
         timeout: outcome.timeout,
+        response_timeout_id: outcome.response_timeout_id,
     }
 }

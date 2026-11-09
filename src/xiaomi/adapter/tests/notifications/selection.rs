@@ -86,6 +86,7 @@ fn partial_cloud_preparation_keeps_local_and_preparing_qos2_cannot_cross_activat
                         result: Err(crate::xiaomi::central::CentralError::Timeout),
                         stage: crate::xiaomi::central::RequestStage::MayHaveBeenSent,
                         timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
+                        response_timeout_id: None,
                     },
                 );
                 until(|| {
@@ -334,6 +335,7 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                             result: Err(crate::xiaomi::central::CentralError::Timeout),
                             stage: crate::xiaomi::central::RequestStage::MayHaveBeenSent,
                             timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
+                            response_timeout_id: None,
                         },
                     );
                     control

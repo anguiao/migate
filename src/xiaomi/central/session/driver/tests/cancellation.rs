@@ -184,6 +184,7 @@ fn a_response_timeout_callback_cancels_unsent_lists_before_the_same_socket_poll(
             result: Err(CentralError::Timeout),
             stage: RequestStage::MayHaveBeenSent,
             timeout: Some(RequestTimeout::Response),
+            response_timeout_id: Some(write_id),
         };
         assert_eq!(write.await, expected);
         assert_eq!(
@@ -218,7 +219,8 @@ fn detailed_cancellation_removes_unsent_frames_without_replay() {
                 RequestOutcome {
                     result: Err(CentralError::Cancelled),
                     stage: RequestStage::NotSent,
-                    timeout: None
+                    timeout: None,
+                    response_timeout_id: None,
                 }
             );
             write_ready(&mut driver, &budget, usize::MAX).await;
