@@ -291,7 +291,10 @@ pub(super) fn validate_request_url(url: &Url, stage: AccountStage) -> Result<(),
         AccountStage::QrRequest => {
             url.host_str() == Some("account.xiaomi.com") && url.path() == "/longPolling/loginUrl"
         }
-        AccountStage::QrPolling => account_host(url) && url.path() == "/longPolling/login",
+        AccountStage::QrPolling => {
+            (account_host(url) && url.path() == "/longPolling/login")
+                || (url.host_str() == Some("c3.lp.account.xiaomi.com") && url.path() == "/lp/s")
+        }
         AccountStage::ServiceLogin => {
             url.host_str() == Some("account.xiaomi.com") && url.path() == "/pass/serviceLogin"
         }

@@ -164,6 +164,44 @@ fn qr_login_starts_a_fresh_account_request() {
 }
 
 #[test]
+fn qr_polling_accepts_the_reported_official_endpoint() {
+    let mut metadata: Value = serde_json::from_str(&qr_body()).unwrap();
+    metadata["lp"] = json!("https://c3.lp.account.xiaomi.com/lp/s?ticket=poll-secret");
+    let (base, requests) = mock_server(vec![
+        MockResponse::json(200, &metadata.to_string()),
+        MockResponse::json(200, &poll_body(UID)),
+        response(
+            200,
+            "Set-Cookie: serviceToken=service-secret; Path=/\r\n",
+            "",
+        ),
+    ]);
+    let client = AccountClient::for_test(&base, Duration::from_secs(1));
+    let attempt = block_on(client.start_qr(identity())).unwrap();
+    block_on(attempt.poll(Some(UID))).unwrap();
+    let requests: Vec<_> = requests.try_iter().collect();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].target.starts_with("/lp/s?"));
+
+    for url in [
+        "http://c3.lp.account.xiaomi.com/lp/s?ticket=secret",
+        "https://c3.lp.account.xiaomi.com:444/lp/s?ticket=secret",
+        "https://c3.lp.account.xiaomi.com.evil.invalid/lp/s?ticket=secret",
+        "https://account.xiaomi.com/lp/s?ticket=secret",
+        "https://c3.lp.account.xiaomi.com/lp/other?ticket=secret",
+    ] {
+        metadata["lp"] = json!(url);
+        let (base, requests) = mock_server(vec![MockResponse::json(200, &metadata.to_string())]);
+        let client = AccountClient::for_test(&base, Duration::from_secs(1));
+        assert_eq!(
+            block_on(client.start_qr(identity())).unwrap_err().kind(),
+            AccountErrorKind::Protocol
+        );
+        assert_eq!(requests.try_iter().count(), 1);
+    }
+}
+
+#[test]
 fn qr_sts_and_ha_grant_use_one_isolated_account_session() {
     let authorization = AuthorizationAttempt::new(None).unwrap();
     let (base, requests) = happy_peer(&authorization, Mutation::None);
