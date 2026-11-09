@@ -13,6 +13,7 @@ use rs_matter::{
     },
     error::ErrorCode,
     im::{InteractionModel, InteractionModelState},
+    tlv::Nullable,
     transport::exchange::MatterBuffers,
     utils::storage::WriteBuf,
 };
@@ -123,5 +124,43 @@ fn failed_reads_report_the_path_without_reporting_values_or_buffer_retries() {
             .await
             .unwrap();
         assert_eq!(records().len(), 1);
+
+        let mut array_ctx = Context::at(&im, 2, 29, 0);
+        array_ctx.attribute.array = true;
+        array_ctx.attribute.list_chunked = true;
+        array_ctx.attribute.list_index = Some(Nullable::some(100));
+        let mut buffer = [0; 128];
+        let mut write = WriteBuf::new(&mut buffer);
+        assert_eq!(
+            handler
+                .read(
+                    &array_ctx,
+                    ReadReplyInstance::new(&array_ctx.attribute, &mut write)
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::ConstraintError
+        );
+        assert_eq!(records().len(), 1, "array end is an internal signal");
+
+        array_ctx.attribute.list_chunked = false;
+        let mut buffer = [0; 128];
+        let mut write = WriteBuf::new(&mut buffer);
+        assert_eq!(
+            handler
+                .read(
+                    &array_ctx,
+                    ReadReplyInstance::new(&array_ctx.attribute, &mut write)
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::ConstraintError
+        );
+        assert_eq!(
+            records()[1],
+            "Matter attribute read failed: endpoint=2, cluster=29, attribute=0, stage=handler, error=ConstraintError"
+        );
     });
 }

@@ -262,6 +262,7 @@ impl AsyncHandler for Model {
         let endpoint = ctx.attr().endpoint_id;
         let cluster = ctx.attr().cluster_id;
         let attribute = ctx.attr().attr_id;
+        let list_chunked = ctx.attr().list_chunked;
         let result = if endpoint <= AGGREGATOR_ENDPOINT {
             self.root.read(ctx, reply).await
         } else {
@@ -270,8 +271,10 @@ impl AsyncHandler for Model {
                 Err(error) => Err(error),
             }
         };
+        // rs-matter uses ConstraintError to end chunked array iteration.
         if let Err(error) = &result
             && error.code() != ErrorCode::NoSpace
+            && !(list_chunked && error.code() == ErrorCode::ConstraintError)
         {
             log::error!(
                 "Matter attribute read failed: endpoint={endpoint}, cluster={cluster}, attribute={attribute}, stage=handler, error={:?}",
