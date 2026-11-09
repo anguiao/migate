@@ -43,37 +43,30 @@ impl AuthService {
             redirect_uri: &authorization.redirect_uri,
             tokens: authorization.tokens.clone(),
             refreshed: false,
-            refresh_succeeded: false,
         };
-        let mut trusted_identity = true;
-        let mut maintenance_failure = None;
         if (self.now)() >= session.tokens.refresh_at
             && let Err(error) = session.refresh().await
         {
-            maintenance_failure = Some(state_for_error(error)?);
+            report.ha = state_for_error(error)?;
+            return Ok(());
         }
-        if maintenance_failure.is_none() {
-            match session
-                .request(async |token| self.cloud.get_home(token).await)
-                .await
-            {
-                Ok(home) => match verify_account_uid(&record.uid, home.uid.as_deref()) {
-                    Ok(()) => report.ha = AuthenticationState::Authenticated,
-                    Err(reason) => {
-                        trusted_identity = false;
-                        report.ha = AuthenticationState::Unavailable(reason);
-                    }
-                },
-                Err(error) => maintenance_failure = Some(state_for_error(error.into_error())?),
+        let home = match session
+            .request(async |token| self.cloud.get_home(token).await)
+            .await
+        {
+            Ok(home) => home,
+            Err(error) => {
+                report.ha = state_for_error(error.into_error())?;
+                return Ok(());
             }
+        };
+        if let Err(reason) = verify_account_uid(&record.uid, home.uid.as_deref()) {
+            report.ha = AuthenticationState::Unavailable(reason);
+            return Ok(());
         }
-        if let Some(state) = maintenance_failure {
-            report.ha = state;
-        }
-        if trusted_identity && !matches!(report.ha, AuthenticationState::SignInRequired(_)) {
-            self.maintain_certificate(&record, stored.validity, &mut session, report)
-                .await?;
-        }
+        report.ha = AuthenticationState::Authenticated;
+        self.maintain_certificate(&record, stored.validity, &mut session, report)
+            .await?;
         Ok(())
     }
 
@@ -106,16 +99,13 @@ impl AuthService {
             Ok(certificate) => certificate,
             Err(error) => {
                 let refresh_failed = matches!(error, RequestFailure::Refresh(_));
-                let old_token_rejected = matches!(error, RequestFailure::OldTokenRejected(_));
                 let state = state_for_error(error.into_error())?;
                 let reason = match &state {
                     AuthenticationState::SignInRequired(reason)
                     | AuthenticationState::Unavailable(reason) => reason.clone(),
                     _ => unreachable!(),
                 };
-                if !old_token_rejected
-                    && (refresh_failed || matches!(state, AuthenticationState::SignInRequired(_)))
-                {
+                if refresh_failed || matches!(state, AuthenticationState::SignInRequired(_)) {
                     report.ha = state;
                 }
                 report.certificate_update = CertificateUpdate::Failed(reason);
@@ -164,51 +154,31 @@ pub(super) struct CheckSession<'a> {
     pub(super) redirect_uri: &'a str,
     pub(super) tokens: TokenSet,
     pub(super) refreshed: bool,
-    pub(super) refresh_succeeded: bool,
 }
 impl CheckSession<'_> {
     async fn request<T>(
         &mut self,
         mut request: impl AsyncFnMut(&str) -> Result<T, CloudError>,
     ) -> Result<T, RequestFailure> {
-        let result = request(&self.tokens.access_token).await;
-        match result {
-            Err(error) if error.is_unauthorized() => {
-                if !self.refreshed {
-                    self.refresh().await.map_err(RequestFailure::Refresh)?;
-                    let result = request(&self.tokens.access_token).await;
-                    match result {
-                        Err(error) if error.is_unauthorized() => {
-                            self.auth
-                                .store
-                                .stop_ha_refresh()
-                                .map_err(|error| RequestFailure::Other(error.into()))?;
-                            Err(RequestFailure::Other(AuthError::Cloud(error)))
-                        }
-                        result => {
-                            result.map_err(|error| RequestFailure::Other(AuthError::Cloud(error)))
-                        }
-                    }
-                } else if self.refresh_succeeded {
-                    self.auth
-                        .store
-                        .stop_ha_refresh()
-                        .map_err(|error| RequestFailure::Other(error.into()))?;
-                    Err(RequestFailure::Other(AuthError::Cloud(error)))
-                } else {
-                    Err(RequestFailure::OldTokenRejected(error))
-                }
-            }
-            result => result.map_err(|error| RequestFailure::Other(AuthError::Cloud(error))),
+        let mut result = request(&self.tokens.access_token).await;
+        if result.as_ref().is_err_and(|error| error.is_unauthorized()) && !self.refreshed {
+            self.refresh().await.map_err(RequestFailure::Refresh)?;
+            result = request(&self.tokens.access_token).await;
         }
+        if result.as_ref().is_err_and(|error| error.is_unauthorized()) {
+            self.auth
+                .store
+                .stop_ha_refresh()
+                .map_err(|error| RequestFailure::Other(error.into()))?;
+        }
+        result.map_err(|error| RequestFailure::Other(AuthError::Cloud(error)))
     }
     async fn refresh(&mut self) -> Result<(), AuthError> {
-        self.refreshed = true;
         self.tokens = self
             .auth
             .refresh_tokens_once(self.redirect_uri, &self.tokens, self.auth.now)
             .await?;
-        self.refresh_succeeded = true;
+        self.refreshed = true;
         Ok(())
     }
 }
@@ -216,13 +186,11 @@ impl CheckSession<'_> {
 enum RequestFailure {
     Refresh(AuthError),
     Other(AuthError),
-    OldTokenRejected(CloudError),
 }
 impl RequestFailure {
     fn into_error(self) -> AuthError {
         match self {
             Self::Refresh(error) | Self::Other(error) => error,
-            Self::OldTokenRejected(error) => AuthError::Cloud(error),
         }
     }
 }

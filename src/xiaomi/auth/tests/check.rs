@@ -1,72 +1,29 @@
 use super::*;
 
 #[test]
-fn successful_certificate_renewal_does_not_hide_failed_due_refresh() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let original = valid_record("uid", "old", NOW, NOW + 60);
-    store.xiaomi().fixture_replace(&original).unwrap();
-    let (base, requests) = dynamic_mock_server(2, |request| {
-        if request.target.contains("get_token") {
-            MockResponse::json(503, "temporary failure")
-        } else {
-            certificate_response(request)
-        }
-    });
-    let auth = AuthService::with_clock(
-        store.xiaomi(),
-        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
-        now,
-    );
-    let report = block_on(auth.check()).unwrap();
-    assert!(!report.is_success());
-    assert!(matches!(report.mijia, AuthenticationState::Authenticated));
-    assert!(matches!(
-        report.ha,
-        AuthenticationState::Unavailable(FailureReason::Cloud(_))
-    ));
-    assert_eq!(report.certificate_update, CertificateUpdate::Updated);
-    let saved = store.xiaomi().load().unwrap().unwrap();
-    assert!(!saved.ha.stopped);
-    assert_ne!(
-        saved.hub.unwrap().certificate_pem,
-        original.hub.unwrap().certificate_pem
-    );
-    let requests: Vec<_> = requests.try_iter().collect();
-    assert_eq!(requests.len(), 2);
-    assert!(
-        requests
-            .iter()
-            .all(|request| !request.target.ends_with("gethome"))
-    );
-}
-
-#[test]
-fn failed_refresh_followed_by_old_certificate_token_rejection_does_not_stop_ha() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let original = valid_record("uid", "old", NOW, NOW + 60);
-    store.xiaomi().fixture_replace(&original).unwrap();
-    let (auth, requests) = service(
-        &store,
-        vec![
-            MockResponse::json(503, "refresh unavailable"),
-            MockResponse::json(401, "old token rejected"),
-        ],
-    );
-    let report = block_on(auth.check()).unwrap();
-    assert!(!report.is_success());
-    assert!(matches!(report.mijia, AuthenticationState::Authenticated));
-    assert!(matches!(
-        report.ha,
-        AuthenticationState::Unavailable(FailureReason::Cloud(_))
-    ));
-    assert!(matches!(
-        report.certificate_update,
-        CertificateUpdate::Failed(_)
-    ));
-    assert!(!store.xiaomi().load().unwrap().unwrap().ha.stopped);
-    assert_eq!(requests.try_iter().count(), 2);
+fn ha_maintenance_failure_skips_renewal_and_preserves_the_existing_certificate() {
+    for refresh_due in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let refresh_at = if refresh_due { NOW } else { NOW + 500 };
+        let original = valid_record("uid", "old", refresh_at, NOW + 60);
+        store.xiaomi().fixture_replace(&original).unwrap();
+        let (auth, requests) = service(&store, vec![MockResponse::json(503, "unavailable")]);
+        let report = block_on(auth.check()).unwrap();
+        assert!(!report.is_success());
+        assert!(matches!(report.mijia, AuthenticationState::Authenticated));
+        assert!(matches!(
+            report.ha,
+            AuthenticationState::Unavailable(FailureReason::Cloud(_))
+        ));
+        assert_eq!(report.certificate.unwrap().not_after, NOW + 60);
+        assert_eq!(report.certificate_update, CertificateUpdate::NotNeeded);
+        assert_eq!(store.xiaomi().load().unwrap(), Some(original));
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].target.contains("get_token"), refresh_due);
+        assert_eq!(requests[0].target.ends_with("gethome"), !refresh_due);
+    }
 }
 
 #[test]
@@ -98,7 +55,7 @@ fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
             );
             let report = block_on(auth.check()).unwrap();
             assert_eq!(report.certificate, None);
-            if matches!(ha_state, "ok" | "network") {
+            if ha_state == "ok" {
                 assert!(matches!(
                     report.certificate_update,
                     CertificateUpdate::Failed(FailureReason::Cloud(_))
@@ -127,7 +84,7 @@ fn check_reports_certificate_request_errors_without_hiding_other_ha_results() {
             }
             let count = match ha_state {
                 "stopped" => 0,
-                "mismatch" => 1,
+                "mismatch" | "network" => 1,
                 _ => 2,
             };
             assert_eq!(requests.try_iter().count(), count);

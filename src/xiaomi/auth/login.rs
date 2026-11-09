@@ -121,7 +121,6 @@ impl AuthService {
             redirect_uri: &authorization.redirect_uri,
             tokens: authorization.tokens,
             refreshed: false,
-            refresh_succeeded: false,
         };
         self.maintain_certificate(&stored.record, stored.validity, &mut session, &mut report)
             .await
