@@ -35,7 +35,7 @@ fn route_change_reselects_only_an_unsent_step_and_records_each_path() {
                     } else {
                         until(|| wire.polls.get() > 0).await;
                     }
-                    c.context.local_outcome(&handle, &response_timeout());
+                    local_device_offline(&c.context, &handle, "one");
                     wire.allow(usize::MAX);
                     if sent {
                         until(|| wire.written.borrow().len() > 1).await;
@@ -128,7 +128,7 @@ fn possibly_sent_rejected_step_is_never_replayed_or_followed() {
             async {
                 let action = fan.begin_fan(FanCommand::Speed(52)).unwrap();
                 until(|| wire.written.borrow().len() == 1).await;
-                c.context.local_outcome(&handle, &response_timeout());
+                local_device_offline(&c.context, &handle, "one");
                 wire.allow(usize::MAX);
                 until(|| wire.written.borrow().len() > 1).await;
                 wire.reply(json!({"result":[{"did":"one","siid":2,"piid":1,"code":-704}]}));

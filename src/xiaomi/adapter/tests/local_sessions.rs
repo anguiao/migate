@@ -98,6 +98,10 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
                 }
                 peer.list_changed(&["one"]);
                 until(|| control.context.status.borrow().catalog_problem.is_some()).await;
+                assert_eq!(
+                    control.context.priority(),
+                    super::super::routing::PathPriority::LocalFirst
+                );
                 peer.notify("one", 2, true);
                 until(|| {
                     function(&control.context.registry, "one", "outlet:2")
@@ -113,10 +117,71 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
                     .execute(Command::On)
                     .await
                     .unwrap();
+                assert_eq!(peer.count("rpcReq", "multi", 9), 1);
             })
             .await;
         }));
     }
+}
+
+#[test]
+fn a_full_list_timeout_keeps_existing_routes_and_retries_after_one_minute() {
+    use crate::xiaomi::adapter::routing::{ControlPath, PathPriority};
+
+    let rig = Rig::new(true, &["one", "two"]);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .online
+        .extend(["one".into(), "two".into()]);
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(Rc::new(Peer::default()), |peer| async move {
+            initialized(control, &peer, &["one", "two"]).await;
+            until(|| control.context.cloud_candidate("two", true).is_ok()).await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            let lists = peer.lists();
+            peer.state.borrow_mut().list_timeout = true;
+            super::super::local::refresh_access(&control.context);
+            control.clock.advance(Duration::from_secs(3));
+            until(|| peer.lists() == lists + 1).await;
+            until(|| control.context.access_problem.borrow().is_some()).await;
+            let retry = control.clock.now() + Duration::from_secs(60);
+            until(|| control.clock.deadlines.lock().unwrap().contains(&retry)).await;
+
+            assert_eq!(control.context.priority(), PathPriority::LocalFirst);
+            assert!(matches!(
+                control.context.control_path("one"),
+                Some(ControlPath::Local(_))
+            ));
+            assert!(matches!(
+                control.context.control_path("two"),
+                Some(ControlPath::Local(_))
+            ));
+            function(&control.context.registry, "two", "outlet:2")
+                .execute(Command::On)
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "two", 2), 1);
+            assert!(control.cloud.lock().unwrap().property_writes.is_empty());
+
+            control.clock.advance(Duration::from_secs(59));
+            for _ in 0..20 {
+                future::yield_now().await;
+            }
+            assert_eq!(peer.lists(), lists + 1);
+            peer.state.borrow_mut().list_timeout = false;
+            control.clock.advance(Duration::from_secs(1));
+            until(|| peer.lists() == lists + 2).await;
+            until(|| control.context.access_problem.borrow().is_none()).await;
+            assert_eq!(control.context.priority(), PathPriority::LocalFirst);
+        })
+        .await;
+    }));
 }
 
 #[test]
@@ -137,6 +202,10 @@ fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() 
                 })
                 .await;
                 assert_eq!(peer.lists(), 1);
+                assert_eq!(
+                    control.context.priority(),
+                    super::super::routing::PathPriority::LocalFirst
+                );
                 for _ in 0..10 {
                     super::super::local::refresh_access(&control.context);
                     future::yield_now().await;

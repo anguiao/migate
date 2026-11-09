@@ -182,9 +182,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         routing: RoutingStatus {
             priority: PathPriority::CloudFirst,
             local_connected: true,
-            business_degraded: true,
-            recovery: RecoveryStatus::Scheduled(1_700_000_060),
-            last_switch_reason: Some("local business response timed out".into()),
+            last_switch_reason: Some("hub unavailable: transport disconnected".into()),
         },
         devices: vec![DeviceStatus {
             functions: vec![],
@@ -201,7 +199,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
             unavailable_reason: None,
             sync_limited_reason: Some("cloud property subscriptions pending".into()),
             battery_problem: None,
-            last_switch_reason: Some("cloud preferred after local timeout".into()),
+            last_switch_reason: Some("hub reported device one offline or missing".into()),
             commands: vec![ChannelCommands {
                 light_actions: None,
                 channel: "main".into(),
@@ -234,11 +232,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
     });
     let output = status.render_devices(1_700_000_000, None);
     assert!(
-        output.contains("Routing: hub-degraded; hub connected; business degraded."),
-        "{output}"
-    );
-    assert!(
-        output.contains("Hub recovery: scheduled for 2023-11-14T22:14:20Z."),
+        output.contains("Routing: fallback-first; hub connected."),
         "{output}"
     );
     assert!(
@@ -261,17 +255,17 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         "{output}"
     );
     assert!(
-        output.contains("Device last switch: cloud preferred after local timeout."),
+        output.contains("Device last switch: hub reported device one offline or missing."),
         "{output}"
     );
     let help = status.render(1_700_000_000);
-    assert!(help.contains("Routing: hub-degraded"));
+    assert!(help.contains("Routing: fallback-first"));
     assert!(!help.contains("command #"));
     assert!(!help.contains("one routing:"));
 }
 
 #[test]
-fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance() {
+fn routing_status_displays_disconnection_unsent_work_and_previous_acceptance() {
     use crate::xiaomi::{adapter::*, capability::PropertyBinding};
     let report = AuthReport::for_test(
         AuthenticationState::Authenticated,
@@ -285,10 +279,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         gateway: GatewayStatus::Unavailable("transport disconnected".into()),
         catalog_problem: None,
         pending: Vec::new(),
-        routing: RoutingStatus {
-            recovery: RecoveryStatus::Running,
-            ..Default::default()
-        },
+        routing: RoutingStatus::default(),
         devices: vec![DeviceStatus {
             functions: vec![],
             lan: None,
@@ -336,7 +327,7 @@ fn routing_status_displays_running_recovery_unsent_work_and_previous_acceptance(
         }],
     });
     let output = status.render_devices(0, Some("one"));
-    assert!(output.contains("Hub recovery: running."), "{output}");
+    assert!(output.contains("hub disconnected."), "{output}");
     assert!(output.contains("Usable control paths: none."), "{output}");
     assert!(output.contains("Selected control: none."), "{output}");
     assert!(output.contains("Notification source: none."), "{output}");

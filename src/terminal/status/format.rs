@@ -101,32 +101,16 @@ pub(super) fn path(path: PathKind) -> &'static str {
 pub(super) fn format_routing(status: &RoutingStatus) -> String {
     let priority = match status.priority {
         PathPriority::LocalFirst => "hub-first",
-        PathPriority::CloudFirst => "hub-degraded",
+        PathPriority::CloudFirst => "fallback-first",
     };
     let mut report = format!(
-        "Routing: {priority}; hub {}; business {}.",
+        "Routing: {priority}; hub {}.",
         if status.local_connected {
             "connected"
         } else {
             "disconnected"
-        },
-        if status.business_degraded {
-            "degraded"
-        } else {
-            "not degraded"
         }
     );
-    match status.recovery {
-        RecoveryStatus::None => report.push_str("\nHub recovery: none."),
-        RecoveryStatus::Scheduled(deadline) => {
-            let _ = write!(
-                report,
-                "\nHub recovery: scheduled for {}.",
-                timestamp(deadline)
-            );
-        }
-        RecoveryStatus::Running => report.push_str("\nHub recovery: running."),
-    }
     if let Some(reason) = &status.last_switch_reason {
         let _ = write!(report, "\nRouting last switch: {reason}.");
     }

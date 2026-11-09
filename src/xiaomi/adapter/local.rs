@@ -211,17 +211,14 @@ async fn access_refreshes(
         let request = access.next(context.clock.as_ref()).await;
         let current = context.clone();
         let connection = handle.clone();
-        let recovery = matches!(request, AccessRequest::Recovery);
-        context.update_routing("hub recovery check started");
         let mut affected = None;
         let result = match request {
-            AccessRequest::Full | AccessRequest::Recovery => {
-                let result = handle
+            AccessRequest::Full => {
+                let outcome = handle
                     .get_devices(move |outcome| {
                         if !current.current_local(&connection) {
                             return;
                         }
-                        current.local_outcome(&connection, &outcome);
                         match outcome.result {
                             Ok(entries) => {
                                 current.local_list_success(&connection);
@@ -232,12 +229,11 @@ async fn access_refreshes(
                             Err(error) => current.set_access_problem(Some(error.to_string())),
                         }
                     })
-                    .await
-                    .result;
-                if result.is_err() && !recovery {
-                    access.retry_full(context.clock.now());
+                    .await;
+                if outcome.result.is_err() {
+                    access.retry_full(context.clock.now(), outcome.timeout);
                 }
-                result
+                outcome.result
             }
             AccessRequest::Filtered(dids) => {
                 let requested = dids.clone();
@@ -246,7 +242,6 @@ async fn access_refreshes(
                         if !current.current_local(&connection) {
                             return;
                         }
-                        current.local_outcome(&connection, &outcome);
                         match outcome.result {
                             Ok(entries) => {
                                 current.local_list_success(&connection);
@@ -263,8 +258,6 @@ async fn access_refreshes(
                 result
             }
         };
-        finish_access_round(&access, recovery, &result, context.clock.now());
-        context.update_routing("hub recovery check finished");
         match result {
             Ok(_) => {
                 if let Some(dids) = affected {
@@ -281,16 +274,6 @@ async fn access_refreshes(
             Err(CentralError::Cancelled) => {}
             Err(_) => {}
         }
-    }
-}
-pub(super) fn finish_access_round(
-    access: &AccessRefresh,
-    recovery: bool,
-    result: &Result<Vec<central::DeviceEntry>, CentralError>,
-    now: Duration,
-) {
-    if recovery && result.is_err() {
-        access.recovery_finished(now);
     }
 }
 async fn route_watch(

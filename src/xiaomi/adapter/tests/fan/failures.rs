@@ -261,7 +261,7 @@ fn partial_fan_acceptance_reads_only_after_the_last_step_and_keeps_each_receipt(
 }
 
 #[test]
-fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
+fn fan_partial_acceptance_then_timeout_reads_over_the_hub() {
     use crate::xiaomi::adapter::StepReceipt;
     let (rig, listener, cloud) = cloud_rig();
     block_on(rig.run(|c| async move {
@@ -294,6 +294,7 @@ fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
                 cloud.send(Packet::Disconnect(Disconnect::new()));
                 until(|| work(control).function_observer("fan:2").is_none()).await;
                 let before = control.cloud.lock().unwrap().property_reads.len();
+                let local_before = peer.state.borrow().seen.len();
                 peer.state.borrow_mut().hold_writes = true;
                 let action = function(&control.context.registry, "one", "fan:2")
                     .begin_fan(FanCommand::Speed(56))
@@ -308,20 +309,29 @@ fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
                 until(|| peer.count("rpcReq", "one", 0) == 2).await;
                 assert_eq!(control.cloud.lock().unwrap().property_reads.len(), before);
                 assert_eq!(action.accepted().await, Err(CommandError::Timeout));
-                control.clock.advance(Duration::from_millis(201));
+                control
+                    .clock
+                    .automatic
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 future::or(
                     until(|| {
-                        control.cloud.lock().unwrap().property_reads.len() >= before + 4
-                            && [POWER, MODE, SPEED, SWING].iter().all(|binding| {
-                                !work(control).refresh.borrow().contains("fan:2", *binding)
-                            })
+                        let state = peer.state.borrow();
+                        [POWER, MODE, SPEED, SWING].iter().all(|binding| {
+                            state.seen[local_before..]
+                                .iter()
+                                .any(|(operation, payload)| {
+                                    operation == "get"
+                                        && payload["did"] == "one"
+                                        && payload["siid"] == binding.siid
+                                        && payload["piid"] == binding.piid
+                                })
+                        })
                     }),
                     async {
                         async_io::Timer::after(Duration::from_secs(2)).await;
                         let state = work(control).refresh.borrow().snapshot();
                         panic!(
-                            "cloud reads: {:?}, pending: {:?}, inflight: {:?}, problems: {:?}",
-                            control.cloud.lock().unwrap().property_reads,
+                            "pending: {:?}, inflight: {:?}, problems: {:?}",
                             state
                                 .pending
                                 .iter()
@@ -333,14 +343,7 @@ fn fan_partial_acceptance_then_timeout_reads_over_the_cloud_fallback() {
                     },
                 )
                 .await;
-                let reads = control.cloud.lock().unwrap().property_reads.clone();
-                for binding in [POWER, MODE, SPEED, SWING] {
-                    assert!(reads[before..].contains(&(
-                        "one".to_owned(),
-                        binding.siid,
-                        binding.piid,
-                    )));
-                }
+                assert_eq!(control.cloud.lock().unwrap().property_reads.len(), before);
                 let status = control.context.diagnostics();
                 let last = status.devices[0].commands[0].last.as_ref().unwrap();
                 assert_eq!(last.steps[0].receipt, StepReceipt::Accepted);

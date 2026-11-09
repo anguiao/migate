@@ -573,8 +573,6 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             routing: RoutingStatus {
                 priority: PathPriority::CloudFirst,
                 local_connected: true,
-                business_degraded: true,
-                recovery: RecoveryStatus::Scheduled(1_700_000_060),
                 last_switch_reason: None,
             },
             devices: ["one", "multi"]
@@ -614,8 +612,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(!selected.contains("one routing:"), "{selected}");
         assert!(!selected.contains("one (name one)"), "{selected}");
         assert!(selected.contains("Gateway: connected (hub)."), "{selected}");
-        assert!(selected.contains("Routing: hub-degraded"), "{selected}");
-        assert!(selected.contains("2023-11-14T22:14:20Z"), "{selected}");
+        assert!(selected.contains("Routing: fallback-first"), "{selected}");
         let all = handle_line(
             &registry,
             &store.devices(),
@@ -640,7 +637,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             .unwrap()
             .unwrap();
         assert!(help.contains("Available commands:"));
-        assert!(help.contains("Routing: hub-degraded"));
+        assert!(help.contains("Routing: fallback-first"));
         assert!(!help.contains("one routing:"));
         assert!(!help.contains("multi routing:"));
     });

@@ -46,7 +46,6 @@ pub(super) fn read_one(
                     let result_handle = handle.clone();
                     let result_flight = flight.clone();
                     let result_read = read.clone();
-                    let periodic = read.periodic;
                     let outcome = handle
                         .read_property_observation_with_timeout_guarded(
                             &did,
@@ -94,19 +93,11 @@ pub(super) fn read_one(
                                     );
                                 }
                                 if !result_flight.life.is_closed() {
-                                    if periodic {
-                                        result_context.local_background_property_outcome(
-                                            &result_handle,
-                                            &observing,
-                                            &outcome,
-                                        );
-                                    } else {
-                                        result_context.local_device_outcome(
-                                            &result_handle,
-                                            &observing,
-                                            &outcome,
-                                        );
-                                    }
+                                    result_context.local_device_outcome(
+                                        &result_handle,
+                                        &observing,
+                                        &outcome,
+                                    );
                                 }
                                 if !result_flight.life.is_closed()
                                     && !observing.life.is_closed()

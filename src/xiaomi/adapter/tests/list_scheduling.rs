@@ -43,7 +43,7 @@ fn full_list_failure_restarts_the_three_second_delay_without_blocking_filtered_c
         clock.advance(Duration::from_secs(1));
         access.request(clock.now());
         clock.advance(Duration::from_secs(9));
-        access.retry_full(clock.now());
+        access.retry_full(clock.now(), None);
         access.request_filtered(vec!["one".into()]);
         let AccessRequest::Filtered(dids) = access.next(&clock).await else {
             panic!("filtered changes must remain independent of a failed full list")
@@ -53,6 +53,29 @@ fn full_list_failure_restarts_the_three_second_delay_without_blocking_filtered_c
         clock.advance(Duration::from_millis(2999));
         assert!(poll_once(access.next(&clock)).await.is_none());
         clock.advance(Duration::from_millis(1));
+        assert!(matches!(access.next(&clock).await, AccessRequest::Full));
+    });
+}
+
+#[test]
+fn full_list_timeout_retries_after_one_minute_without_blocking_filtered_changes() {
+    use crate::xiaomi::central::RequestTimeout;
+
+    block_on(async {
+        let clock = TestClock::default();
+        let access = AccessRefresh::default();
+        access.request_initial(clock.now());
+        assert!(matches!(access.next(&clock).await, AccessRequest::Full));
+        access.retry_full(clock.now(), Some(RequestTimeout::Response));
+        access.request(clock.now());
+        access.request_filtered(vec!["one".into()]);
+        let AccessRequest::Filtered(dids) = access.next(&clock).await else {
+            panic!("filtered changes must not wait for the full list retry")
+        };
+        assert_eq!(dids, ["one"]);
+        clock.advance(Duration::from_secs(59));
+        assert!(poll_once(access.next(&clock)).await.is_none());
+        clock.advance(Duration::from_secs(1));
         assert!(matches!(access.next(&clock).await, AccessRequest::Full));
     });
 }

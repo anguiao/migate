@@ -122,7 +122,6 @@ fn response_timeout() -> RequestOutcome<()> {
         result: Err(CentralError::Timeout),
         stage: RequestStage::MayHaveBeenSent,
         timeout: Some(RequestTimeout::Response),
-        response_timeout_id: None,
     }
 }
 
@@ -136,18 +135,17 @@ fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revo
                 .clone()
                 .unwrap();
             c.context
-                .local_background_property_outcome(&handle, &work, &response_timeout());
+                .local_device_outcome(&handle, &work, &response_timeout());
             assert_eq!(c.context.priority(), PathPriority::LocalFirst);
             assert!(c.context.local_candidate("one", false).is_ok());
 
-            c.context.local_background_property_outcome(
+            c.context.local_device_outcome(
                 &handle,
                 &work,
                 &RequestOutcome::<()> {
                     result: Err(CentralError::Rejected(code)),
                     stage: RequestStage::BusinessResult,
                     timeout: None,
-                    response_timeout_id: None,
                 },
             );
             assert_eq!(c.context.priority(), PathPriority::LocalFirst);
@@ -178,14 +176,11 @@ fn stale_background_property_errors_do_not_revoke_a_new_hub_connection() {
             result: Err(CentralError::Rejected(-704_042_011)),
             stage: RequestStage::BusinessResult,
             timeout: None,
-            response_timeout_id: None,
         };
-        c.context
-            .local_background_property_outcome(&old, &work, &offline);
+        c.context.local_device_outcome(&old, &work, &offline);
         assert!(c.context.local_candidate("one", false).is_ok());
         work.life.close();
-        c.context
-            .local_background_property_outcome(&current, &work, &offline);
+        c.context.local_device_outcome(&current, &work, &offline);
         assert!(
             c.context.live.borrow().devices["one"]
                 .access
@@ -221,7 +216,6 @@ fn stale_local_device_errors_cannot_revoke_current_access() {
                     result: Err(CentralError::Rejected(-704_042_011)),
                     stage: RequestStage::BusinessResult,
                     timeout: None,
-                    response_timeout_id: None,
                 },
             );
             assert!(
@@ -256,7 +250,7 @@ fn an_unsent_pending_write_reselects_cloud_and_submits_the_absolute_target_once(
                 let mut command = Box::pin(one.execute(Command::On));
                 assert!(poll_once(command.as_mut()).await.is_none());
                 until(|| wire.polls.get() > 0).await;
-                c.context.local_outcome(&handle, &response_timeout());
+                local_device_offline(&c.context, &handle, "one");
                 wire.allow(usize::MAX);
                 assert_eq!(command.await.unwrap().power(), Some(Power::On));
                 assert!(wire.written.borrow().is_empty());
@@ -291,7 +285,7 @@ fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_writ
                 let inflight = status.devices[0].commands[0].inflight.as_ref().unwrap();
                 let id = inflight.id;
                 assert_eq!(inflight.actual_path, None);
-                c.context.local_outcome(&handle, &response_timeout());
+                local_device_offline(&c.context, &handle, "one");
                 wire.allow(usize::MAX);
                 command.await.unwrap();
                 let status = c.context.diagnostics();
@@ -364,45 +358,9 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
 }
 
 #[test]
-fn only_current_sent_response_timeouts_degrade_and_only_current_lists_restore() {
+fn only_current_session_list_restores_priority_after_disconnect() {
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let (old, _) = local(&c, Rc::new(Wire::default()));
-        for (stage, timeout, error) in [
-            (
-                RequestStage::NotSent,
-                Some(RequestTimeout::Queue),
-                CentralError::Timeout,
-            ),
-            (
-                RequestStage::MayHaveBeenSent,
-                Some(RequestTimeout::Subscription),
-                CentralError::Timeout,
-            ),
-            (
-                RequestStage::MayHaveBeenSent,
-                Some(RequestTimeout::Transport),
-                CentralError::Timeout,
-            ),
-            (
-                RequestStage::BusinessResult,
-                None,
-                CentralError::Rejected(-1),
-            ),
-            (RequestStage::NotSent, None, CentralError::Cancelled),
-        ] {
-            c.context.local_outcome(
-                &old,
-                &RequestOutcome::<()> {
-                    result: Err(error),
-                    stage,
-                    timeout,
-                    response_timeout_id: None,
-                },
-            );
-            assert_eq!(c.context.priority(), PathPriority::LocalFirst);
-        }
-        c.context.local_outcome(&old, &response_timeout());
-        assert_eq!(c.context.priority(), PathPriority::CloudFirst);
         c.context.disconnect("test reconnect".into());
         let (new, _) = SessionDriver::ready_for_test(
             Transport(Rc::new(Wire::default())),
@@ -414,13 +372,11 @@ fn only_current_sent_response_timeouts_degrade_and_only_current_lists_restore() 
         assert_eq!(c.context.priority(), PathPriority::CloudFirst);
         c.context.local_list_success(&new);
         assert_eq!(c.context.priority(), PathPriority::LocalFirst);
-        c.context.local_outcome(&old, &response_timeout());
-        assert_eq!(c.context.priority(), PathPriority::LocalFirst);
     }));
 }
 
 #[test]
-fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
+fn a_withdrawn_zero_byte_refresh_keeps_one_demand_until_device_recovery() {
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
@@ -445,7 +401,7 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
                     c.clock
                         .automatic
                         .store(false, std::sync::atomic::Ordering::Relaxed);
-                    c.context.local_outcome(&handle, &response_timeout());
+                    local_device_offline(&c.context, &handle, "one");
                     wire.allow(usize::MAX);
                     for _ in 0..20 {
                         future::yield_now().await;
@@ -458,7 +414,12 @@ fn a_cancelled_zero_byte_refresh_keeps_one_demand_until_shared_recovery() {
                         future::yield_now().await;
                     }
                     assert!(wire.written.borrow().is_empty());
-                    c.context.local_list_success(&handle);
+                    c.context
+                        .observe_access(vec![super::list_scheduling::observation(
+                            &c.data[0], true,
+                        )]);
+                    c.context.reconcile_all().unwrap();
+                    c.context.refresh_changed.notify(usize::MAX);
                     for _ in 0..20 {
                         future::yield_now().await;
                     }
@@ -706,7 +667,7 @@ fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
                     )
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
-                c.context.local_outcome(&handle, &response_timeout());
+                local_device_offline(&c.context, &handle, "one");
                 wire.allow(usize::MAX);
                 action.accepted().await.unwrap();
                 assert!(wire.written.borrow().is_empty());
@@ -981,7 +942,7 @@ fn curtain_route_change_retries_only_a_request_with_no_local_bytes() {
                     } else {
                         until(|| wire.polls.get() > 0).await;
                     }
-                    c.context.local_outcome(&handle, &response_timeout());
+                    local_device_offline(&c.context, &handle, "one");
                     wire.allow(usize::MAX);
                     if sent {
                         until(|| wire.written.borrow().len() > 1).await;

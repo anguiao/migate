@@ -27,7 +27,6 @@ fn detailed_outcomes_keep_unsent_queue_and_output_timeouts_unsent() {
                     result: Err(CentralError::Timeout),
                     stage: RequestStage::NotSent,
                     timeout: Some(RequestTimeout::Queue),
-                    response_timeout_id: None,
                 }
             );
             write_ready(&mut driver, &budget, usize::MAX).await;
@@ -64,7 +63,6 @@ fn detailed_outcomes_only_mark_possible_send_after_socket_bytes() {
                 result: Err(CentralError::Timeout),
                 stage: RequestStage::MayHaveBeenSent,
                 timeout: Some(RequestTimeout::Transport),
-                response_timeout_id: None,
             }
         );
         assert_eq!(written.get(), 3);
@@ -93,7 +91,6 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Timeout),
                         stage: RequestStage::MayHaveBeenSent,
                         timeout: Some(RequestTimeout::Response),
-                        response_timeout_id: Some(mid),
                     }
                 }
                 "transport" => {
@@ -105,7 +102,6 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Timeout),
                         stage: RequestStage::MayHaveBeenSent,
                         timeout: Some(RequestTimeout::Transport),
-                        response_timeout_id: None,
                     }
                 }
                 "rejected" => {
@@ -114,7 +110,6 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Rejected(-704042011)),
                         stage: RequestStage::BusinessResult,
                         timeout: None,
-                        response_timeout_id: None,
                     }
                 }
                 "accepted" => {
@@ -127,7 +122,6 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Ok(()),
                         stage: RequestStage::BusinessResult,
                         timeout: None,
-                        response_timeout_id: None,
                     }
                 }
                 _ => {
@@ -140,7 +134,6 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                         result: Err(CentralError::Protocol),
                         stage: RequestStage::MayHaveBeenSent,
                         timeout: None,
-                        response_timeout_id: None,
                     }
                 }
             };
@@ -160,7 +153,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
 }
 
 #[test]
-fn concurrent_response_timeouts_keep_their_own_request_ids() {
+fn concurrent_response_timeouts_do_not_cancel_other_requests() {
     block_on(async {
         let (handle, mut driver, budget, _) = rig();
         let first = handle.set_property("first", BINDING, true, |_| {});
@@ -197,13 +190,17 @@ fn concurrent_response_timeouts_keep_their_own_request_ids() {
         driver.pending.get_mut(&second_id).unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
         driver.expire().unwrap();
-        assert_eq!(second.await.response_timeout_id, Some(second_id));
+        let second_outcome = second.await;
+        assert_eq!(second_outcome.result, Err(CentralError::Timeout));
+        assert_eq!(second_outcome.timeout, Some(RequestTimeout::Response));
         assert!(driver.pending.contains_key(&first_id));
 
         driver.pending.get_mut(&first_id).unwrap().deadline =
             Instant::now() - Duration::from_secs(1);
         driver.expire().unwrap();
-        assert_eq!(first.await.response_timeout_id, Some(first_id));
+        let first_outcome = first.await;
+        assert_eq!(first_outcome.result, Err(CentralError::Timeout));
+        assert_eq!(first_outcome.timeout, Some(RequestTimeout::Response));
     });
 }
 
@@ -286,7 +283,6 @@ fn accepted_bytes_mark_sent_even_when_the_same_poll_flush_fails() {
             result: Err(CentralError::Io),
             stage: RequestStage::MayHaveBeenSent,
             timeout: None,
-            response_timeout_id: None,
         };
         assert_eq!(write.await, expected);
         assert_eq!(
@@ -357,7 +353,6 @@ fn a_zero_byte_transport_write_ends_the_session_as_io() {
                 result: Err(CentralError::Io),
                 stage: RequestStage::NotSent,
                 timeout: None,
-                response_timeout_id: None,
             }
         );
         assert_eq!(handle.shared.outstanding.get(), 0);

@@ -1,36 +1,5 @@
 use super::*;
-use crate::xiaomi::{
-    adapter::{
-        PathKind, PathPriority, RecoveryStatus,
-        state::{AccessRefresh, AccessRequest},
-    },
-    central::{CentralError, RequestOutcome, RequestStage, RequestTimeout},
-};
-
-#[test]
-fn recovery_diagnostics_show_only_a_real_schedule_or_a_running_round() {
-    block_on(async {
-        let clock = TestClock::default();
-        let access = AccessRefresh::default();
-        assert_eq!(access.recovery_status(&clock), RecoveryStatus::None);
-        access.degrade(clock.now());
-        assert_eq!(
-            access.recovery_status(&clock),
-            RecoveryStatus::Scheduled(clock.wall() + 60)
-        );
-        clock.advance(Duration::from_secs(60));
-        assert!(matches!(access.next(&clock).await, AccessRequest::Recovery));
-        assert_eq!(access.recovery_status(&clock), RecoveryStatus::Running);
-        clock.advance(Duration::from_secs(10));
-        access.recovery_finished(clock.now());
-        assert_eq!(
-            access.recovery_status(&clock),
-            RecoveryStatus::Scheduled(clock.wall() + 300)
-        );
-        access.recovered();
-        assert_eq!(access.recovery_status(&clock), RecoveryStatus::None);
-    });
-}
+use crate::xiaomi::adapter::{PathKind, PathPriority};
 
 #[test]
 fn diagnostics_keep_current_control_and_valid_notification_conditions_separate() {
@@ -55,36 +24,13 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let handle = control
-                .context
-                .live
-                .borrow()
-                .session
-                .as_ref()
-                .unwrap()
-                .handle
-                .clone();
-            control.context.local_outcome(
-                &handle,
-                &RequestOutcome::<()> {
-                    result: Err(CentralError::Timeout),
-                    stage: RequestStage::MayHaveBeenSent,
-                    timeout: Some(RequestTimeout::Response),
-                    response_timeout_id: None,
-                },
-            );
             let status = control.context.diagnostics();
             assert!(status.routing.local_connected);
-            assert!(status.routing.business_degraded);
-            assert_eq!(status.routing.priority, PathPriority::CloudFirst);
-            assert_eq!(
-                status.routing.recovery,
-                RecoveryStatus::Scheduled(control.clock.wall() + 60)
-            );
+            assert_eq!(status.routing.priority, PathPriority::LocalFirst);
             let one = &status.devices[0];
             assert_eq!(one.did, "one");
             assert_eq!(one.usable_control_paths, [PathKind::Local, PathKind::Cloud]);
-            assert_eq!(one.selected_control, Some(PathKind::Cloud));
+            assert_eq!(one.selected_control, Some(PathKind::Local));
             assert_eq!(one.notification_source, Some(PathKind::Local));
             assert!(one.sync_limited_reason.is_none());
             control.context.http_paused.set(true);
@@ -230,15 +176,7 @@ fn command_diagnostics_keep_inflight_actual_path_when_control_selection_changes(
                 .unwrap()
                 .handle
                 .clone();
-            control.context.local_outcome(
-                &handle,
-                &RequestOutcome::<()> {
-                    result: Err(CentralError::Timeout),
-                    stage: RequestStage::MayHaveBeenSent,
-                    timeout: Some(RequestTimeout::Response),
-                    response_timeout_id: None,
-                },
-            );
+            local_device_offline(&control.context, &handle, "one");
             let status = control.context.diagnostics();
             let one_status = &status.devices[0];
             assert_eq!(one_status.selected_control, Some(PathKind::Cloud));

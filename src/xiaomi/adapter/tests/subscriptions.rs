@@ -36,21 +36,19 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                             })
                 })
                 .await;
-                if !timeout {
-                    until(|| {
-                        !control.context.live.borrow().devices["one"]
-                            .admitted
-                            .as_ref()
-                            .unwrap()
-                            .refresh
-                            .borrow()
-                            .contains(
-                                "outlet:2",
-                                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-                            )
-                    })
-                    .await;
-                }
+                until(|| {
+                    !control.context.live.borrow().devices["one"]
+                        .admitted
+                        .as_ref()
+                        .unwrap()
+                        .refresh
+                        .borrow()
+                        .contains(
+                            "outlet:2",
+                            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                        )
+                })
+                .await;
                 assert!(
                     control
                         .context
@@ -86,7 +84,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 for _ in 0..10 {
                     future::yield_now().await;
                 }
-                let failed_reads = if timeout { 1 } else { 4 };
+                let failed_reads = 4;
                 assert_eq!(peer.count("get", "one", 2), failed_reads);
                 assert_eq!(peer.count("subscribe", "multi", 9), 4);
                 assert_eq!(peer.count("subscribe", "multi", 3), 1);
@@ -109,18 +107,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                         )
                 })
                 .await;
-                if timeout {
-                    until(|| {
-                        function(&control.context.registry, "one", "outlet:2")
-                            .snapshot()
-                            .power()
-                            == Some(Power::On)
-                    })
-                    .await;
-                    assert_eq!(peer.count("get", "one", 2), 2);
-                } else {
-                    assert_eq!(peer.count("get", "one", 2), 4);
-                }
+                assert_eq!(peer.count("get", "one", 2), 4);
                 peer.state.borrow_mut().online.insert("one".into(), false);
                 peer.list_changed(&["one"]);
                 until(|| {
@@ -141,7 +128,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                         == Some(Power::On)
                 })
                 .await;
-                let expected = failed_reads + if timeout { 2 } else { 1 };
+                let expected = failed_reads + 1;
                 until(|| peer.count("get", "one", 2) == expected).await;
                 assert_eq!(peer.count("get", "one", 2), expected);
             })

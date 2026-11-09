@@ -14,7 +14,7 @@ use crate::{
     storage::{Store, XiaomiRecord},
     xiaomi::{
         auth::{AuthenticationState, CertificateUpdate, FailureReason},
-        central::{CentralError, DeviceAccess, SessionHandle},
+        central::{CentralError, DeviceAccess, RequestTimeout, SessionHandle},
         certificate::CertificateValidity,
         mijia::CloudDeviceInfo,
         mijia::MijiaClient,
@@ -172,76 +172,27 @@ pub(super) struct AccessRefresh {
     full_deadline: Cell<Option<Duration>>,
     pending: RefCell<BTreeSet<String>>,
     changed: Event,
-    recovery: Cell<Recovery>,
-}
-#[derive(Clone, Copy, Default)]
-enum Recovery {
-    #[default]
-    Healthy,
-    Scheduled(Duration),
-    Running,
 }
 pub(super) enum AccessRequest {
     Full,
     Filtered(Vec<String>),
-    Recovery,
 }
 impl AccessRefresh {
-    pub(super) fn recovery_status(&self, clock: &dyn Clock) -> super::model::RecoveryStatus {
-        use super::model::RecoveryStatus;
-        match self.recovery.get() {
-            Recovery::Healthy => RecoveryStatus::None,
-            Recovery::Running => RecoveryStatus::Running,
-            Recovery::Scheduled(due) => {
-                let remaining = due.saturating_sub(clock.now());
-                let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() != 0);
-                RecoveryStatus::Scheduled(clock.unix_now() + seconds as i64)
-            }
-        }
-    }
-    pub(super) fn is_degraded(&self) -> bool {
-        !matches!(self.recovery.get(), Recovery::Healthy)
-    }
-    pub(super) fn degrade(&self, now: Duration) -> bool {
-        if self.is_degraded() {
-            return false;
-        }
-        self.full_deadline.set(None);
-        self.pending.borrow_mut().clear();
-        self.recovery
-            .set(Recovery::Scheduled(now + Duration::from_secs(60)));
-        self.changed.notify(usize::MAX);
-        true
-    }
-    pub(super) fn recovery_finished(&self, now: Duration) {
-        if matches!(self.recovery.get(), Recovery::Running) {
-            self.recovery
-                .set(Recovery::Scheduled(now + Duration::from_secs(300)));
-            self.changed.notify(usize::MAX);
-        }
-    }
-    pub(super) fn recovered(&self) {
-        self.recovery.set(Recovery::Healthy);
-        self.changed.notify(usize::MAX);
-    }
     pub(super) fn request_initial(&self, now: Duration) {
         self.full_deadline.set(Some(now));
         self.changed.notify(usize::MAX);
     }
     pub(super) fn request(&self, now: Duration) {
-        if self.is_degraded() {
-            return;
-        }
         if self.full_deadline.get().is_none() {
             self.full_deadline.set(Some(now + Duration::from_secs(3)));
         }
         self.changed.notify(usize::MAX);
     }
-    pub(super) fn retry_full(&self, now: Duration) {
-        if self.is_degraded() {
-            return;
-        }
-        self.full_deadline.set(Some(now + Duration::from_secs(3)));
+    pub(super) fn retry_full(&self, now: Duration, timeout: Option<RequestTimeout>) {
+        // A stalled directory stays low-frequency without degrading the hub session.
+        let delay = if timeout.is_some() { 60 } else { 3 };
+        self.full_deadline
+            .set(Some(now + Duration::from_secs(delay)));
         self.changed.notify(usize::MAX);
     }
     pub(super) fn request_filtered(&self, dids: Vec<String>) {
@@ -251,14 +202,6 @@ impl AccessRefresh {
     pub(super) async fn next(&self, clock: &dyn Clock) -> AccessRequest {
         loop {
             let listener = self.changed.listen();
-            let recovery_due = match self.recovery.get() {
-                Recovery::Scheduled(due) => Some(due),
-                _ => None,
-            };
-            if recovery_due.is_some_and(|due| clock.now() >= due) {
-                self.recovery.set(Recovery::Running);
-                return AccessRequest::Recovery;
-            }
             let deadline = self.full_deadline.get();
             if deadline.is_some_and(|deadline| clock.now() >= deadline) {
                 self.full_deadline.set(None);
@@ -272,7 +215,6 @@ impl AccessRefresh {
                         .collect(),
                 );
             }
-            let deadline = deadline.into_iter().chain(recovery_due).min();
             if let Some(deadline) = deadline {
                 future::or(listener, clock.wait_until(deadline)).await;
             } else {

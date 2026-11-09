@@ -183,15 +183,7 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                             .unwrap()
                             .handle
                             .clone();
-                        control.context.local_outcome(
-                            &handle,
-                            &crate::xiaomi::central::RequestOutcome::<()> {
-                                result: Err(crate::xiaomi::central::CentralError::Timeout),
-                                stage: crate::xiaomi::central::RequestStage::MayHaveBeenSent,
-                                timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
-                                response_timeout_id: None,
-                            },
-                        );
+                        local_device_offline(&control.context, &handle, "one");
                     }
                     until(|| {
                         matches!(

@@ -239,7 +239,6 @@ pub(super) async fn submit_properties(
                                         result: Err(error.clone()),
                                         stage: outcome.stage,
                                         timeout: outcome.timeout,
-                                        response_timeout_id: outcome.response_timeout_id,
                                     },
                                 );
                             }

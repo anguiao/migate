@@ -1,24 +1,11 @@
 use super::*;
 use crate::{
     device::Availability,
-    xiaomi::central::{CentralError, RequestOutcome, RequestStage, RequestTimeout},
+    xiaomi::central::{CentralError, RequestOutcome, RequestStage},
 };
 
 impl Context {
     pub(in crate::xiaomi::adapter) fn local_device_outcome<T>(
-        &self,
-        handle: &SessionHandle,
-        work: &DeviceWork,
-        outcome: &RequestOutcome<T>,
-    ) {
-        if work.life.is_closed() || !self.current_local(handle) {
-            return;
-        }
-        self.local_outcome(handle, outcome);
-        self.local_device_access_outcome(work, outcome);
-    }
-    /// A single periodic read timeout says nothing about the shared hub session.
-    pub(in crate::xiaomi::adapter) fn local_background_property_outcome<T>(
         &self,
         handle: &SessionHandle,
         work: &DeviceWork,
@@ -58,61 +45,10 @@ impl Context {
         self.refresh_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }
-    pub(in crate::xiaomi::adapter) fn local_outcome<T>(
-        &self,
-        handle: &SessionHandle,
-        outcome: &RequestOutcome<T>,
-    ) {
-        if outcome.stage != RequestStage::MayHaveBeenSent
-            || outcome.timeout != Some(RequestTimeout::Response)
-        {
-            return;
-        }
-        let access = self
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .filter(|session| session.handle.same_connection(handle))
-            .map(|session| session.access.clone());
-        if let Some(access) = access
-            && access.degrade(self.clock.now())
-        {
-            self.priority.set(PathPriority::CloudFirst);
-            log::warn!(
-                "Gateway business response timed out: request_id={:?}, stage={:?}, timeout={:?}; cloud control now preferred, recovery in 60s",
-                outcome.response_timeout_id,
-                outcome.stage,
-                outcome.timeout
-            );
-            handle.cancel_unsent_business();
-            for work in self
-                .live
-                .borrow()
-                .devices
-                .values()
-                .filter_map(|slot| slot.admitted.as_ref())
-            {
-                work.retry_subscriptions();
-            }
-            self.update_all_availability();
-            self.update_routing("hub business response timed out");
-            self.refresh_changed.notify(usize::MAX);
-            self.changed.notify(usize::MAX);
-        }
-    }
     pub(in crate::xiaomi::adapter) fn local_list_success(&self, handle: &SessionHandle) {
-        let access = self
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .filter(|session| session.handle.same_connection(handle))
-            .map(|session| session.access.clone());
-        if let Some(access) = access {
+        if self.current_local(handle) {
             let recovering =
                 self.priority.replace(PathPriority::LocalFirst) == PathPriority::CloudFirst;
-            access.recovered();
             if recovering {
                 log::info!("Gateway device list succeeded; hub control priority restored");
                 let works = self

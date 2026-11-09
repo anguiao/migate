@@ -16,7 +16,6 @@ pub(super) fn queued_handle(timing: Timing) -> SessionHandle {
             outstanding: Cell::new(0),
             cancellations: Default::default(),
             notification_invalidations: Default::default(),
-            cancel_unsent_business: Default::default(),
         }),
         timing,
     }
@@ -444,6 +443,5 @@ fn value_outcome(outcome: RequestOutcome<PropertyReading>) -> RequestOutcome<Val
         result: outcome.result.map(|reading| reading.value),
         stage: outcome.stage,
         timeout: outcome.timeout,
-        response_timeout_id: outcome.response_timeout_id,
     }
 }

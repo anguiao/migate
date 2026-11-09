@@ -134,7 +134,6 @@ fn guarded_write_locks_the_decision_and_reports_first_send_once() {
             result: Ok(()),
             stage: RequestStage::BusinessResult,
             timeout: None,
-            response_timeout_id: None,
         };
         assert_eq!(write.await, expected);
         assert_eq!(
@@ -168,8 +167,6 @@ fn guarded_read_locks_the_decision_after_first_bytes() {
         assert_eq!(first_send.get(), 1);
         let committed_checks = checks.get();
         allowed.set(false);
-        handle.cancel_unsent_business();
-        driver.drain_cancellations();
         assert!(driver.pending.contains_key(&mid));
         write_ready(&mut driver, &budget, usize::MAX).await;
         assert_eq!(checks.get(), committed_checks);
@@ -182,7 +179,6 @@ fn guarded_read_locks_the_decision_after_first_bytes() {
                 result: Ok(json!(false)),
                 stage: RequestStage::BusinessResult,
                 timeout: None,
-                response_timeout_id: None,
             }
         );
         assert_eq!(callbacks.get(), 1);

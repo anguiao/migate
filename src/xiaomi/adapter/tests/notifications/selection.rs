@@ -47,7 +47,7 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
 }
 
 #[test]
-fn partial_cloud_preparation_keeps_local_and_preparing_qos2_cannot_cross_activation() {
+fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
     let (rig, listener, cloud) = with_cloud_peer(&["multi"]);
     let held = "device/multi/up/properties_changed/9/1";
     cloud.state.borrow_mut().hold.insert(held.into());
@@ -80,15 +80,7 @@ fn partial_cloud_preparation_keeps_local_and_preparing_qos2_cannot_cross_activat
                     .unwrap()
                     .handle
                     .clone();
-                control.context.local_outcome(
-                    &handle,
-                    &crate::xiaomi::central::RequestOutcome::<()> {
-                        result: Err(crate::xiaomi::central::CentralError::Timeout),
-                        stage: crate::xiaomi::central::RequestStage::MayHaveBeenSent,
-                        timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
-                        response_timeout_id: None,
-                    },
-                );
+                local_device_offline(&control.context, &handle, "multi");
                 until(|| {
                     cloud
                         .state
@@ -98,12 +90,13 @@ fn partial_cloud_preparation_keeps_local_and_preparing_qos2_cannot_cross_activat
                         .any(|subscribe| subscribe.filters[0].path == held)
                 })
                 .await;
-                assert!(local_active(control, "multi"));
+                until(|| !local_active(control, "multi")).await;
                 let outlet = function(&control.context.registry, "multi", "outlet:3");
                 cloud.qos2("multi", 3, true, 41);
                 until(|| cloud.received(41, false)).await;
                 local.notify("multi", 3, true);
-                until(|| outlet.snapshot().power() == Some(Power::On)).await;
+                async_io::Timer::after(Duration::from_millis(20)).await;
+                assert_eq!(outlet.snapshot().power(), Some(Power::Off));
                 cloud.state.borrow_mut().hold.remove(held);
                 cloud.release(held);
                 until(|| cloud_active(control, "multi")).await;
@@ -329,15 +322,7 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                         .unwrap()
                         .handle
                         .clone();
-                    control.context.local_outcome(
-                        &handle,
-                        &crate::xiaomi::central::RequestOutcome::<()> {
-                            result: Err(crate::xiaomi::central::CentralError::Timeout),
-                            stage: crate::xiaomi::central::RequestStage::MayHaveBeenSent,
-                            timeout: Some(crate::xiaomi::central::RequestTimeout::Response),
-                            response_timeout_id: None,
-                        },
-                    );
+                    local_device_offline(&control.context, &handle, "one");
                     control
                         .clock
                         .automatic
@@ -457,14 +442,9 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
 }
 
 #[test]
-fn losing_local_connection_reopens_cloud_without_another_priority_change() {
+fn device_timeout_keeps_local_notifications_until_connection_is_lost() {
     let (rig, listener, cloud) = with_cloud_peer(&["one"]);
     let property = "device/one/up/properties_changed/2/1";
-    cloud
-        .state
-        .borrow_mut()
-        .reject
-        .insert(property.into(), SubscribeReasonCode::QuotaExceeded);
     let (release, gate) = flume::bounded(1);
     rig.cloud.lock().unwrap().home_gate = Some(gate);
     block_on(rig.run(|c| async move {
@@ -483,25 +463,18 @@ fn losing_local_connection_reopens_cloud_without_another_priority_change() {
                 let one = function(&control.context.registry, "one", "outlet:2");
                 let command = one.execute(Command::On);
                 assert_eq!(command.await, Err(crate::device::CommandError::Timeout));
-                until(|| {
-                    cloud.count(property) == 4
-                        && local_active(control, "one")
-                        && control.context.live.borrow().devices["one"]
-                            .admitted
-                            .as_ref()
-                            .unwrap().test_cloud_exhausted()
-                })
-                .await;
+                assert!(local_active(control, "one"));
                 assert_eq!(
                     control.context.priority(),
-                    super::super::super::routing::PathPriority::CloudFirst
+                    super::super::super::routing::PathPriority::LocalFirst
                 );
+                assert_eq!(local.count("rpcReq", "one", 2), 1);
+                assert!(control.cloud.lock().unwrap().property_writes.is_empty());
                 control
                     .clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 async_io::Timer::after(Duration::from_millis(20)).await;
-                cloud.state.borrow_mut().reject.clear();
             })
             .await;
 
@@ -511,21 +484,15 @@ fn losing_local_connection_reopens_cloud_without_another_priority_change() {
                 c.context.priority(),
                 super::super::super::routing::PathPriority::CloudFirst
             );
-            assert!(
-                !c.context.live.borrow().devices["one"]
-                    .admitted
-                    .as_ref()
-                    .unwrap().test_cloud_exhausted(),
-                "removing local must reopen the eligible cloud source even when priority is unchanged"
-            );
             until(|| cloud_active(&c, "one")).await;
-            assert_eq!(cloud.count(property), 5);
+            let subscriptions = cloud.count(property);
+            assert!(subscriptions >= 1);
             for _ in 0..20 {
                 c.context.changed.notify(usize::MAX);
                 future::yield_now().await;
             }
             async_io::Timer::after(Duration::from_millis(20)).await;
-            assert_eq!(cloud.count(property), 5);
+            assert_eq!(cloud.count(property), subscriptions);
         })
         .await;
     }));

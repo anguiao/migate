@@ -134,7 +134,7 @@ fn route_switch_reselects_only_an_unsent_air_conditioner_step() {
                     } else {
                         until(|| wire.polls.get() > 0).await;
                     }
-                    c.context.local_outcome(&handle, &response_timeout());
+                    local_device_offline(&c.context, &handle, "one");
                     wire.allow(usize::MAX);
                     if sent {
                         until(|| wire.written.borrow().len() > 1).await;
@@ -214,7 +214,7 @@ fn possibly_sent_failed_air_conditioner_step_is_not_replayed_or_followed() {
                     .begin_air_conditioner(Command::Speed(Speed::Low))
                     .unwrap();
                 until(|| wire.written.borrow().len() == 1).await;
-                c.context.local_outcome(&handle, &response_timeout());
+                local_device_offline(&c.context, &handle, "one");
                 wire.allow(usize::MAX);
                 until(|| wire.written.borrow().len() > 1).await;
                 wire.reply(json!({"result":[{"did":"one","siid":3,"piid":1,"code":-704}]}));

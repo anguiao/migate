@@ -1,7 +1,7 @@
 use super::{
     model::{
         AdapterStatus, DeviceStatus, FunctionStatus, GatewayStatus, ObservedPropertyStatus,
-        PathKind, PendingDevice, RecoveryStatus, RoutingStatus, SubscriptionBinding,
+        PathKind, PendingDevice, RoutingStatus, SubscriptionBinding,
     },
     routing::ControlPath,
     state::Context,
@@ -52,19 +52,9 @@ impl Context {
             reason
         };
         let previous = self.status.borrow().clone();
-        let session = self
-            .live
-            .borrow()
-            .session
-            .as_ref()
-            .map(|s| s.access.clone());
         let mut routing = RoutingStatus {
             priority: self.priority(),
-            local_connected: session.is_some(),
-            business_degraded: session.as_ref().is_some_and(|a| a.is_degraded()),
-            recovery: session.as_ref().map_or(RecoveryStatus::None, |a| {
-                a.recovery_status(self.clock.as_ref())
-            }),
+            local_connected: self.live.borrow().session.is_some(),
             last_switch_reason: previous.routing.last_switch_reason.clone(),
         };
         if routing.priority != previous.routing.priority {

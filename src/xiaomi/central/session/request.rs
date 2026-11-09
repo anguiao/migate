@@ -64,7 +64,6 @@ pub struct RequestOutcome<T> {
     pub result: Result<T, CentralError>,
     pub stage: RequestStage,
     pub timeout: Option<RequestTimeout>,
-    pub(crate) response_timeout_id: Option<u32>,
 }
 
 /// A last check made while the operation has written no socket bytes.
@@ -97,8 +96,6 @@ pub(super) enum Response {
     Unit,
 }
 pub(super) type ResultValue = Result<Response, CentralError>;
-type RequestCompletion =
-    Box<dyn FnOnce(ResultValue, RequestStage, Option<RequestTimeout>, Option<u32>)>;
 struct Completion<T> {
     result: RefCell<Option<RequestOutcome<T>>>,
     event: Event,
@@ -106,7 +103,7 @@ struct Completion<T> {
 pub(super) struct Request {
     pub(super) kind: RequestKind,
     pub(super) deadline: Instant,
-    pub(super) complete: RequestCompletion,
+    pub(super) complete: Box<dyn FnOnce(ResultValue, RequestStage, Option<RequestTimeout>)>,
     pub(super) id: Option<u32>,
     pub(super) stage: RequestStage,
     pub(super) hooks: Option<SendHooks>,
@@ -139,12 +136,6 @@ pub(super) enum RequestKind {
     },
 }
 impl RequestKind {
-    pub(super) fn is_read_or_list(&self) -> bool {
-        matches!(
-            self,
-            Self::ListAll | Self::ListFiltered { .. } | Self::Read { .. }
-        )
-    }
     pub(super) fn publication(&self, id: u32, reply_topic: &str) -> Publish {
         let (topic, payload) = match self {
             Self::ListAll => (
@@ -216,7 +207,6 @@ pub(super) struct Shared {
     pub(super) outstanding: Cell<usize>,
     pub(super) cancellations: RefCell<VecDeque<Cancellation>>,
     pub(super) notification_invalidations: RefCell<BTreeSet<(String, NotificationBinding)>>,
-    pub(super) cancel_unsent_business: Cell<bool>,
 }
 
 pub(super) struct Cancellation {
@@ -294,11 +284,6 @@ impl SessionHandle {
         Rc::ptr_eq(&self.shared, &other.shared)
     }
 
-    /// Retire only zero-byte lists and reads; writes and MQTT exchanges remain owned.
-    pub fn cancel_unsent_business(&self) {
-        self.shared.cancel_unsent_business.set(true);
-        self.shared.event.notify(usize::MAX);
-    }
     pub fn close(&self) {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
@@ -535,12 +520,11 @@ impl SessionHandle {
             deadline: Instant::now() + timeout,
             complete: Box::new({
                 let completion = completion.clone();
-                move |result, stage, timeout, response_timeout_id| {
+                move |result, stage, timeout| {
                     let outcome = RequestOutcome {
                         result: result.map(decode),
                         stage,
                         timeout,
-                        response_timeout_id,
                     };
                     on_result(outcome.clone());
                     *completion.result.borrow_mut() = Some(outcome);
@@ -561,7 +545,7 @@ impl SessionHandle {
             None
         };
         if let Some(error) = error {
-            (request.complete)(Err(error), RequestStage::NotSent, None, None);
+            (request.complete)(Err(error), RequestStage::NotSent, None);
         } else {
             self.shared
                 .outstanding

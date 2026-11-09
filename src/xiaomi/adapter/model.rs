@@ -123,8 +123,6 @@ pub enum RecoveryStatus {
 pub struct RoutingStatus {
     pub priority: super::routing::PathPriority,
     pub local_connected: bool,
-    pub business_degraded: bool,
-    pub recovery: RecoveryStatus,
     pub last_switch_reason: Option<String>,
 }
 impl Default for RoutingStatus {
@@ -132,8 +130,6 @@ impl Default for RoutingStatus {
         Self {
             priority: super::routing::PathPriority::LocalFirst,
             local_connected: false,
-            business_degraded: false,
-            recovery: RecoveryStatus::None,
             last_switch_reason: None,
         }
     }

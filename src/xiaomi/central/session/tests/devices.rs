@@ -159,7 +159,6 @@ fn filtered_device_requests_preserve_their_payload_and_response_scope() {
         parse_response(&request.kind, &reply),
         crate::xiaomi::central::RequestStage::BusinessResult,
         None,
-        None,
     );
     let entries = block_on(future).result.unwrap();
     assert_eq!(entries.len(), 2);

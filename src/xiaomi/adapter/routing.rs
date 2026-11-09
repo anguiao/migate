@@ -335,7 +335,7 @@ impl Context {
             _ => local.map(ControlPath::Local),
         }
     }
-    /// Automatic local reads never bypass the shared slow recovery schedule.
+    /// Automatic local reads wait for the current hub's directory to recover.
     pub(super) fn read_path(&self, did: &str) -> Option<ControlPath> {
         if self.is_virtual_group(did) {
             return None;

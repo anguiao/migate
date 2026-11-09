@@ -36,10 +36,7 @@ impl SessionDriver {
         self.shared
             .outstanding
             .set(self.shared.outstanding.get() - 1);
-        let response_timeout_id = (timeout == Some(RequestTimeout::Response))
-            .then_some(request.id)
-            .flatten();
-        (request.complete)(result, request.stage, timeout, response_timeout_id);
+        (request.complete)(result, request.stage, timeout);
     }
     pub(super) fn finish_all(&mut self, error: CentralError) {
         self.shared.closed.set(true);
@@ -178,7 +175,6 @@ impl SessionDriver {
     }
 
     pub(super) fn drain_cancellations(&mut self) {
-        self.drain_unsent_business();
         loop {
             let cancellation = self.shared.cancellations.borrow_mut().pop_front();
             let Some(cancellation) = cancellation else {

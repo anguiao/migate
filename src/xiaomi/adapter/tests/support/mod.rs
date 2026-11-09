@@ -55,6 +55,26 @@ pub(super) use groups::{
 pub(super) use peer::{Peer, peer_run, response, topic_key};
 pub(super) use rig::{Control, Rig};
 
+/// Report the hub's explicit offline result through the production device path.
+pub(super) fn local_device_offline(
+    context: &super::super::state::Context,
+    handle: &crate::xiaomi::central::SessionHandle,
+    did: &str,
+) {
+    use crate::xiaomi::central::{CentralError, RequestOutcome, RequestStage};
+
+    let work = context.live.borrow().devices[did].admitted.clone().unwrap();
+    context.local_device_outcome(
+        handle,
+        &work,
+        &RequestOutcome::<()> {
+            result: Err(CentralError::Rejected(-10_007)),
+            stage: RequestStage::BusinessResult,
+            timeout: None,
+        },
+    );
+}
+
 /// Test-only outage/removal simulation: close the installed runtime authority
 /// and retire its attachments without going through description handling.
 pub(super) fn force_unavailable(context: &super::super::state::Context, did: &str, reason: &str) {

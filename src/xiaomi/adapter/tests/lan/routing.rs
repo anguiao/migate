@@ -152,7 +152,7 @@ fn offline_p5c_reads_and_controls_existing_fan_bindings_and_preserves_rejection(
 }
 
 #[test]
-fn hub_restoration_keeps_sent_direct_receipt_and_degraded_hub_uses_direct_then_cloud() {
+fn hub_restoration_keeps_sent_direct_receipt_and_fallback_uses_direct_then_cloud() {
     use crate::device::FanCommand;
     use std::sync::atomic::Ordering;
 

@@ -97,7 +97,6 @@ impl SessionDriver {
             outstanding: Default::default(),
             cancellations: Default::default(),
             notification_invalidations: Default::default(),
-            cancel_unsent_business: Default::default(),
         });
         let now = Instant::now();
         let mut driver = SessionDriver {
@@ -226,40 +225,6 @@ impl SessionDriver {
             pkid,
         });
         Ok(())
-    }
-    /// Remove complete unsent frames; partial frames and sent QoS exchanges remain owned here.
-    pub(super) fn drain_unsent_business(&mut self) {
-        if !self.shared.cancel_unsent_business.replace(false) {
-            return;
-        }
-        let mut retired = {
-            let mut queue = self.shared.queue.borrow_mut();
-            let (retired, retained): (VecDeque<_>, _) = queue
-                .drain(..)
-                .partition(|request| request.kind.is_read_or_list());
-            *queue = retained;
-            retired
-        };
-        let mids = self
-            .pending
-            .iter()
-            .filter_map(|(mid, request)| {
-                (request.kind.is_read_or_list()
-                    && request.stage == RequestStage::NotSent
-                    && self
-                        .output
-                        .iter()
-                        .any(|output| output.request == Some(*mid) && !output.frame.started()))
-                .then_some(*mid)
-            })
-            .collect::<Vec<_>>();
-        self.cancel_unsent_outputs(&mids, &[]);
-        for mid in mids {
-            retired.push_back(self.pending.remove(&mid).unwrap());
-        }
-        for request in retired {
-            self.finish(request, Err(CentralError::Cancelled));
-        }
     }
     pub(super) fn cancel_unsent_outputs(&mut self, requests: &[u32], subscriptions: &[u16]) {
         let mut removed = Vec::new();
