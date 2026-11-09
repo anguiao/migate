@@ -259,11 +259,26 @@ impl Metadata for Model {
 }
 impl AsyncHandler for Model {
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT {
+        let endpoint = ctx.attr().endpoint_id;
+        let cluster = ctx.attr().cluster_id;
+        let attribute = ctx.attr().attr_id;
+        let result = if endpoint <= AGGREGATOR_ENDPOINT {
             self.root.read(ctx, reply).await
         } else {
-            self.entry(ctx.attr().endpoint_id)?.read(ctx, reply).await
+            match self.entry(endpoint) {
+                Ok(entry) => entry.read(ctx, reply).await,
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = &result
+            && error.code() != ErrorCode::NoSpace
+        {
+            log::error!(
+                "Matter attribute read failed: endpoint={endpoint}, cluster={cluster}, attribute={attribute}, stage=handler, error={:?}",
+                error.code()
+            );
         }
+        result
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
         if ctx.attr().endpoint_id <= AGGREGATOR_ENDPOINT {

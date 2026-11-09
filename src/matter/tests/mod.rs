@@ -1,5 +1,6 @@
 mod air_conditioner;
 mod composition;
+mod diagnostics;
 mod handlers;
 mod lighting_handlers;
 mod subscriptions;
