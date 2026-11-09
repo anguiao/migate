@@ -313,9 +313,6 @@ pub(super) struct Context {
     #[cfg(test)]
     pub(super) lan_timeout: Cell<Duration>,
     pub(super) ha_sync: RefCell<HaSync>,
-    pub(super) ha_verified: RefCell<Option<super::routing::HaKey>>,
-    pub(super) ha_refresh_failure: RefCell<Option<FailureReason>>,
-    pub(super) ha_refresh_in_flight: Cell<bool>,
     pub(super) ha_changed: Event,
     pub(super) mijia_rejected: RefCell<Option<u64>>,
     pub(super) mijia_changed: Event,
@@ -387,9 +384,6 @@ impl Context {
             } else {
                 HaSync::Idle
             };
-            *self.ha_verified.borrow_mut() = None;
-            *self.ha_refresh_failure.borrow_mut() = None;
-            self.ha_refresh_in_flight.set(false);
             let authentication = if self.live.borrow().ha_generation.is_some() {
                 AuthenticationState::Checking
             } else {
@@ -421,6 +415,12 @@ impl Context {
         status.auth.set_completed_at(self.clock.unix_now());
         drop(status);
         self.status_changed.notify(usize::MAX);
+    }
+    pub(super) fn confirm_ha(&self) {
+        let checking = matches!(self.status.borrow().auth.ha, AuthenticationState::Checking);
+        if checking {
+            self.ha_authentication(AuthenticationState::Authenticated);
+        }
     }
     pub(super) fn ha_authentication(&self, authentication: AuthenticationState) {
         let mut status = self.status.borrow_mut();

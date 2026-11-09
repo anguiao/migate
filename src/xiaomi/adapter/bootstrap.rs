@@ -184,9 +184,6 @@ impl XiaomiAdapter {
             } else {
                 super::credentials::HaSync::default()
             }),
-            ha_verified: RefCell::new(None),
-            ha_refresh_failure: RefCell::new(None),
-            ha_refresh_in_flight: Cell::new(false),
             ha_changed: Event::new(),
             mijia_rejected: RefCell::new(None),
             mijia_changed: Event::new(),

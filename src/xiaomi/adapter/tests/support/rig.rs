@@ -9,11 +9,7 @@ pub(in super::super) struct CloudState {
     pub(in super::super) home_delay: Duration,
     pub(in super::super) home_gate: Option<flume::Receiver<()>>,
     pub(in super::super) home_status: u16,
-    pub(in super::super) ha_status: u16,
     pub(in super::super) ha_homes: usize,
-    pub(in super::super) ha_gate: Option<flume::Receiver<()>>,
-    pub(in super::super) ha_uid: Option<String>,
-    pub(in super::super) ha_missing_uid: bool,
     pub(in super::super) cert_sign_csr: bool,
     pub(in super::super) home_bad_signature: bool,
     pub(in super::super) home_more: bool,
@@ -297,7 +293,6 @@ impl Rig {
             status: 200,
             home_status: 200,
             detail_status: 200,
-            ha_status: 200,
             cert_status: 200,
             token_status: 200,
             restore_status: 200,
@@ -345,19 +340,7 @@ impl Rig {
                     .contains("authorization: bearer")
             {
                 state.ha_homes += 1;
-                let homes = if state.ha_missing_uid {
-                    json!([])
-                } else {
-                    json!([{"uid":state.ha_uid.as_deref().unwrap_or(&account_uid)}])
-                };
-                let mut response = MockResponse::json(
-                    state.ha_status,
-                    &json!({"code":0,"result":{"homelist":homes}}).to_string(),
-                );
-                if let Some(gate) = state.ha_gate.clone() {
-                    response = response.gated(gate);
-                }
-                return response;
+                return MockResponse::json(503, "unexpected HA identity probe");
             }
             if state.status != 200 {
                 return MockResponse::json(state.status, "{}");

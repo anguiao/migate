@@ -105,7 +105,6 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
             && (rejected || context.clock.unix_now() >= tokens.refresh_at)
             && context.clock.now() >= refresh_due
         {
-            context.ha_refresh_in_flight.set(true);
             context.ha_authentication(AuthenticationState::Refreshing);
             if matches!(&*context.ha_sync.borrow(), HaSync::Refreshed(generation) if generation == &key.generation)
             {
@@ -131,18 +130,16 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
             } else {
                 refreshing.await
             };
-            context.ha_refresh_in_flight.set(false);
             match result {
                 Ok(replacement) => {
                     let already_due = replacement
                         .ha_authorization()
                         .is_some_and(|ha| ha.tokens.refresh_at <= context.clock.unix_now());
                     context.adopt_credentials(replacement);
-                    *context.ha_refresh_failure.borrow_mut() = None;
                     if let Some(fresh) = context.ha_key() {
                         *context.ha_sync.borrow_mut() = HaSync::Refreshed(fresh.generation);
                     }
-                    context.ha_authentication(AuthenticationState::Checking);
+                    context.ha_authentication(AuthenticationState::Authenticated);
                     context.ha_changed.notify(usize::MAX);
                     retry = already_due.then(|| context.clock.now() + Duration::from_secs(1));
                     backoff = Backoff::new(1, 30);
@@ -161,7 +158,6 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                             super::cloud::MEMBER_INTERVAL
                         };
                         let reason = FailureReason::Cloud(error);
-                        *context.ha_refresh_failure.borrow_mut() = Some(reason.clone());
                         context.ha_authentication(AuthenticationState::Unavailable(reason));
                         retry = Some(context.clock.now() + delay);
                     }
@@ -290,6 +286,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                     }
                     due = context.clock.now() + super::cloud::MEMBER_INTERVAL;
                     if !failed {
+                        context.confirm_ha();
                         backoff = Backoff::new(1, 30);
                     }
                 }
@@ -350,109 +347,6 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
             }
         })
         .await;
-    }
-}
-
-async fn ha_identity(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {
-    let mut checked = None;
-    let mut maintained = None;
-    let mut backoff = Backoff::new(1, 30);
-    let mut retry = None;
-    let mut identity_failure: Option<FailureReason> = None;
-    loop {
-        let changed = context.ha_changed.listen();
-        let record = saved(auth, &context)?;
-        let Some(key) = context.ha_key() else {
-            maintained = None;
-            checked = None;
-            changed.await;
-            continue;
-        };
-        if maintained.as_ref() != Some(&key) {
-            maintained = Some(key.clone());
-            checked = None;
-            retry = None;
-            identity_failure = None;
-            backoff = Backoff::new(1, 30);
-        }
-        if !context.token_available() || checked.as_ref() == Some(&key) {
-            changed.await;
-            continue;
-        }
-        if let Some(due) = retry
-            && context.clock.now() < due
-        {
-            future::or(changed, context.clock.wait_until(due)).await;
-            continue;
-        }
-        retry = None;
-        let result = future::or(
-            async { Some(auth.validate_bridge_ha(&record).await) },
-            async {
-                ha_retired(&context, &key).await;
-                None
-            },
-        )
-        .await;
-        let Some(result) = result else {
-            saved(auth, &context)?;
-            continue;
-        };
-        if !context.current_ha(&key) {
-            saved(auth, &context)?;
-            continue;
-        }
-        if !context.token_available() {
-            continue;
-        }
-        match result {
-            Ok(()) => {
-                checked = Some(key.clone());
-                backoff = Backoff::new(1, 30);
-                *context.ha_verified.borrow_mut() = Some(key);
-                let should_report = {
-                    let status = context.status.borrow();
-                    matches!(status.auth.ha, AuthenticationState::Checking)
-                        || identity_failure.as_ref().is_some_and(|reason| {
-                            status.auth.ha == AuthenticationState::Unavailable(reason.clone())
-                        })
-                };
-                if should_report {
-                    let authentication = if context.ha_refresh_in_flight.get() {
-                        AuthenticationState::Refreshing
-                    } else {
-                        match context.ha_refresh_failure.borrow().clone() {
-                            Some(reason) => AuthenticationState::Unavailable(reason),
-                            None => AuthenticationState::Authenticated,
-                        }
-                    };
-                    context.ha_authentication(authentication);
-                }
-                identity_failure = None;
-                context.changed.notify(usize::MAX);
-                context.ha_changed.notify(usize::MAX);
-            }
-            Err(AuthError::Cloud(error)) if error.is_unauthorized() => {
-                context.token_rejected(&key, FailureReason::Cloud(error))?;
-            }
-            Err(AuthError::Cloud(error)) => {
-                let temporary = error.is_temporary();
-                let reason = FailureReason::Cloud(error);
-                identity_failure = Some(reason.clone());
-                context.ha_authentication(AuthenticationState::Unavailable(reason));
-                if temporary {
-                    retry = Some(context.clock.now() + backoff.failed());
-                } else {
-                    checked = Some(key);
-                }
-            }
-            Err(AuthError::Failure(reason)) => {
-                checked = Some(key);
-                context.ha_authentication(AuthenticationState::Unavailable(reason));
-            }
-            Err(AuthError::Missing(_)) => continue,
-            Err(error) => return Err(error.into()),
-        }
     }
 }
 
@@ -547,10 +441,7 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
 pub(super) async fn run(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {
     future::or(
         mijia(auth, context.clone()),
-        future::or(
-            ha_identity(auth, context.clone()),
-            future::or(tokens(auth, context.clone()), certificates(auth, context)),
-        ),
+        future::or(tokens(auth, context.clone()), certificates(auth, context)),
     )
     .await
 }

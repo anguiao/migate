@@ -43,7 +43,7 @@ impl Context {
                 .is_some_and(|record| record.uid == key.uid)
             && self.store.xiaomi().current_ha(&key.uid, key.generation)
     }
-    pub(in crate::xiaomi::adapter) fn token_available(&self) -> bool {
+    pub(in crate::xiaomi::adapter) fn token_usable(&self) -> bool {
         !matches!(*self.ha_sync.borrow(), HaSync::Rejected(_) | HaSync::Paused)
             && self
                 .live
@@ -54,12 +54,6 @@ impl Context {
                 .is_some_and(|authorization| {
                     authorization.tokens.expires_at > self.clock.unix_now()
                 })
-    }
-    pub(in crate::xiaomi::adapter) fn token_usable(&self) -> bool {
-        self.token_available()
-            && self
-                .ha_key()
-                .is_some_and(|key| self.ha_verified.borrow().as_ref() == Some(&key))
     }
     pub(in crate::xiaomi::adapter) fn mijia_path(&self) -> Option<super::CloudPath> {
         let live = self.live.borrow();

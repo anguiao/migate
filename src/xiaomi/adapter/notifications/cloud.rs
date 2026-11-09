@@ -338,6 +338,7 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
                     handle.close();
                     continue;
                 }
+                context.confirm_ha();
                 backoff = Backoff::new(10, 600);
                 let session = Rc::new(CloudSession {
                     handle: handle.clone(),
