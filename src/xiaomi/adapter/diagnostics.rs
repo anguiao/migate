@@ -1,8 +1,8 @@
 use super::{
     model::{
         AdapterStatus, DeviceStatus, DiagnosticObservation, FunctionStatus, GatewayStatus,
-        ObservedPropertyStatus, PathKind, PendingDevice, RoutingStatus, SharedFanSpeedStatus,
-        SharedFeedbackStatus, SubscriptionBinding,
+        LowSpeedStatus, ObservedPropertyStatus, PathKind, PendingDevice, RoutingStatus,
+        SharedFanSpeedStatus, SharedFeedbackStatus, SubscriptionBinding,
     },
     routing::ControlPath,
     state::Context,
@@ -171,6 +171,12 @@ impl Context {
                     FunctionStatus {
                         function: function.id().to_owned(),
                         selected_read: self.read_path_for(&did, function.id()).map(path_kind),
+                        low_speed: function.fan().and_then(|fan| fan.shared_speed()).map(|_| {
+                            LowSpeedStatus {
+                                candidates: self.low_speed_candidate_paths(&did, function.id()),
+                                selected: self.low_speed_path(&did, function.id()).map(path_kind),
+                            }
+                        }),
                         notification_source,
                         sync_limited_reason: notification_source.is_none().then(|| {
                             work.function_subscription_problem(function.id())
@@ -271,6 +277,8 @@ impl Context {
                     })
                 };
                 SharedFeedbackStatus {
+                    candidates: self.shared_feedback_candidate_paths(&did),
+                    selected_read: self.shared_feedback_read_path(&did).map(path_kind),
                     source: state.source,
                     pending: state.pending,
                     read_problem: work.refresh.borrow().input_problem(

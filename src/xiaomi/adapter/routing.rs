@@ -347,19 +347,56 @@ impl Context {
     }
     /// Low speed is only executable by the direct legacy command or cloud
     /// action. The hub is never a candidate, and high/off stay standard writes.
-    pub(super) fn low_speed_path(&self, did: &str, _id: &str) -> Option<ControlPath> {
-        // The direct legacy execution/admission is connected in the next
-        // slice. Until then the cloud action is the only implemented branch.
-        self.cloud_candidate(did, true)
-            .ok()
-            .and_then(|()| self.mijia_path())
-            .map(ControlPath::Cloud)
+    pub(super) fn low_speed_path(&self, did: &str, id: &str) -> Option<ControlPath> {
+        let candidates = self.low_speed_candidate_paths(did, id);
+        if candidates.contains(&super::model::PathKind::Direct)
+            && let Ok(client) = self.direct_candidate(did)
+        {
+            return Some(ControlPath::Direct(client));
+        }
+        if candidates.contains(&super::model::PathKind::Cloud) {
+            return self.mijia_path().map(ControlPath::Cloud);
+        }
+        None
+    }
+    /// The real per-operation candidates: an absent direct command or cloud
+    /// action never appears as a selectable path.
+    pub(super) fn low_speed_candidate_paths(
+        &self,
+        did: &str,
+        id: &str,
+    ) -> Vec<super::model::PathKind> {
+        let (direct, cloud) = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.as_ref())
+            .and_then(|work| {
+                work.native
+                    .device()
+                    .functions()
+                    .iter()
+                    .find(|function| function.id() == id)
+            })
+            .and_then(|function| function.fan())
+            .and_then(|fan| fan.shared_speed())
+            .map(|speed| (speed.direct_command.is_some(), speed.cloud_action.is_some()))
+            .unwrap_or((false, false));
+        let mut paths = Vec::new();
+        if direct && self.direct_candidate(did).is_ok() {
+            paths.push(super::model::PathKind::Direct);
+        }
+        if cloud && self.cloud_candidate(did, true).is_ok() && self.mijia_path().is_some() {
+            paths.push(super::model::PathKind::Cloud);
+        }
+        paths
     }
     /// Shared legacy feedback is a physical-device read owned by direct/cloud,
     /// never a hub standard-property read.
-    pub(super) fn shared_feedback_read_path(&self, did: &str) -> Option<ControlPath> {
+    pub(super) fn shared_feedback_candidate_paths(&self, did: &str) -> Vec<super::model::PathKind> {
         if self.is_virtual_group(did) {
-            return None;
+            return Vec::new();
         }
         let has_plan = self
             .live
@@ -369,14 +406,28 @@ impl Context {
             .and_then(|slot| slot.admitted.as_ref())
             .is_some_and(|work| work.native.plan().shared_feedback().is_some());
         if !has_plan {
-            return None;
+            return Vec::new();
         }
-        // The direct `get_prop` executor is connected in the next slice. Until
-        // then the same cloud RPC remains the only implemented group path.
-        self.cloud_candidate(did, true)
-            .ok()
-            .and_then(|()| self.mijia_path())
-            .map(ControlPath::Cloud)
+        let mut paths = Vec::new();
+        if self.direct_candidate(did).is_ok() {
+            paths.push(super::model::PathKind::Direct);
+        }
+        if self.cloud_candidate(did, true).is_ok() && self.mijia_path().is_some() {
+            paths.push(super::model::PathKind::Cloud);
+        }
+        paths
+    }
+    pub(super) fn shared_feedback_read_path(&self, did: &str) -> Option<ControlPath> {
+        let paths = self.shared_feedback_candidate_paths(did);
+        if paths.contains(&super::model::PathKind::Direct)
+            && let Ok(client) = self.direct_candidate(did)
+        {
+            return Some(ControlPath::Direct(client));
+        }
+        if paths.contains(&super::model::PathKind::Cloud) {
+            return self.mijia_path().map(ControlPath::Cloud);
+        }
+        None
     }
     pub(super) fn read_path_for_input(
         &self,

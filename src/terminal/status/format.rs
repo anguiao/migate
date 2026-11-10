@@ -98,6 +98,19 @@ pub(super) fn path(path: PathKind) -> &'static str {
     }
 }
 
+fn candidates(paths: &[PathKind]) -> String {
+    if paths.is_empty() {
+        "none".into()
+    } else {
+        paths
+            .iter()
+            .copied()
+            .map(path)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 pub(super) fn format_routing(status: &RoutingStatus) -> String {
     let priority = match status.priority {
         PathPriority::LocalFirst => "hub-first",
@@ -163,6 +176,8 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
             "\n  Direct LAN ({}): {}; address {}; identity {}.",
             match lan.protocol {
                 crate::xiaomi::adapter::LanProtocol::Miot => "MIoT properties",
+                crate::xiaomi::adapter::LanProtocol::MiotLegacyShared =>
+                    "MIoT properties and legacy shared feedback",
                 crate::xiaomi::adapter::LanProtocol::LegacyMcn02 =>
                     "legacy miIO mapping lumi.acpartner.mcn02",
             },
@@ -235,8 +250,10 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
     if let Some(shared) = &status.shared_feedback {
         let _ = write!(
             report,
-            "\n  Legacy feedback group: {}; {}; pending {}.",
-            shared.source.map(path).unwrap_or("source unknown"),
+            "\n  Legacy feedback group: candidates {}; selected read {}; last observed {}; {}; pending {}.",
+            candidates(&shared.candidates),
+            shared.selected_read.map(path).unwrap_or("none"),
+            shared.source.map(path).unwrap_or("unknown"),
             if shared.pending {
                 "waiting for readback"
             } else {
@@ -310,6 +327,14 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
                     let _ = write!(report, " {problem}.");
                 }
             }
+        }
+        if let Some(low_speed) = &function.low_speed {
+            let _ = write!(
+                report,
+                "\n    Low-speed control: candidates {}; selected {}.",
+                candidates(&low_speed.candidates),
+                low_speed.selected.map(path).unwrap_or("none")
+            );
         }
         if let Some(reason) = &function.sync_limited_reason {
             let _ = write!(report, "\n    State synchronization limited: {reason}.");

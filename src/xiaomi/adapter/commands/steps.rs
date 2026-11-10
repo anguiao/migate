@@ -284,12 +284,107 @@ async fn submit_low_speed(
             maintenance: None,
         });
     };
+    if let crate::xiaomi::adapter::routing::ControlPath::Direct(client) = &path {
+        use super::properties::{direct_command_error, direct_receipt};
+        use crate::xiaomi::adapter::model::PathKind;
+        let Some(command) = speed.direct_command.as_ref() else {
+            return BatchAttempt::Settled(BatchReceipt {
+                result: Err(CommandError::Unavailable(
+                    "direct low-speed command is unavailable".into(),
+                )),
+                maintenance: None,
+            });
+        };
+        if !context
+            .low_speed_path(did, function_id)
+            .is_some_and(|selected| {
+                matches!(
+                    selected,
+                    crate::xiaomi::adapter::routing::ControlPath::Direct(selected)
+                        if selected.same(client)
+                )
+            })
+        {
+            return BatchAttempt::Settled(BatchReceipt {
+                result: Err(CommandError::Unavailable("direct path changed".into())),
+                maintenance: None,
+            });
+        }
+        let guard = || {
+            alive(work, sink)
+                && current().is_ok()
+                && context
+                    .low_speed_path(did, function_id)
+                    .is_some_and(|selected| {
+                        matches!(
+                            selected,
+                            crate::xiaomi::adapter::routing::ControlPath::Direct(selected)
+                                if selected.same(client)
+                        )
+                    })
+        };
+        let on_sent = || {
+            let _ = mark();
+            operation.submitted(PathKind::Direct);
+        };
+        use super::super::legacy_miio::CommandError as LegacyCommandError;
+        let result = super::super::legacy_miio::command(
+            client,
+            &command.method,
+            command.params(),
+            guard,
+            on_sent,
+        )
+        .await;
+        match result {
+            Ok(()) => {
+                operation.receipts(vec![crate::xiaomi::adapter::StepReceipt::Accepted]);
+                return BatchAttempt::Settled(BatchReceipt {
+                    result: Ok(()),
+                    maintenance: None,
+                });
+            }
+            Err(LegacyCommandError::Unexpected) => {
+                operation.receipts(vec![crate::xiaomi::adapter::StepReceipt::Uncertain(
+                    "unexpected direct command response".into(),
+                )]);
+                return BatchAttempt::Settled(BatchReceipt {
+                    result: Err(CommandError::SendFailed(
+                        "unexpected direct command response".into(),
+                    )),
+                    maintenance: None,
+                });
+            }
+            Err(LegacyCommandError::Request(error)) => {
+                if error.stage == crate::xiaomi::lan::SendStage::BeforeSend
+                    && error.failure == crate::xiaomi::lan::Failure::Withdrawn
+                {
+                    return BatchAttempt::Withdrawn;
+                }
+                let sent = error.stage != crate::xiaomi::lan::SendStage::BeforeSend;
+                if sent {
+                    operation.receipts(vec![direct_receipt(&error)]);
+                }
+                let maintenance = if sent {
+                    context.lan_business_failure(did, client, &error).err()
+                } else {
+                    None
+                };
+                return BatchAttempt::Settled(BatchReceipt {
+                    result: if sent {
+                        Err(direct_command_error(&error))
+                    } else {
+                        Err(CommandError::SendFailed(error.to_string()))
+                    },
+                    maintenance,
+                });
+            }
+        }
+    }
     let crate::xiaomi::adapter::routing::ControlPath::Cloud(credentials) = path else {
-        // The direct legacy encoder is connected by the next slice. Never
-        // invent a property write or fall back to the hub for this operation.
         return BatchAttempt::Settled(BatchReceipt {
             result: Err(CommandError::Unavailable(
-                "direct low-speed execution is not connected".into(),
+                "low-speed path is unavailable".into(),
             )),
             maintenance: None,
         });

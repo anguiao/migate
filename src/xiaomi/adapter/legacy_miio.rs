@@ -10,6 +10,14 @@ pub(super) enum WriteError {
     Request(crate::xiaomi::lan::RequestError),
 }
 
+/// A direct built-in command distinguishes transport failure from an
+/// already-unwrapped business response that is not the expected acknowledgement.
+#[derive(Debug)]
+pub(super) enum CommandError {
+    Request(crate::xiaomi::lan::RequestError),
+    Unexpected,
+}
+
 pub(super) async fn set_property(
     mapping: &Mapping,
     client: &crate::xiaomi::lan::Client,
@@ -58,4 +66,38 @@ pub(super) async fn read(
         stage: SendStage::Sent,
         failure: Failure::InvalidResponse,
     })
+}
+
+/// Read the shared legacy group as one raw response. Shape validation belongs
+/// to the shared decoder so a malformed shape can be isolated from transport
+/// failure while a business/field error remains observable.
+pub(super) async fn read_shared(
+    client: &crate::xiaomi::lan::Client,
+    guard: impl Fn() -> bool,
+) -> Result<Value, crate::xiaomi::lan::RequestError> {
+    Box::pin(client.request_guarded(
+        "get_prop",
+        json!(crate::xiaomi::legacy_miio::SHARED_FIELDS),
+        guard,
+        || {},
+    ))
+    .await
+}
+
+/// One direct built-in command outside the legacy field mapping (for example
+/// `set_bh_mode`). It is not a MIoT action or a synthetic property.
+pub(super) async fn command(
+    client: &crate::xiaomi::lan::Client,
+    method: &str,
+    params: Value,
+    guard: impl Fn() -> bool,
+    on_sent: impl FnOnce(),
+) -> Result<(), CommandError> {
+    let result = Box::pin(client.request_guarded(method, params, guard, on_sent))
+        .await
+        .map_err(CommandError::Request)?;
+    if result != json!(["ok"]) {
+        return Err(CommandError::Unexpected);
+    }
+    Ok(())
 }

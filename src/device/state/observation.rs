@@ -255,7 +255,6 @@ impl Function {
         }
     }
     /// Apply one validated built-in current-temperature reading.
-    #[allow(dead_code)] // The shared legacy temperature group is connected in a later slice.
     pub(crate) fn observe_heater_temperature(
         &self,
         value: f64,

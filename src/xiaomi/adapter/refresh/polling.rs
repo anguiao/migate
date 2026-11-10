@@ -131,7 +131,9 @@ fn schedule_polls(
                 || !work.life.is_closed()
                     && !context.is_virtual_group(&work.key.id)
                     && work.contains_input(&read.id, read.input)
-                    && context.read_path_for(&work.key.id, &read.id).is_some()
+                    && context
+                        .read_path_for_input(&work.key.id, &read.id, read.input)
+                        .is_some()
         });
     }
     polls.values().map(|poll| poll.due).min()

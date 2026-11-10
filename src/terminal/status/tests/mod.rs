@@ -748,6 +748,8 @@ fn bath_diagnostics_show_standard_mode_and_legacy_group_separately() {
             reason: None,
         }),
         shared_feedback: Some(SharedFeedbackStatus {
+            candidates: vec![PathKind::Direct, PathKind::Cloud],
+            selected_read: Some(PathKind::Direct),
             source: Some(PathKind::Cloud),
             pending: true,
             read_problem: None,
@@ -783,7 +785,9 @@ fn bath_diagnostics_show_standard_mode_and_legacy_group_separately() {
         "{report}"
     );
     assert!(
-        report.contains("Legacy feedback group: cloud; waiting for readback; pending true."),
+        report.contains(
+                "Legacy feedback group: candidates direct, cloud; selected read direct; last observed cloud; waiting for readback; pending true.",
+            ),
         "{report}"
     );
     assert!(report.contains("bh_mode: raw \"quick-heat\""), "{report}");

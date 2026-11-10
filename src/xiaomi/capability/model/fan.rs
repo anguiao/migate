@@ -203,7 +203,6 @@ impl LegacyCommandBinding {
         }
         Ok(Self { method, args })
     }
-    #[allow(dead_code)] // The direct legacy executor is connected in the next slice.
     pub(crate) fn params(&self) -> Value {
         Value::Array(
             self.args

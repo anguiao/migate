@@ -251,12 +251,21 @@ impl Drop for FakeDevice {
     }
 }
 
+#[derive(Clone, Copy)]
+enum LegacyKind {
+    Mcn02,
+    BhfV13,
+}
+
 pub(crate) struct LegacyDevice {
     pub(crate) address: SocketAddr,
     pub(crate) requests: Arc<Mutex<Vec<Value>>>,
     pub(crate) values: Arc<Mutex<Vec<Value>>>,
+    /// Standard MIoT properties for the bath-heater fixture.
+    pub(crate) properties: Arc<Mutex<BTreeMap<(u32, u32), Value>>>,
     pub(crate) ack: Arc<Mutex<Value>>,
     pub(crate) rejected: Arc<Mutex<BTreeMap<String, i64>>>,
+    pub(crate) rejected_properties: Arc<Mutex<BTreeMap<(u32, u32), i64>>>,
     pub(crate) drop_write: Arc<AtomicBool>,
     pub(crate) hold_read: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -265,6 +274,16 @@ pub(crate) struct LegacyDevice {
 
 impl LegacyDevice {
     pub(crate) fn new(token: Token, did: u64) -> Self {
+        Self::build(token, did, LegacyKind::Mcn02)
+    }
+
+    /// The bath-heater model serves standard properties, the shared legacy
+    /// group and `set_bh_mode` over the same authenticated connection.
+    pub(crate) fn bhf_v13(token: Token, did: u64) -> Self {
+        Self::build(token, did, LegacyKind::BhfV13)
+    }
+
+    fn build(token: Token, did: u64, kind: LegacyKind) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .set_read_timeout(Some(Duration::from_millis(25)))
@@ -274,18 +293,41 @@ impl LegacyDevice {
         let stopped = stop.clone();
         let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
         let observed = requests.clone();
-        let values = Arc::new(Mutex::new(vec![
-            json!("off"),
-            json!("cool"),
-            json!(24),
-            json!("auto_fan"),
-            json!("off"),
-        ]));
+        let values = Arc::new(Mutex::new(match kind {
+            LegacyKind::Mcn02 => vec![
+                json!("off"),
+                json!("cool"),
+                json!(24),
+                json!("auto_fan"),
+                json!("off"),
+            ],
+            LegacyKind::BhfV13 => vec![json!("heat"), json!(31), json!(26.5)],
+        }));
         let feedback = values.clone();
+        let properties = Arc::new(Mutex::new(match kind {
+            LegacyKind::Mcn02 => BTreeMap::new(),
+            LegacyKind::BhfV13 => BTreeMap::from([
+                ((2, 1), json!(false)),
+                ((2, 2), json!(0)),
+                ((2, 3), json!(50)),
+                ((3, 1), json!(0)),
+                ((3, 2), json!(true)),
+                ((3, 3), json!(false)),
+                ((3, 4), json!(true)),
+                ((3, 8), json!(25)),
+            ]),
+        }));
+        let standard = properties.clone();
+        let model = match kind {
+            LegacyKind::Mcn02 => "lumi.acpartner.mcn02",
+            LegacyKind::BhfV13 => "yeelink.bhf_light.v13",
+        };
         let ack = Arc::new(Mutex::new(json!(["ok"])));
         let reply = ack.clone();
         let rejected = Arc::new(Mutex::new(BTreeMap::<String, i64>::new()));
         let rejections = rejected.clone();
+        let rejected_properties = Arc::new(Mutex::new(BTreeMap::<(u32, u32), i64>::new()));
+        let property_rejections = rejected_properties.clone();
         let drop_write = Arc::new(AtomicBool::new(false));
         let dropping = drop_write.clone();
         let hold_read = Arc::new(AtomicBool::new(false));
@@ -326,11 +368,14 @@ impl LegacyDevice {
                 let response = if let Some(code) = rejections.lock().unwrap().get(method).copied() {
                     json!({"id":request["id"], "error":{"code":code,"message":"rejected"}})
                 } else {
-                    let result = match method {
-                        "miIO.info" => json!({"model":"lumi.acpartner.mcn02"}),
-                        "get_prop" => json!(*feedback.lock().unwrap()),
-                        "set_power" | "set_mode" | "set_tar_temp" | "set_fan_level"
-                        | "set_ver_swing" => {
+                    let result = match (kind, method) {
+                        (_, "miIO.info") => json!({"model":model}),
+                        (_, "get_prop") => json!(*feedback.lock().unwrap()),
+                        (
+                            LegacyKind::Mcn02,
+                            "set_power" | "set_mode" | "set_tar_temp" | "set_fan_level"
+                            | "set_ver_swing",
+                        ) => {
                             if dropping.load(Ordering::Relaxed) {
                                 continue;
                             }
@@ -344,6 +389,85 @@ impl LegacyDevice {
                             };
                             feedback.lock().unwrap()[index] = request["params"][0].clone();
                             reply.lock().unwrap().clone()
+                        }
+                        (LegacyKind::BhfV13, "set_bh_mode") => {
+                            if dropping.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            let params = request["params"].as_array().unwrap();
+                            let channel = params[0].as_str().unwrap();
+                            let level = params[1].as_i64().unwrap();
+                            let mut values = feedback.lock().unwrap();
+                            let current = values[1].as_i64().unwrap();
+                            let (blow, ventilation) = (current / 10, current % 10);
+                            values[1] = match channel {
+                                "coolwind" => json!(level * 10 + ventilation),
+                                "venting" => json!(blow * 10 + level),
+                                _ => panic!("unexpected set_bh_mode channel {channel}"),
+                            };
+                            reply.lock().unwrap().clone()
+                        }
+                        (LegacyKind::BhfV13, "get_properties") => Value::Array(
+                            request["params"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|item| {
+                                    let binding = (
+                                        item["siid"].as_u64().unwrap() as u32,
+                                        item["piid"].as_u64().unwrap() as u32,
+                                    );
+                                    let code = property_rejections
+                                        .lock()
+                                        .unwrap()
+                                        .get(&binding)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    json!({
+                                        "did": item["did"],
+                                        "siid": binding.0,
+                                        "piid": binding.1,
+                                        "code": code,
+                                        "value": standard.lock().unwrap()[&binding],
+                                    })
+                                })
+                                .collect(),
+                        ),
+                        (LegacyKind::BhfV13, "set_properties") => {
+                            if dropping.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            Value::Array(
+                                request["params"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|item| {
+                                        let binding = (
+                                            item["siid"].as_u64().unwrap() as u32,
+                                            item["piid"].as_u64().unwrap() as u32,
+                                        );
+                                        let code = property_rejections
+                                            .lock()
+                                            .unwrap()
+                                            .get(&binding)
+                                            .copied()
+                                            .unwrap_or(0);
+                                        if code == 0 {
+                                            standard
+                                                .lock()
+                                                .unwrap()
+                                                .insert(binding, item["value"].clone());
+                                        }
+                                        json!({
+                                            "did": item["did"],
+                                            "siid": binding.0,
+                                            "piid": binding.1,
+                                            "code": code,
+                                        })
+                                    })
+                                    .collect(),
+                            )
                         }
                         _ => panic!("unexpected method {method}"),
                     };
@@ -362,8 +486,10 @@ impl LegacyDevice {
             address,
             requests,
             values,
+            properties,
             ack,
             rejected,
+            rejected_properties,
             drop_write,
             hold_read,
             stop,

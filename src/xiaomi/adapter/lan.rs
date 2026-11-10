@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     configuration::Scope,
+    device::FunctionKind,
     storage::LanRecord,
     xiaomi::{
         capability::{NativeDescription, PropertyBinding},
@@ -32,9 +33,33 @@ pub(super) fn protocol(native: &NativeDescription) -> Option<LanProtocol> {
         Some(LanProtocol::Miot)
     } else if native.legacy_profile().is_some() {
         Some(LanProtocol::LegacyMcn02)
+    } else if native.plan().shared_feedback().is_some() && probe_binding(native).is_some() {
+        Some(LanProtocol::MiotLegacyShared)
     } else {
         None
     }
+}
+
+/// A real MIoT boolean property from the source plan used only for the
+/// existing read-only identity confirmation. Enum switches, AC power codes and
+/// the shared legacy group are never treated as this boolean.
+fn probe_binding(native: &NativeDescription) -> Option<PropertyBinding> {
+    if let Some(profile) = native.legacy_profile() {
+        return native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == profile.target())
+            .and_then(|function| function.air_conditioner().map(|ac| ac.power()));
+    }
+    native.device().functions().iter().find_map(|function| {
+        (function.fan().is_some()
+            || function.heater().is_some()
+            || function.lighting().is_some()
+            || matches!(function.kind(), FunctionKind::Outlet))
+        .then(|| function.power())
+        .flatten()
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -198,14 +223,7 @@ impl Context {
                 let model = &source.raw.model;
                 let native = native.unwrap();
                 let legacy = native.legacy_profile();
-                let binding = native.device().functions().iter().find_map(|function| {
-                    if let Some(profile) = legacy {
-                        (function.id() == profile.target())
-                            .then(|| function.air_conditioner().unwrap().power())
-                    } else {
-                        function.fan().map(|fan| fan.power())
-                    }
-                });
+                let binding = probe_binding(native);
                 let cloud = slot
                     .cloud_access
                     .as_ref()

@@ -136,6 +136,7 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
                 functions: vec![crate::xiaomi::adapter::FunctionStatus {
                     function: "temperature:3:1001".into(),
                     selected_read: Some(crate::xiaomi::adapter::PathKind::Local),
+                    low_speed: None,
                     notification_source: None,
                     sync_limited_reason: Some("subscription rejected".into()),
                     read_problem: Some("temporary read failure".into()),

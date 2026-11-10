@@ -69,7 +69,11 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                     *next = now + ROUND_DELAY;
                     in_flight += 1;
                     last_did = Some(work.key.id.clone());
-                    if let Some(mapping) = context.legacy_mapping(&work.key.id)
+                    if read.input == crate::xiaomi::capability::ReadInput::SharedFeedback {
+                        context
+                            .tasks
+                            .spawn(read_shared(work, read, flight, context.clone()));
+                    } else if let Some(mapping) = context.legacy_mapping(&work.key.id)
                         && read
                             .input
                             .property()
@@ -122,6 +126,99 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
         } else {
             wake.await;
         }
+    }
+}
+
+fn read_shared(
+    work: Rc<DeviceWork>,
+    read: Refresh,
+    flight: Rc<ReadFlight>,
+    context: Rc<Context>,
+) -> impl std::future::Future<Output = Result<(), AdapterError>> {
+    let cleanup = ReadCleanup {
+        work: work.clone(),
+        flight: flight.clone(),
+        read: read.clone(),
+        retry: true,
+    };
+    async move {
+        use crate::xiaomi::lan::{Failure, SendStage};
+        let mut cleanup = cleanup;
+        let did = &work.key.id;
+        let stamp = work.observations.read_stamp_input(&read.id, read.input);
+        let ControlPath::Direct(client) = &flight.path else {
+            unreachable!()
+        };
+        let result = future::or(
+            async {
+                work.life.ended().await;
+                None
+            },
+            future::or(
+                async {
+                    flight.life.ended().await;
+                    None
+                },
+                async {
+                    Some(
+                        super::super::legacy_miio::read_shared(client, || {
+                            !flight.life.is_closed()
+                                && !work.life.is_closed()
+                                && flight.current(&context, did, &read.id, read.input)
+                                && work.refresh.borrow().required(&read)
+                                && work
+                                    .observations
+                                    .read_is_current_input(&work, &read.id, read.input, &stamp)
+                        })
+                        .await,
+                    )
+                },
+            ),
+        )
+        .await;
+        cleanup.retry = false;
+        if let Some(Err(error)) = &result
+            && !(error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
+        {
+            context.lan_business_failure(did, client, error)?;
+        }
+        let current = !flight.life.is_closed()
+            && !work.life.is_closed()
+            && flight.current(&context, did, &read.id, read.input);
+        let outcome = match &result {
+            None => ReadResult::Retired,
+            Some(Err(error))
+                if error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn =>
+            {
+                ReadResult::Retired
+            }
+            Some(Err(error)) => ReadResult::Failed(work.problem_input("read", read.input, error)),
+            Some(Ok(_)) if !current => ReadResult::Retired,
+            Some(Ok(raw)) => work.observe_shared_feedback(
+                raw,
+                &stamp,
+                Observation {
+                    source: super::super::model::PathKind::Direct,
+                    source_time: None,
+                    received_at: context.clock.unix_now(),
+                },
+            ),
+        };
+        let current = !matches!(outcome, ReadResult::Failed(_))
+            || current
+                && work
+                    .observations
+                    .read_is_current_input(&work, &read.id, read.input, &stamp);
+        if current {
+            work.refresh
+                .borrow_mut()
+                .complete(read, outcome, context.clock.now());
+        }
+        if !work.life.is_closed() {
+            work.report(&context, did);
+        }
+        work.refresh_changed.notify(usize::MAX);
+        Ok(())
     }
 }
 

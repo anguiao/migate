@@ -339,9 +339,18 @@ pub struct ObservedPropertyStatus {
     pub subscriptions: Vec<SubscriptionStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct LowSpeedStatus {
+    /// Real operation candidates, never the hub.
+    pub candidates: Vec<PathKind>,
+    pub selected: Option<PathKind>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct FunctionStatus {
     pub function: String,
     pub selected_read: Option<PathKind>,
+    /// Present only for a fan that owns a shared low-speed operation.
+    pub low_speed: Option<LowSpeedStatus>,
     pub notification_source: Option<PathKind>,
     pub sync_limited_reason: Option<String>,
     pub read_problem: Option<String>,
@@ -361,6 +370,7 @@ pub enum LanState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LanProtocol {
     Miot,
+    MiotLegacyShared,
     LegacyMcn02,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -394,6 +404,13 @@ pub struct SharedFanSpeedStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SharedFeedbackStatus {
+    /// Current eligible read candidates, independent of the standard path.
+    pub candidates: Vec<PathKind>,
+    /// Current selected read path for the shared group; `None` when both
+    /// direct and cloud are currently unavailable.
+    pub selected_read: Option<PathKind>,
+    /// Last successful observation source, retained when the current path is
+    /// already unavailable or a later read failed.
     pub source: Option<PathKind>,
     pub pending: bool,
     pub read_problem: Option<String>,
