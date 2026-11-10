@@ -1,7 +1,8 @@
 use super::{
     model::{
-        AdapterStatus, DeviceStatus, FunctionStatus, GatewayStatus, ObservedPropertyStatus,
-        PathKind, PendingDevice, RoutingStatus, SubscriptionBinding,
+        AdapterStatus, DeviceStatus, DiagnosticObservation, FunctionStatus, GatewayStatus,
+        ObservedPropertyStatus, PathKind, PendingDevice, RoutingStatus, SharedFanSpeedStatus,
+        SharedFeedbackStatus, SubscriptionBinding,
     },
     routing::ControlPath,
     state::Context,
@@ -223,7 +224,7 @@ impl Context {
                                 [
                                     ("Power", Some(fan.power())),
                                     ("Native mode", fan.mode().map(|mode| mode.property())),
-                                    ("Speed", Some(fan.speed().property())),
+                                    ("Speed", fan.standard_speed().map(|speed| speed.property())),
                                     ("Horizontal swing", fan.swing()),
                                 ]
                                 .into_iter()
@@ -248,6 +249,58 @@ impl Context {
                 })
                 .collect();
             let battery_problem = work.battery_problem();
+            let standard_mode = work.native.plan().standard_mode().and_then(|mode| {
+                work.standard_mode_value()
+                    .map(|value| DiagnosticObservation {
+                        value: value.value,
+                        source: work.property_source(&mode.function, mode.binding),
+                        source_time: value.source_time,
+                        received_at: Some(value.received_at),
+                        reason: value.reason,
+                    })
+            });
+            let shared_feedback = work.native.plan().shared_feedback().map(|plan| {
+                let state = work.shared_feedback();
+                let field = |value: &Option<super::model::NativeValueObservation>| {
+                    value.as_ref().map(|value| DiagnosticObservation {
+                        value: value.value.clone(),
+                        source: state.source,
+                        source_time: value.source_time,
+                        received_at: Some(value.received_at),
+                        reason: value.reason.clone(),
+                    })
+                };
+                SharedFeedbackStatus {
+                    source: state.source,
+                    pending: state.pending,
+                    read_problem: work.refresh.borrow().input_problem(
+                        crate::xiaomi::capability::SHARED_FEEDBACK_CHANNEL,
+                        crate::xiaomi::capability::ReadInput::SharedFeedback,
+                    ),
+                    native_mode: field(&state.native_mode),
+                    fan_speed_index: field(&state.fan_speed_index),
+                    temperature: field(&state.temperature),
+                    fans: plan
+                        .fans
+                        .iter()
+                        .map(|fan| {
+                            let snapshot = work
+                                .physical()
+                                .function(&fan.function)
+                                .and_then(|function| function.snapshot().fan())
+                                .map(|fan| fan.speed);
+                            SharedFanSpeedStatus {
+                                function: fan.function.clone(),
+                                channel: fan.channel,
+                                level: snapshot.and_then(|speed| speed.value),
+                                reason: state.fan_reasons.get(&fan.channel).cloned(),
+                                source_time: snapshot.and_then(|speed| speed.source_time),
+                                received_at: snapshot.and_then(|speed| speed.received_at),
+                            }
+                        })
+                        .collect(),
+                }
+            });
             let channels = work
                 .native
                 .device()
@@ -280,6 +333,8 @@ impl Context {
                 sync_limited_reason,
                 battery_problem,
                 last_switch_reason,
+                standard_mode,
+                shared_feedback,
                 commands,
                 functions,
             });

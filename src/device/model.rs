@@ -441,6 +441,8 @@ pub struct FanSnapshot {
 pub(crate) enum FanValue {
     Power(bool),
     Speed(u8),
+    /// A real feedback input reported an unusable or zero level.
+    SpeedUnknown,
     Swing(bool),
 }
 

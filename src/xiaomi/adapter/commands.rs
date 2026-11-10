@@ -91,6 +91,7 @@ async fn send_local_write(
         },
         move || {
             submitted.submitted(super::model::PathKind::Local);
+            capture_work.invalidate_shared_read_for_function(&capture_id);
             let read_pending = capture_work.refresh.borrow().contains(&capture_id, binding);
             *capture_stamp.borrow_mut() = Some(capture_work.observations.write_stamp(
                 &capture_id,
@@ -133,6 +134,7 @@ async fn send_local_write(
                         operation.receipts(vec![properties::local_receipt(&error)]);
                     }
                     operation.reject(request, command_error(error));
+                    operation.schedule_feedback(&result_context, &observing, &observing_sink);
                 }
             }
         })
@@ -290,6 +292,8 @@ async fn send_power(
             ControlPath::Direct(client) => {
                 use crate::xiaomi::lan::{Failure, RequestError, SendStage};
                 let stamp = RefCell::new(None);
+                let invalidate_work = work.clone();
+                let invalidate_id = function_id.to_owned();
                 let result = super::lan::set_properties(
                     &client,
                     &did,
@@ -303,6 +307,7 @@ async fn send_power(
                     || {
                         let _ = request.mark_sent();
                         command.0.submitted(super::model::PathKind::Direct);
+                        invalidate_work.invalidate_shared_read_for_function(&invalidate_id);
                         let read_pending = work.refresh.borrow().contains(function_id, binding);
                         *stamp.borrow_mut() = Some(work.observations.write_stamp(function_id, binding, read_pending));
                     },
@@ -323,6 +328,7 @@ async fn send_power(
                         command
                             .0
                             .reject(request, properties::direct_command_error(&error));
+                        command.0.schedule_feedback(&context, &work, &sink);
                     }
                     Ok(results) => {
                         command.0.receipts(
@@ -388,6 +394,7 @@ async fn send_power(
                 let stamp = work
                     .observations
                     .write_stamp(function_id, binding, read_pending);
+                work.invalidate_shared_read_for_function(function_id);
                 command.0.submitted(super::model::PathKind::Cloud);
                 match context
                     .mijia
@@ -418,6 +425,7 @@ async fn send_power(
                         command.0.receipts(vec![properties::cloud_receipt(&error)]);
                         let command_error = properties::cloud_command_error(&error);
                         command.0.reject(request, command_error);
+                        command.0.schedule_feedback(&context, &work, &sink);
                         let current = !work.life.is_closed() && !sink.life.is_closed();
                         // Account failures remain relevant after a binding is replaced.
                         context.cloud_error(&credentials, current.then_some(did.as_str()), &error);

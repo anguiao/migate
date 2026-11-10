@@ -121,8 +121,18 @@ pub(in crate::xiaomi::adapter) struct CommandOperation {
     pub(super) pending_step: RefCell<Option<CommandProperty>>,
 }
 impl CommandOperation {
-    pub(super) fn pending_step(&self, property: (PropertyBinding, serde_json::Value)) {
-        *self.pending_step.borrow_mut() = Some(property.into());
+    pub(super) fn pending_step(
+        &self,
+        binding: PropertyBinding,
+        value: serde_json::Value,
+        native: Option<String>,
+    ) {
+        *self.pending_step.borrow_mut() = Some(CommandProperty {
+            binding,
+            value,
+            path: None,
+            native,
+        });
     }
     pub(super) fn properties(&self, properties: Vec<(PropertyBinding, serde_json::Value)>) {
         let mut status = self.status.borrow_mut();
@@ -157,6 +167,7 @@ impl CommandOperation {
                     binding: property.binding,
                     path,
                     receipt: StepReceipt::Awaiting,
+                    native: property.native.clone(),
                 });
                 status.properties.push(property);
             } else if status.actual_path.is_some() {
@@ -169,6 +180,7 @@ impl CommandOperation {
                         binding: property.binding,
                         path,
                         receipt: StepReceipt::Awaiting,
+                        native: property.native.clone(),
                     })
                     .collect::<Vec<_>>();
                 status.steps.extend(steps);

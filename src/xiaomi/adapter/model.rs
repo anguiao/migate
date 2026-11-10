@@ -187,6 +187,8 @@ pub struct CommandProperty {
     pub binding: PropertyBinding,
     pub value: serde_json::Value,
     pub path: Option<PathKind>,
+    /// A real native operation description for an action/legacy step.
+    pub native: Option<String>,
 }
 impl From<(PropertyBinding, serde_json::Value)> for CommandProperty {
     fn from((binding, value): (PropertyBinding, serde_json::Value)) -> Self {
@@ -194,6 +196,7 @@ impl From<(PropertyBinding, serde_json::Value)> for CommandProperty {
             binding,
             value,
             path: None,
+            native: None,
         }
     }
 }
@@ -214,6 +217,7 @@ pub struct CommandStep {
     pub binding: PropertyBinding,
     pub path: PathKind,
     pub receipt: StepReceipt,
+    pub native: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -238,7 +242,12 @@ impl CommandStatus {
             .map(|property| {
                 let binding = property.binding;
                 let value = &property.value;
-                if matches!(
+                if let Some(native) = &property.native {
+                    match property.path {
+                        Some(path) => format!("{native} ({path})"),
+                        None => native.clone(),
+                    }
+                } else if matches!(
                     self.target,
                     CommandTarget::Fan(_)
                         | CommandTarget::AirConditioner(_)
@@ -313,6 +322,13 @@ pub struct NativeModeObservation {
     pub received_at: Option<i64>,
 }
 #[derive(Clone, Debug, PartialEq)]
+pub struct NativeValueObservation {
+    pub value: serde_json::Value,
+    pub source_time: Option<i64>,
+    pub received_at: i64,
+    pub reason: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObservedPropertyStatus {
     pub name: &'static str,
     pub binding: PropertyBinding,
@@ -355,6 +371,38 @@ pub struct LanStatus {
     pub problem: Option<String>,
     pub recovery: RecoveryStatus,
 }
+/// One raw diagnostic input with its real source and observation order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiagnosticObservation {
+    pub value: serde_json::Value,
+    pub source: Option<PathKind>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedFanSpeedStatus {
+    pub function: String,
+    pub channel: crate::xiaomi::capability::SharedFanChannel,
+    /// Logical level 1 = low, 2 = high; `None` is explicitly unknown.
+    pub level: Option<u8>,
+    pub reason: Option<String>,
+    pub source_time: Option<i64>,
+    pub received_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedFeedbackStatus {
+    pub source: Option<PathKind>,
+    pub pending: bool,
+    pub read_problem: Option<String>,
+    pub native_mode: Option<DiagnosticObservation>,
+    pub fan_speed_index: Option<DiagnosticObservation>,
+    pub temperature: Option<DiagnosticObservation>,
+    pub fans: Vec<SharedFanSpeedStatus>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeviceStatus {
     pub did: String,
@@ -372,6 +420,8 @@ pub struct DeviceStatus {
     pub sync_limited_reason: Option<String>,
     pub battery_problem: Option<String>,
     pub last_switch_reason: Option<String>,
+    pub standard_mode: Option<DiagnosticObservation>,
+    pub shared_feedback: Option<SharedFeedbackStatus>,
     pub commands: Vec<ChannelCommands>,
     pub functions: Vec<FunctionStatus>,
 }

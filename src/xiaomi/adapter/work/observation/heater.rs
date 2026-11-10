@@ -8,9 +8,9 @@ impl DeviceWork {
         value: crate::device::HeaterValue,
         observation: Observation,
         origin: Origin,
-    ) {
+    ) -> bool {
         if self.life.is_closed() || !self.observations.permits(function.id(), binding, origin) {
-            return;
+            return false;
         }
         let id = function.id();
         let physical = self.physical().function(id).unwrap();
@@ -28,6 +28,7 @@ impl DeviceWork {
             super::super::super::observations::key(id, binding),
             observation.source,
         );
+        true
     }
 
     pub(in crate::xiaomi::adapter) fn decode_heater(

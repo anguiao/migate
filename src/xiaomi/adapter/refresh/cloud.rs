@@ -138,7 +138,7 @@ fn cloud_flights(work: &DeviceWork) -> (usize, BTreeSet<String>) {
     let state = work.refresh.borrow();
     let mut flights = Vec::<Rc<ReadFlight>>::new();
     let mut blocked = BTreeSet::new();
-    for ((id, _, _), flight) in &state.inflight {
+    for ((id, _), flight) in &state.inflight {
         if matches!(flight.path, ControlPath::Cloud(_)) {
             blocked.insert(id.clone());
             if !flights.iter().any(|other| Rc::ptr_eq(other, flight)) {
@@ -155,10 +155,10 @@ fn cloud_due(
     kind: ReadKind,
     blocked: &BTreeSet<String>,
 ) -> Option<Duration> {
-    work.refresh.borrow().next_due(kind, |id| {
+    work.refresh.borrow().next_due(kind, |id, input| {
         !blocked.contains(id)
             && matches!(
-                context.read_path_for(&work.key.id, id),
+                context.read_path_for_input(&work.key.id, id, input),
                 Some(ControlPath::Cloud(_))
             )
     })
@@ -177,9 +177,9 @@ fn reserve_cloud_batch(
     let mut state = work.refresh.borrow_mut();
     let (read, flight) = state.reserve(
         now,
-        |id| {
+        |id, input| {
             (!blocked.contains(id))
-                .then(|| context.read_path_for(&work.key.id, id))
+                .then(|| context.read_path_for_input(&work.key.id, id, input))
                 .flatten()
         },
         ReadQueue::Cloud,

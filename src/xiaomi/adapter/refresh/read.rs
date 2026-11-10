@@ -20,10 +20,14 @@ pub(super) fn read_one(
         let mut cleanup = cleanup;
         let did = work.key.id.clone();
         let ordered = ordered_read(&work, &read);
-        let stamp = Rc::new(work.observations.read_stamp(&read.id, read.binding));
+        let Some(binding) = read.input.property() else {
+            // Shared feedback is read by the cloud RPC/direct get_prop batch.
+            return Ok(());
+        };
+        let stamp = Rc::new(work.observations.read_stamp_input(&read.id, read.input));
         let reading = async {
             if flight.life.is_closed()
-                || !flight.current(&context, &did, &read.id)
+                || !flight.current(&context, &did, &read.id, read.input)
                 || !work.refresh.borrow().required(&read)
             {
                 return Ok(ReadResult::Retired);
@@ -49,7 +53,7 @@ pub(super) fn read_one(
                     let outcome = handle
                         .read_property_observation_with_timeout_guarded(
                             &did,
-                            read.binding,
+                            binding,
                             Duration::from_secs(6),
                             SendHooks::new(
                                 move || {
@@ -65,7 +69,7 @@ pub(super) fn read_one(
                                     ) || !guard_work.observations.read_is_current(
                                         &guard_work,
                                         &guard_id,
-                                        read.binding,
+                                        binding,
                                         &guard_stamp,
                                     ) {
                                         SendDecision::Withdraw
@@ -105,12 +109,13 @@ pub(super) fn read_one(
                                         &result_context,
                                         &observing.key.id,
                                         &observed_id,
+                                        read.input,
                                     )
                                     && let Ok(value) = outcome.result
                                 {
                                     *observed_validation.borrow_mut() = observing.observe_read_at(
                                         &observed_id,
-                                        read.binding,
+                                        binding,
                                         &observed_stamp,
                                         &value.value,
                                         Observation {
@@ -127,11 +132,11 @@ pub(super) fn read_one(
                         )
                         .await;
                     match outcome.result {
-                        Ok(_) => Ok(if flight.current(&context, &did, &read.id) {
+                        Ok(_) => Ok(if flight.current(&context, &did, &read.id, read.input) {
                             match &*validation.borrow() {
                                 Ok(()) => ReadResult::Observed,
                                 Err(error) => {
-                                    ReadResult::Failed(work.problem("read", read.binding, error))
+                                    ReadResult::Failed(work.problem("read", binding, error))
                                 }
                             }
                         } else {
@@ -142,36 +147,30 @@ pub(super) fn read_one(
                         {
                             Ok(ReadResult::Retired)
                         }
-                        Err(error) => Ok(ReadResult::Failed(work.problem(
-                            "read",
-                            read.binding,
-                            &error,
-                        ))),
+                        Err(error) => Ok(ReadResult::Failed(work.problem("read", binding, &error))),
                     }
                 }
                 ControlPath::Direct(client) => {
-                    let result =
-                        super::super::lan::read_property(client, &did, read.binding, || {
-                            !flight.life.is_closed()
-                                && !work.life.is_closed()
-                                && flight.current(&context, &did, &read.id)
-                                && work.refresh.borrow().required(&read)
-                                && work.observations.read_is_current(
-                                    &work,
-                                    &read.id,
-                                    read.binding,
-                                    &stamp,
-                                )
-                        })
-                        .await;
+                    let result = super::super::lan::read_property(client, &did, binding, || {
+                        !flight.life.is_closed()
+                            && !work.life.is_closed()
+                            && flight.current(&context, &did, &read.id, read.input)
+                            && work.refresh.borrow().required(&read)
+                            && work
+                                .observations
+                                .read_is_current(&work, &read.id, binding, &stamp)
+                    })
+                    .await;
                     match result {
                         Ok(reading) => {
-                            if work.life.is_closed() || !flight.current(&context, &did, &read.id) {
+                            if work.life.is_closed()
+                                || !flight.current(&context, &did, &read.id, read.input)
+                            {
                                 Ok(ReadResult::Retired)
                             } else {
                                 match work.observe_read_at(
                                     &read.id,
-                                    read.binding,
+                                    binding,
                                     &stamp,
                                     &reading.value,
                                     Observation {
@@ -184,11 +183,9 @@ pub(super) fn read_one(
                                         context.refresh_group_states(&did);
                                         Ok(ReadResult::Observed)
                                     }
-                                    Err(error) => Ok(ReadResult::Failed(work.problem(
-                                        "read",
-                                        read.binding,
-                                        &error,
-                                    ))),
+                                    Err(error) => Ok(ReadResult::Failed(
+                                        work.problem("read", binding, &error),
+                                    )),
                                 }
                             }
                         }
@@ -201,11 +198,7 @@ pub(super) fn read_one(
                         Err(error) => {
                             resolve_initial_failure(&context, &work, &read, &flight, &stamp);
                             context.lan_business_failure(&did, client, &error)?;
-                            Ok(ReadResult::Failed(work.problem(
-                                "read",
-                                read.binding,
-                                &error,
-                            )))
+                            Ok(ReadResult::Failed(work.problem("read", binding, &error)))
                         }
                     }
                 }
@@ -227,14 +220,14 @@ pub(super) fn read_one(
         )
         .await;
         cleanup.retry = false;
-        if !work.life.is_closed() && work.contains(&read.id, read.binding) {
+        if !work.life.is_closed() && work.contains_input(&read.id, read.input) {
             let result = result?;
             // A stale failure cannot consume demand queued after that read began.
             let current = !matches!(result, ReadResult::Failed(_))
                 || !ordered
                 || work
                     .observations
-                    .read_is_current(&work, &read.id, read.binding, &stamp);
+                    .read_is_current_input(&work, &read.id, read.input, &stamp);
             if current {
                 record_battery_read(&work, &read, &result);
                 work.refresh

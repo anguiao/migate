@@ -14,17 +14,60 @@ use crate::{
             state::{Context, LogicalSink},
             work::DeviceWork,
         },
-        capability::PropertyBinding,
+        capability::{PropertyBinding, SharedFanSpeedBinding},
+        cloud::CloudError,
     },
 };
 
 type Property = (PropertyBinding, Value);
 
+/// One real native operation. Shared low speed carries both path encodings and
+/// resolves exactly one after the path is selected; actions and legacy commands
+/// never become synthetic PropertyBindings.
+pub(super) enum StepTarget {
+    Property(Property),
+    LowSpeed {
+        anchor: PropertyBinding,
+        speed: SharedFanSpeedBinding,
+    },
+}
+impl StepTarget {
+    pub(super) fn property(binding: PropertyBinding, value: Value) -> Self {
+        Self::Property((binding, value))
+    }
+    fn anchor(&self) -> PropertyBinding {
+        match self {
+            Self::Property((binding, _)) => *binding,
+            Self::LowSpeed { anchor, .. } => *anchor,
+        }
+    }
+    fn pending(&self) -> (PropertyBinding, Value, Option<String>) {
+        match self {
+            Self::Property((binding, value)) => (*binding, value.clone(), None),
+            Self::LowSpeed { anchor, speed } => {
+                let cloud = speed
+                    .cloud_action
+                    .map(|action| format!("cloud action {}.{}", action.siid, action.aiid));
+                let direct = speed
+                    .direct_command
+                    .as_ref()
+                    .map(|command| format!("direct {} {}", command.method, command.params()));
+                let native = [cloud, direct].into_iter().flatten().collect::<Vec<_>>();
+                (
+                    *anchor,
+                    Value::Null,
+                    Some(format!("low-speed {}", native.join(" or "))),
+                )
+            }
+        }
+    }
+}
+
 /// A function owns its encoding and validity; the sender owns transport and receipts.
 pub(super) trait StepRequest: Sized + 'static {
     type Step: Copy + 'static;
 
-    fn steps(&self) -> Result<VecDeque<(Self::Step, Property)>, CommandError>;
+    fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError>;
     /// Check operation ownership, including cancellation after a step was sent.
     fn current_result(&self) -> Result<(), CommandError>;
     /// Check whether this step may be sent now, without changing receipt settlement.
@@ -62,7 +105,7 @@ pub(super) async fn send<R: StepRequest>(
         .as_ref()
         .ok()
         .and_then(|steps| steps.front())
-        .map_or(info.binding, |(_, property)| property.0);
+        .map_or(info.binding, |(_, target)| target.anchor());
     let operation = context.commands.begin_operation(
         &work.key.id,
         id,
@@ -82,15 +125,28 @@ pub(super) async fn send<R: StepRequest>(
     let pending = Rc::new(RefCell::new(Some(request)));
     let mut first_step = true;
     while let Some((step, property)) = steps.pop_front() {
-        operation.0.pending_step(property.clone());
+        let (pending_binding, pending_value, pending_native) = property.pending();
+        operation
+            .0
+            .pending_step(pending_binding, pending_value, pending_native);
         let current: Rc<dyn Fn() -> Result<(), CommandError>> = {
             let pending = pending.clone();
             Rc::new(move || pending.borrow().as_ref().unwrap().send_result(step))
         };
         let mark: Rc<dyn Fn() -> Result<(), CommandError>> = {
             let pending = pending.clone();
-            let binding = property.0;
-            Rc::new(move || pending.borrow().as_ref().unwrap().mark_sent(step, binding))
+            let binding = property.anchor();
+            let work = work.clone();
+            let id = id.to_owned();
+            Rc::new(move || {
+                pending
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .mark_sent(step, binding)?;
+                work.invalidate_shared_read_for_function(&id);
+                Ok(())
+            })
         };
         let frame_current: Option<Rc<dyn Fn() -> bool>> = if first_step {
             let pending = pending.clone();
@@ -101,24 +157,41 @@ pub(super) async fn send<R: StepRequest>(
             None
         };
         loop {
-            match submit_properties(
-                &context,
-                &work,
-                &sink,
-                Batch {
-                    function_id: id,
-                    properties: vec![property.clone()],
-                    retain_feedback: false,
-                    after_write: None,
-                    gate: &gate,
-                    operation: &operation.0,
-                    mark: &mark,
-                    current: &current,
-                    frame_current: frame_current.as_ref(),
-                },
-            )
-            .await
-            {
+            let attempt = match &property {
+                StepTarget::Property((binding, value)) => {
+                    submit_properties(
+                        &context,
+                        &work,
+                        &sink,
+                        Batch {
+                            function_id: id,
+                            properties: vec![(*binding, value.clone())],
+                            retain_feedback: false,
+                            after_write: None,
+                            gate: &gate,
+                            operation: &operation.0,
+                            mark: &mark,
+                            current: &current,
+                            frame_current: frame_current.as_ref(),
+                        },
+                    )
+                    .await
+                }
+                StepTarget::LowSpeed { speed, .. } => {
+                    submit_low_speed(
+                        &context,
+                        &work,
+                        &sink,
+                        id,
+                        speed,
+                        &operation.0,
+                        &mark,
+                        &current,
+                    )
+                    .await
+                }
+            };
+            match attempt {
                 BatchAttempt::Withdrawn => {
                     if frame_current.as_ref().is_some_and(|current| !current()) {
                         let planned = pending.borrow().as_ref().unwrap().steps();
@@ -173,4 +246,124 @@ pub(super) async fn send<R: StepRequest>(
     operation.0.schedule_feedback(&context, &work, &sink);
     operation.0.finish(result);
     Ok(())
+}
+
+/// One accepted low-speed action/command. High/off remain ordinary boolean
+/// property writes on the standard path.
+#[allow(clippy::too_many_arguments)]
+async fn submit_low_speed(
+    context: &Rc<Context>,
+    work: &Rc<DeviceWork>,
+    sink: &Rc<LogicalSink>,
+    function_id: &str,
+    speed: &SharedFanSpeedBinding,
+    operation: &Rc<super::CommandOperation>,
+    mark: &Rc<dyn Fn() -> Result<(), CommandError>>,
+    current: &Rc<dyn Fn() -> Result<(), CommandError>>,
+) -> BatchAttempt {
+    use super::properties::{BatchAttempt, BatchReceipt, cloud_command_error, cloud_receipt};
+    use crate::xiaomi::adapter::model::{PathKind, StepReceipt};
+    let did = &work.key.id;
+    if let Err(error) = current() {
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(error),
+            maintenance: None,
+        });
+    }
+    if !alive(work, sink) {
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(CommandError::Cancelled),
+            maintenance: None,
+        });
+    }
+    let Some(path) = context.low_speed_path(did, function_id) else {
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(CommandError::Unavailable(
+                "no usable low-speed control path".into(),
+            )),
+            maintenance: None,
+        });
+    };
+    let crate::xiaomi::adapter::routing::ControlPath::Cloud(credentials) = path else {
+        // The direct legacy encoder is connected by the next slice. Never
+        // invent a property write or fall back to the hub for this operation.
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(CommandError::Unavailable(
+                "direct low-speed execution is not connected".into(),
+            )),
+            maintenance: None,
+        });
+    };
+    let Some(action) = speed.cloud_action else {
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(CommandError::Unavailable(
+                "cloud low-speed action is unavailable".into(),
+            )),
+            maintenance: None,
+        });
+    };
+    if !context.current_mijia(&credentials) {
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(CommandError::Unavailable("Mijia session changed".into())),
+            maintenance: None,
+        });
+    }
+    if let Err(error) = mark() {
+        return BatchAttempt::Settled(BatchReceipt {
+            result: Err(error),
+            maintenance: None,
+        });
+    }
+    operation.submitted(PathKind::Cloud);
+    let result = context
+        .mijia
+        .action(
+            &credentials.session,
+            did,
+            action.siid,
+            action.aiid,
+            Vec::new(),
+        )
+        .await;
+    let receipt = match &result {
+        Ok(action) if action.code == 0 => {
+            operation.receipts(vec![StepReceipt::Accepted]);
+            BatchReceipt {
+                result: Ok(()),
+                maintenance: None,
+            }
+        }
+        Ok(action) => {
+            let error = CloudError::new(
+                "invoke Xiaomi action",
+                crate::xiaomi::cloud::CloudErrorKind::Business(action.code),
+            );
+            operation.receipts(vec![cloud_receipt(&error)]);
+            context.cloud_error(
+                &credentials,
+                alive(work, sink).then_some(did.as_str()),
+                &error,
+            );
+            BatchReceipt {
+                result: Err(CommandError::Rejected(format!(
+                    "cloud code {}",
+                    action.code
+                ))),
+                maintenance: None,
+            }
+        }
+        Err(error) => {
+            operation.receipts(vec![cloud_receipt(error)]);
+            context.cloud_error(
+                &credentials,
+                alive(work, sink).then_some(did.as_str()),
+                error,
+            );
+            BatchReceipt {
+                result: Err(cloud_command_error(error)),
+                maintenance: None,
+            }
+        }
+    };
+    BatchAttempt::Settled(receipt)
 }

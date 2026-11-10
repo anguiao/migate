@@ -17,6 +17,60 @@ impl Context {
             .get(did)
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = &work
+            && let Some((id, power)) =
+                work.native
+                    .device()
+                    .functions()
+                    .iter()
+                    .find_map(|function| {
+                        let heater = function.heater()?;
+                        (heater.power_refresh_trigger() == Some(binding))
+                            .then(|| (function.id(), heater.power()))
+                    })
+        {
+            if !cached_report && value.is_u64() && self.accept_state_notification(work, id, source)
+            {
+                work.refresh_property(id, power);
+            }
+            return;
+        }
+        if let Some(work) = &work
+            && let Some(function) = work
+                .native
+                .device()
+                .functions()
+                .iter()
+                .find(|function| work.is_standard_mode_binding(function.id(), binding))
+        {
+            if self.accept_state_notification(work, function.id(), source)
+                && work.observe_standard_mode(
+                    function,
+                    binding,
+                    value,
+                    Observation {
+                        source: source.kind(),
+                        source_time: update_time,
+                        received_at: self.clock.unix_now(),
+                    },
+                    if cached_report {
+                        Origin::Cache
+                    } else {
+                        Origin::Notification
+                    },
+                )
+            {
+                if !cached_report
+                    && value.as_u64().is_some()
+                    && let Some(scope) = work.related_scope_for_notification(function.id(), binding)
+                {
+                    work.refresh_related_inputs(scope);
+                }
+                self.update_routing("native mode property observed");
+                self.status_changed.notify(usize::MAX);
+            }
+            return;
+        }
+        if let Some(work) = &work
             && let Some(function) = work.native.device().functions().iter().find(|function| {
                 function.air_conditioner().is_some()
                     && function.observation_bindings().contains(&binding)
@@ -75,7 +129,7 @@ impl Context {
             if let Ok(value) = DeviceWork::decode_heater(function, binding, value)
                 && self.accept_state_notification(work, function.id(), source)
             {
-                work.observe_heater(
+                let applied = work.observe_heater(
                     function,
                     binding,
                     value,
@@ -91,6 +145,12 @@ impl Context {
                     },
                 );
                 self.update_routing("heater property observed");
+                if !cached_report
+                    && applied
+                    && let Some(scope) = work.related_scope_for_notification(function.id(), binding)
+                {
+                    work.refresh_related_inputs(scope);
+                }
                 self.status_changed.notify(usize::MAX);
             }
             return;
@@ -103,7 +163,7 @@ impl Context {
             if let Ok(value) = DeviceWork::decode_fan(function, binding, value)
                 && self.accept_state_notification(work, function.id(), source)
             {
-                work.observe_fan(
+                let applied = work.observe_fan(
                     function,
                     binding,
                     value,
@@ -119,6 +179,12 @@ impl Context {
                     },
                 );
                 self.update_routing("fan property observed");
+                if !cached_report
+                    && applied
+                    && let Some(scope) = work.related_scope_for_notification(function.id(), binding)
+                {
+                    work.refresh_related_inputs(scope);
+                }
                 self.status_changed.notify(usize::MAX);
             }
             return;

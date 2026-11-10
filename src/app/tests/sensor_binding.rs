@@ -130,6 +130,8 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
                 sync_limited_reason: None,
                 battery_problem: None,
                 last_switch_reason: None,
+                standard_mode: None,
+                shared_feedback: None,
                 commands: Vec::new(),
                 functions: vec![crate::xiaomi::adapter::FunctionStatus {
                     function: "temperature:3:1001".into(),

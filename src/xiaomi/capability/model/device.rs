@@ -183,11 +183,14 @@ impl ParsedDevice {
             }
             if let Some(fan) = function.fan() {
                 let service = fan.power().siid;
+                let speed_owned = fan
+                    .standard_speed()
+                    .is_none_or(|speed| speed.property().siid == service);
                 if fan.swing().is_some_and(|binding| binding.siid != service)
                     || fan
                         .mode()
                         .is_some_and(|binding| binding.property().siid != service)
-                    || fan.mode().is_none() && fan.speed().property().siid != service
+                    || fan.mode().is_none() && !speed_owned
                 {
                     return Err(CapabilityError::InvalidDescription("fan binding ownership"));
                 }

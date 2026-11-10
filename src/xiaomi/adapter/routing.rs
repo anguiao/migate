@@ -345,6 +345,52 @@ impl Context {
         }
         self.control_read_path(did)
     }
+    /// Low speed is only executable by the direct legacy command or cloud
+    /// action. The hub is never a candidate, and high/off stay standard writes.
+    pub(super) fn low_speed_path(&self, did: &str, _id: &str) -> Option<ControlPath> {
+        // The direct legacy execution/admission is connected in the next
+        // slice. Until then the cloud action is the only implemented branch.
+        self.cloud_candidate(did, true)
+            .ok()
+            .and_then(|()| self.mijia_path())
+            .map(ControlPath::Cloud)
+    }
+    /// Shared legacy feedback is a physical-device read owned by direct/cloud,
+    /// never a hub standard-property read.
+    pub(super) fn shared_feedback_read_path(&self, did: &str) -> Option<ControlPath> {
+        if self.is_virtual_group(did) {
+            return None;
+        }
+        let has_plan = self
+            .live
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.as_ref())
+            .is_some_and(|work| work.native.plan().shared_feedback().is_some());
+        if !has_plan {
+            return None;
+        }
+        // The direct `get_prop` executor is connected in the next slice. Until
+        // then the same cloud RPC remains the only implemented group path.
+        self.cloud_candidate(did, true)
+            .ok()
+            .and_then(|()| self.mijia_path())
+            .map(ControlPath::Cloud)
+    }
+    pub(super) fn read_path_for_input(
+        &self,
+        did: &str,
+        id: &str,
+        input: crate::xiaomi::capability::ReadInput,
+    ) -> Option<ControlPath> {
+        match input {
+            crate::xiaomi::capability::ReadInput::Property(_) => self.read_path_for(did, id),
+            crate::xiaomi::capability::ReadInput::SharedFeedback => {
+                self.shared_feedback_read_path(did)
+            }
+        }
+    }
     pub(super) fn read_path_for(&self, did: &str, id: &str) -> Option<ControlPath> {
         if self.is_virtual_group(did) {
             return None;

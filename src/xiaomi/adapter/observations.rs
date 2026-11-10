@@ -1,11 +1,14 @@
 use super::{model::PathKind, work::DeviceWork};
 use crate::device::{CommandError, CommandRequest};
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::capability::{PropertyBinding, ReadInput};
 use std::{cell::RefCell, collections::BTreeMap};
 
-pub(super) type PropertyKey = (String, u32, u32);
+pub(super) type PropertyKey = (String, ReadInput);
 pub(super) fn key(id: &str, binding: PropertyBinding) -> PropertyKey {
-    (id.into(), binding.siid, binding.piid)
+    input_key(id, ReadInput::Property(binding))
+}
+pub(super) fn input_key(id: &str, input: ReadInput) -> PropertyKey {
+    (id.into(), input)
 }
 
 #[derive(Clone, Copy)]
@@ -15,6 +18,7 @@ pub(super) enum Origin {
     Cache,
 }
 
+#[derive(Clone, Copy)]
 pub(super) struct Observation {
     pub(super) source: PathKind,
     pub(super) source_time: Option<i64>,
@@ -73,23 +77,36 @@ impl Observations {
             .get(&key(id, binding))
             .is_some_and(|counts| counts.unconfirmed_write)
     }
+    pub(super) fn invalidate_input(&self, id: &str, input: ReadInput) {
+        let mut channels = self.channels.borrow_mut();
+        let counts = channels.entry(input_key(id, input)).or_default();
+        counts.observed += 1;
+        counts.unconfirmed_write = true;
+    }
     pub(super) fn function_source_changed(&self, id: &str) {
-        for ((channel, _, _), counts) in self.channels.borrow_mut().iter_mut() {
+        for ((channel, _), counts) in self.channels.borrow_mut().iter_mut() {
             if channel == id {
                 counts.source = counts.source.wrapping_add(1);
             }
         }
     }
     pub(super) fn refresh(&self, id: &str, binding: PropertyBinding) {
+        self.refresh_input(id, ReadInput::Property(binding));
+    }
+    pub(super) fn refresh_input(&self, id: &str, input: ReadInput) {
         self.channels
             .borrow_mut()
-            .entry(key(id, binding))
+            .entry(input_key(id, input))
             .or_default()
             .refresh += 1;
     }
+    #[cfg(test)]
     pub(super) fn read_stamp(&self, id: &str, binding: PropertyBinding) -> ReadStamp {
+        self.read_stamp_input(id, ReadInput::Property(binding))
+    }
+    pub(super) fn read_stamp_input(&self, id: &str, input: ReadInput) -> ReadStamp {
         let mut channels = self.channels.borrow_mut();
-        let counts = channels.entry(key(id, binding)).or_default();
+        let counts = channels.entry(input_key(id, input)).or_default();
         ReadStamp {
             channel_source: counts.source,
             observed: counts.observed,
@@ -110,8 +127,17 @@ impl Observations {
         binding: PropertyBinding,
         stamp: &ReadStamp,
     ) -> bool {
+        self.read_is_current_input(work, id, ReadInput::Property(binding), stamp)
+    }
+    pub(super) fn read_is_current_input(
+        &self,
+        work: &DeviceWork,
+        id: &str,
+        input: ReadInput,
+        stamp: &ReadStamp,
+    ) -> bool {
         let mut channels = self.channels.borrow_mut();
-        let counts = channels.entry(key(id, binding)).or_default();
+        let counts = channels.entry(input_key(id, input)).or_default();
         !work.life.is_closed()
             && counts.source == stamp.channel_source
             && counts.observed == stamp.observed
@@ -182,15 +208,26 @@ impl Observations {
         binding: PropertyBinding,
         origin: Origin,
     ) {
+        self.observed_input(work, id, ReadInput::Property(binding), origin);
+    }
+    pub(super) fn observed_input(
+        &self,
+        work: &DeviceWork,
+        id: &str,
+        input: ReadInput,
+        origin: Origin,
+    ) {
         if work.life.is_closed() {
             return;
         }
-        work.resolve_initial(id, binding);
+        if let Some(binding) = input.property() {
+            work.resolve_initial(id, binding);
+        }
         if matches!(origin, Origin::Cache) {
             return;
         }
         let mut channels = self.channels.borrow_mut();
-        let counts = channels.entry(key(id, binding)).or_default();
+        let counts = channels.entry(input_key(id, input)).or_default();
         counts.observed += 1;
         counts.notified += u64::from(matches!(origin, Origin::Notification));
         counts.fresh = true;

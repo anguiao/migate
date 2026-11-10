@@ -1,7 +1,8 @@
 use super::{
     commands::DeviceWriteGate,
     model::{
-        AdapterError, NativeModeObservation, PathKind, SubscriptionBinding, SubscriptionStatus,
+        AdapterError, NativeModeObservation, NativeValueObservation, PathKind, SubscriptionBinding,
+        SubscriptionStatus,
     },
     notifications::NotificationSource,
     observations::{Observation, Observations, Origin},
@@ -10,7 +11,9 @@ use super::{
 };
 use crate::{
     device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
-    xiaomi::capability::{NativeDescription, ParsedFunction},
+    xiaomi::capability::{
+        NativeDescription, ParsedFunction, ReadInput, RelatedScope, SHARED_FEEDBACK_CHANNEL,
+    },
     xiaomi::{
         capability::{EventBinding, PropertyBinding},
         central::SessionHandle,
@@ -52,6 +55,16 @@ pub(super) struct SourceRef {
     pub(super) sink: Rc<LogicalSink>,
 }
 
+#[derive(Default)]
+pub(super) struct SharedFeedbackState {
+    pub(super) pending: bool,
+    pub(super) native_mode: Option<NativeValueObservation>,
+    pub(super) fan_speed_index: Option<NativeValueObservation>,
+    pub(super) temperature: Option<NativeValueObservation>,
+    pub(super) source: Option<super::model::PathKind>,
+    pub(super) fan_reasons: BTreeMap<crate::xiaomi::capability::SharedFanChannel, String>,
+}
+
 /// One installed native runtime: the immutable native control description and
 /// the subscription/refresh/observation state attached to it. The logical
 /// sink below is only the current delivery target and is swapped by a
@@ -73,6 +86,9 @@ pub(super) struct DeviceWork {
     mcn04_problems: RefCell<BTreeMap<super::observations::PropertyKey, String>>,
     mcn04_ranges: RefCell<BTreeMap<String, String>>,
     fan_modes: RefCell<BTreeMap<String, NativeModeObservation>>,
+    shared_feedback: RefCell<SharedFeedbackState>,
+    standard_mode: RefCell<Option<NativeValueObservation>>,
+    shared_read_path: RefCell<Option<Option<super::routing::ControlPath>>>,
     state_read_paths: RefCell<BTreeMap<String, Option<super::routing::ControlPath>>>,
     condition_generation: Cell<u64>,
     pub(super) refresh: RefCell<RefreshState>,
@@ -120,6 +136,9 @@ impl DeviceWork {
             mcn04_problems: RefCell::new(BTreeMap::new()),
             mcn04_ranges: RefCell::new(BTreeMap::new()),
             fan_modes: RefCell::new(BTreeMap::new()),
+            shared_feedback: RefCell::new(SharedFeedbackState::default()),
+            standard_mode: RefCell::new(None),
+            shared_read_path: RefCell::new(None),
             state_read_paths: RefCell::new(BTreeMap::new()),
             condition_generation: Cell::new(0),
             refresh: RefCell::new(RefreshState::new(initial_reads_changed)),
@@ -134,6 +153,46 @@ impl DeviceWork {
     }
     pub(super) fn fan_mode_observation(&self, id: &str) -> NativeModeObservation {
         self.fan_modes.borrow().get(id).copied().unwrap_or_default()
+    }
+    pub(super) fn shared_feedback(&self) -> std::cell::Ref<'_, SharedFeedbackState> {
+        self.shared_feedback.borrow()
+    }
+    pub(super) fn standard_mode_value(&self) -> Option<NativeValueObservation> {
+        self.standard_mode.borrow().clone()
+    }
+    pub(super) fn is_standard_mode_binding(
+        &self,
+        function: &str,
+        binding: PropertyBinding,
+    ) -> bool {
+        self.native
+            .plan()
+            .standard_mode()
+            .is_some_and(|mode| mode.function == function && mode.binding == binding)
+    }
+    pub(super) fn shared_feedback_plan(&self) -> bool {
+        self.native.plan().shared_feedback().is_some()
+    }
+    pub(super) fn contains_input(&self, id: &str, input: ReadInput) -> bool {
+        match input {
+            ReadInput::Property(binding) => self.contains(id, binding),
+            ReadInput::SharedFeedback => {
+                id == SHARED_FEEDBACK_CHANNEL && self.shared_feedback_plan()
+            }
+        }
+    }
+    pub(super) fn refresh_input(&self, id: &str, input: ReadInput) {
+        self.observations.refresh_input(id, input);
+        self.refresh.borrow_mut().request_input(id, input, false);
+        self.refresh_changed.notify(usize::MAX);
+    }
+    pub(super) fn problem_input(
+        &self,
+        kind: &str,
+        input: ReadInput,
+        error: &impl std::fmt::Display,
+    ) -> String {
+        format!("{kind} {input:?} failed: {error}")
     }
     pub(super) fn current_sink(&self) -> Rc<LogicalSink> {
         self.sink.borrow().clone()
@@ -200,8 +259,18 @@ impl DeviceWork {
             .iter()
             .flat_map(ParsedFunction::observation_bindings)
             .collect::<Vec<_>>();
+        values.extend(
+            self.native
+                .device()
+                .functions()
+                .iter()
+                .filter_map(|function| function.heater()?.power_refresh_trigger()),
+        );
         if let Some(trigger) = self.native.device().refresh_trigger() {
             values.push(trigger);
+        }
+        if let Some(mode) = self.native.plan().standard_mode() {
+            values.push(mode.binding);
         }
         values
     }
@@ -289,11 +358,10 @@ impl DeviceWork {
                     .air_conditioner_source_changed();
             }
             if function.heater().is_some() {
-                let heater = self.physical().function(id).unwrap();
-                heater.heater_source_changed();
-                // The shared legacy temperature group is not connected yet, so
-                // the built-in reading stays unavailable until a valid source exists.
-                heater.set_heater_temperature_source_available(false);
+                self.physical()
+                    .function(id)
+                    .unwrap()
+                    .heater_source_changed();
             }
             for binding in function.observation_bindings() {
                 self.refresh.borrow_mut().request_baseline(id, binding);
@@ -394,10 +462,108 @@ impl DeviceWork {
             for binding in function.observation_bindings() {
                 self.refresh_property(function.id(), binding);
             }
+            if let Some(heater) = function.heater() {
+                for binding in heater.diagnostic_bindings() {
+                    self.refresh_property(function.id(), binding);
+                }
+            }
         }
         if let Some(binding) = self.battery_binding() {
             self.refresh_property(BATTERY_CHANNEL, binding);
         }
+        self.refresh_shared_feedback();
+    }
+    /// One related-read demand selected by the v13 source plan. Only a real
+    /// new notification or a relevant write with an accepted/uncertain step
+    /// calls this; ordinary reads never trigger it, so periodic reads cannot loop.
+    pub(super) fn refresh_related_inputs(&self, scope: RelatedScope) {
+        if self.life.is_closed() {
+            return;
+        }
+        let Some(related) = self.native.plan().related() else {
+            return;
+        };
+        for input in related.inputs(scope) {
+            self.refresh_property(&input.function, input.binding);
+        }
+        if related.includes_shared() {
+            self.observations
+                .invalidate_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
+            self.shared_feedback.borrow_mut().pending = true;
+            self.refresh_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
+        }
+    }
+    pub(super) fn related_scope_for_command(
+        &self,
+        channel: &str,
+        target: &super::model::CommandTarget,
+    ) -> Option<RelatedScope> {
+        use crate::device::HeaterCommand;
+        let function = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == channel)?;
+        if self.native.plan().related().is_none()
+            || function.lighting().is_some()
+            || function.state().is_some()
+            || function.measurement().is_some()
+            || function.curtain().is_some()
+            || function.air_conditioner().is_some()
+        {
+            return None;
+        }
+        match target {
+            super::model::CommandTarget::Heater(HeaterCommand::Temperature(_)) => {
+                Some(RelatedScope::Temperature)
+            }
+            super::model::CommandTarget::Heater(_) | super::model::CommandTarget::Fan(_) => {
+                Some(RelatedScope::All)
+            }
+            _ => None,
+        }
+    }
+    /// Invalidate an earlier shared read at the actual send boundary. This
+    /// changes only the observation generation; it does not queue a read or
+    /// pretend a new state was obtained.
+    pub(super) fn invalidate_shared_read_for_function(&self, id: &str) {
+        if !self.shared_feedback_plan() {
+            return;
+        }
+        let relevant = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .is_some_and(|function| function.heater().is_some() || function.fan().is_some());
+        if relevant {
+            self.observations
+                .invalidate_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
+        }
+    }
+    pub(super) fn related_scope_for_notification(
+        &self,
+        channel: &str,
+        binding: PropertyBinding,
+    ) -> Option<RelatedScope> {
+        self.native
+            .plan()
+            .related()
+            .filter(|related| {
+                related
+                    .inputs(RelatedScope::All)
+                    .iter()
+                    .any(|input| input.function == channel && input.binding == binding)
+            })
+            .map(|_| RelatedScope::All)
+    }
+    pub(super) fn refresh_shared_feedback(&self) {
+        if self.life.is_closed() || !self.shared_feedback_plan() {
+            return;
+        }
+        self.refresh_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
     }
     pub(super) fn refresh_property(&self, id: &str, binding: PropertyBinding) {
         self.observations.refresh(id, binding);
@@ -420,9 +586,14 @@ impl DeviceWork {
         if id == BATTERY_CHANNEL {
             return self.battery_binding() == Some(binding);
         }
-        self.native.device().functions().iter().any(|function| {
-            function.id() == id && function.observation_bindings().contains(&binding)
-        })
+        self.is_standard_mode_binding(id, binding)
+            || self.native.device().functions().iter().any(|function| {
+                function.id() == id
+                    && (function.observation_bindings().contains(&binding)
+                        || function
+                            .heater()
+                            .is_some_and(|heater| heater.diagnostic_bindings().contains(&binding)))
+            })
     }
 }
 pub(super) async fn run(

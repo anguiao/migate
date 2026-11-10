@@ -1,4 +1,5 @@
 use super::{CapabilityError, NumericFormat, PropertyBinding, numeric::raw_integer};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,11 +161,112 @@ impl FanSpeedBinding {
     }
 }
 
+/// A no-argument MIoT action that is a real native operation, never a property.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionBinding {
+    pub siid: u32,
+    pub aiid: u32,
+}
+impl ActionBinding {
+    pub(crate) fn new(siid: u32, aiid: u32) -> Result<Self, CapabilityError> {
+        if siid == 0 || aiid == 0 {
+            return Err(CapabilityError::InvalidDescription("action binding"));
+        }
+        Ok(Self { siid, aiid })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum LegacyArgument {
+    String(String),
+    Integer(i64),
+}
+
+/// One built-in miIO command declared by a patch. It carries its native
+/// method and arguments instead of pretending to be a property write.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyCommandBinding {
+    pub method: String,
+    pub args: Vec<LegacyArgument>,
+}
+impl LegacyCommandBinding {
+    pub(crate) fn new(
+        method: impl Into<String>,
+        args: Vec<LegacyArgument>,
+    ) -> Result<Self, CapabilityError> {
+        let method = method.into();
+        if method.is_empty() || method.chars().any(char::is_control) {
+            return Err(CapabilityError::InvalidDescription("legacy command"));
+        }
+        Ok(Self { method, args })
+    }
+    #[allow(dead_code)] // The direct legacy executor is connected in the next slice.
+    pub(crate) fn params(&self) -> Value {
+        Value::Array(
+            self.args
+                .iter()
+                .map(|argument| match argument {
+                    LegacyArgument::String(value) => Value::String(value.clone()),
+                    LegacyArgument::Integer(value) => Value::from(*value),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Which digit of the shared `fan_speed_idx` belongs to this fan.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharedFanChannel {
+    Blow,
+    Ventilation,
+}
+/// A two-level fan whose selected level comes from the shared legacy feedback
+/// group. High speed is the real boolean power property; low speed is a native
+/// action or built-in command, so no synthetic speed property exists.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedFanSpeedBinding {
+    pub channel: SharedFanChannel,
+    pub cloud_action: Option<ActionBinding>,
+    pub direct_command: Option<LegacyCommandBinding>,
+}
+impl SharedFanSpeedBinding {
+    pub(crate) fn new(
+        channel: SharedFanChannel,
+        cloud_action: Option<ActionBinding>,
+        direct_command: Option<LegacyCommandBinding>,
+    ) -> Result<Self, CapabilityError> {
+        if cloud_action.is_none() && direct_command.is_none() {
+            return Err(CapabilityError::InvalidDescription(
+                "shared fan speed has no low-level operation",
+            ));
+        }
+        Ok(Self {
+            channel,
+            cloud_action,
+            direct_command,
+        })
+    }
+    pub const fn count(&self) -> u8 {
+        2
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FanSpeedSource {
+    Property(FanSpeedBinding),
+    Shared(SharedFanSpeedBinding),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FanBindings {
     power: PropertyBinding,
     mode: Option<FanModeBinding>,
-    speed: FanSpeedBinding,
+    speed: FanSpeedSource,
     swing: Option<PropertyBinding>,
 }
 impl FanBindings {
@@ -177,8 +279,16 @@ impl FanBindings {
         Self {
             power,
             mode,
-            speed,
+            speed: FanSpeedSource::Property(speed),
             swing,
+        }
+    }
+    pub(crate) fn shared(power: PropertyBinding, speed: SharedFanSpeedBinding) -> Self {
+        Self {
+            power,
+            mode: None,
+            speed: FanSpeedSource::Shared(speed),
+            swing: None,
         }
     }
     pub fn power(&self) -> PropertyBinding {
@@ -187,8 +297,32 @@ impl FanBindings {
     pub fn mode(&self) -> Option<&FanModeBinding> {
         self.mode.as_ref()
     }
+    /// Only a standard native speed property can use this accessor.
     pub fn speed(&self) -> &FanSpeedBinding {
-        &self.speed
+        match &self.speed {
+            FanSpeedSource::Property(speed) => speed,
+            FanSpeedSource::Shared(_) => {
+                panic!("a shared feedback fan has no native speed property")
+            }
+        }
+    }
+    pub(crate) fn standard_speed(&self) -> Option<&FanSpeedBinding> {
+        match &self.speed {
+            FanSpeedSource::Property(speed) => Some(speed),
+            FanSpeedSource::Shared(_) => None,
+        }
+    }
+    pub(crate) fn shared_speed(&self) -> Option<&SharedFanSpeedBinding> {
+        match &self.speed {
+            FanSpeedSource::Property(_) => None,
+            FanSpeedSource::Shared(speed) => Some(speed),
+        }
+    }
+    pub fn speed_count(&self) -> u8 {
+        match &self.speed {
+            FanSpeedSource::Property(speed) => speed.count(),
+            FanSpeedSource::Shared(speed) => speed.count(),
+        }
     }
     pub fn swing(&self) -> Option<PropertyBinding> {
         self.swing
@@ -197,7 +331,7 @@ impl FanBindings {
         [
             Some(self.power),
             self.mode.as_ref().map(FanModeBinding::property),
-            Some(self.speed.property()),
+            self.standard_speed().map(FanSpeedBinding::property),
             self.swing,
         ]
         .into_iter()

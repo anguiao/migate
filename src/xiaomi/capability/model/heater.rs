@@ -6,6 +6,10 @@ use super::{CapabilityError, PropertyBinding, ThermostatTemperatureBinding};
 pub(crate) struct HeaterBindings {
     power: PropertyBinding,
     temperature: ThermostatTemperatureBinding,
+    /// A real standard mode property kept only as a native diagnostic source.
+    diagnostic_mode: Option<PropertyBinding>,
+    /// A notification-only input that can change the real heater power.
+    power_refresh_trigger: Option<PropertyBinding>,
 }
 impl HeaterBindings {
     pub(crate) fn new(
@@ -20,7 +24,30 @@ impl HeaterBindings {
                 "heater property bindings",
             ));
         }
-        Ok(Self { power, temperature })
+        Ok(Self {
+            power,
+            temperature,
+            diagnostic_mode: None,
+            power_refresh_trigger: None,
+        })
+    }
+    pub(crate) fn set_diagnostic_mode(
+        &mut self,
+        mode: PropertyBinding,
+    ) -> Result<(), CapabilityError> {
+        if !valid_property(mode) || mode == self.power || mode == self.temperature.property() {
+            return Err(CapabilityError::InvalidDescription(
+                "heater diagnostic mode binding",
+            ));
+        }
+        self.diagnostic_mode = Some(mode);
+        Ok(())
+    }
+    pub(crate) fn set_power_refresh_trigger(&mut self, trigger: Option<PropertyBinding>) {
+        self.power_refresh_trigger = trigger;
+    }
+    pub(crate) fn power_refresh_trigger(&self) -> Option<PropertyBinding> {
+        self.power_refresh_trigger
     }
     pub(crate) fn function_id(&self) -> String {
         format!("heater:{}", self.power.siid)
@@ -31,10 +58,19 @@ impl HeaterBindings {
     pub(crate) fn temperature(&self) -> &ThermostatTemperatureBinding {
         &self.temperature
     }
+    pub(crate) fn diagnostic_mode(&self) -> Option<PropertyBinding> {
+        self.diagnostic_mode
+    }
     pub(crate) fn observation_bindings(&self) -> Vec<PropertyBinding> {
         vec![self.power, self.temperature.property()]
     }
+    pub(crate) fn diagnostic_bindings(&self) -> Vec<PropertyBinding> {
+        self.diagnostic_mode.into_iter().collect()
+    }
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
-        self.observation_bindings()
+        let mut bindings = self.observation_bindings();
+        bindings.extend(self.diagnostic_mode);
+        bindings.extend(self.power_refresh_trigger);
+        bindings
     }
 }

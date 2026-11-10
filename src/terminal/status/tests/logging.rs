@@ -79,6 +79,8 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
         sync_limited_reason: None,
         battery_problem: None,
         last_switch_reason: None,
+        standard_mode: None,
+        shared_feedback: None,
         commands: vec![ChannelCommands {
             light_actions: None,
             channel: "main".into(),

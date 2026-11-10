@@ -9,7 +9,7 @@ impl RefreshState {
         self.complete(
             Refresh {
                 id: id.to_owned(),
-                binding,
+                input: ReadInput::Property(binding),
                 attempts: 0,
                 ready_at: Duration::ZERO,
                 periodic: false,
@@ -27,10 +27,10 @@ fn dirty_again_produces_exactly_one_follow_up_read() {
     let binding = PropertyBinding { siid: 2, piid: 1 };
     let key = super::super::observations::key("main", binding);
     state.dirty_again.insert(key.clone());
-    assert!(state.finish_dirty("main", binding));
+    assert!(state.finish_dirty_input("main", ReadInput::Property(binding)));
     assert!(!state.dirty_again.contains(&key));
     assert_eq!(state.pending.len(), 1);
-    assert!(!state.finish_dirty("main", binding));
+    assert!(!state.finish_dirty_input("main", ReadInput::Property(binding)));
     assert_eq!(state.pending.len(), 1);
 }
 
@@ -44,21 +44,21 @@ fn periodic_read_uses_the_selected_route_and_yields_to_foreground_reads() {
     let (foreground, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(cloud_path()),
+            |_, _| Some(cloud_path()),
             ReadQueue::Cloud,
             ReadKind::Any,
         )
         .unwrap();
-    assert_eq!(foreground.binding, other);
+    assert_eq!(foreground.input.property(), Some(other));
     let (periodic, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(cloud_path()),
+            |_, _| Some(cloud_path()),
             ReadQueue::Cloud,
             ReadKind::Any,
         )
         .unwrap();
-    assert_eq!(periodic.binding, binding);
+    assert_eq!(periodic.input.property(), Some(binding));
     assert!(periodic.periodic);
 }
 
@@ -77,7 +77,7 @@ fn failed_poll_waits_for_the_next_period() {
     let (read, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(path.clone()),
+            |_, _| Some(path.clone()),
             ReadQueue::Direct,
             ReadKind::Any,
         )
@@ -108,7 +108,7 @@ fn satisfying_one_property_baseline_preserves_the_others() {
     let (reserved, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(cloud_path()),
+            |_, _| Some(cloud_path()),
             ReadQueue::Cloud,
             ReadKind::Any,
         )
@@ -147,7 +147,7 @@ fn a_satisfied_reserved_baseline_is_not_requeued_when_withdrawn() {
     let (read, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(cloud_path()),
+            |_, _| Some(cloud_path()),
             ReadQueue::Cloud,
             ReadKind::Any,
         )
@@ -202,7 +202,7 @@ fn an_unpolled_baseline_lease_is_not_returned_after_notification() {
         state
             .reserve(
                 Duration::ZERO,
-                |_| Some(cloud_path()),
+                |_, _| Some(cloud_path()),
                 ReadQueue::Cloud,
                 ReadKind::Any,
             )
@@ -241,7 +241,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
         let (read, _) = state
             .reserve(
                 Duration::ZERO,
-                |_| Some(cloud_path()),
+                |_, _| Some(cloud_path()),
                 ReadQueue::Cloud,
                 ReadKind::Any,
             )
@@ -258,7 +258,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     let (old, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(cloud_path()),
+            |_, _| Some(cloud_path()),
             ReadQueue::Cloud,
             ReadKind::Any,
         )
@@ -271,7 +271,7 @@ fn baseline_satisfaction_preserves_ordinary_and_new_source_demands() {
     let (new, _) = state
         .reserve(
             Duration::ZERO,
-            |_| Some(cloud_path()),
+            |_, _| Some(cloud_path()),
             ReadQueue::Cloud,
             ReadKind::Any,
         )
@@ -296,7 +296,7 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
         state
             .reserve(
                 Duration::ZERO,
-                |_| Some(cloud_path()),
+                |_, _| Some(cloud_path()),
                 ReadQueue::Cloud,
                 ReadKind::Any,
             )
@@ -325,7 +325,7 @@ fn returned_ordinary_demand_survives_a_pending_baseline(drop_lease: bool) {
         state
             .reserve(
                 Duration::ZERO,
-                |_| Some(cloud_path()),
+                |_, _| Some(cloud_path()),
                 ReadQueue::Cloud,
                 ReadKind::Any
             )

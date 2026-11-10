@@ -1,5 +1,6 @@
 mod air_conditioner;
 pub(crate) mod app_source;
+mod bhf;
 mod bootstrap;
 mod cloud_batch;
 mod cloud_refresh;

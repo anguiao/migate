@@ -121,3 +121,117 @@ fn temperature(value: &Value, min: i64, max: i64) -> Option<i64> {
     let value = value.as_f64()?;
     (value.fract() == 0.0 && ((min as f64)..=(max as f64)).contains(&value)).then_some(value as i64)
 }
+
+/// One field of the shared legacy feedback group. `raw` is retained even when
+/// the reported value is not usable, so diagnostics never erase the input.
+pub(in crate::xiaomi) const SHARED_FIELDS: [&str; 3] = ["bh_mode", "fan_speed_idx", "temperature"];
+
+#[derive(Clone, Debug, PartialEq)]
+pub(in crate::xiaomi) struct SharedField<T> {
+    pub(in crate::xiaomi) value: Option<T>,
+    pub(in crate::xiaomi) raw: Value,
+    pub(in crate::xiaomi) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(in crate::xiaomi) struct SharedFanBit {
+    /// Logical two-level fan speed: 1 = low, 2 = high.
+    pub(in crate::xiaomi) level: Option<u8>,
+    pub(in crate::xiaomi) reason: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(in crate::xiaomi) struct SharedFanSpeedReading {
+    pub(in crate::xiaomi) raw: Value,
+    pub(in crate::xiaomi) blow: SharedFanBit,
+    pub(in crate::xiaomi) ventilation: SharedFanBit,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(in crate::xiaomi) struct SharedFeedbackReading {
+    pub(in crate::xiaomi) native_mode: SharedField<String>,
+    pub(in crate::xiaomi) fan_speed: SharedFanSpeedReading,
+    pub(in crate::xiaomi) temperature: SharedField<f64>,
+}
+
+/// Validate the group shape at the transport boundary. A structurally
+/// different response is a read failure; a well-shaped field with an invalid
+/// value is an explicit unknown that only affects its consumers.
+pub(in crate::xiaomi) fn decode_shared_feedback(
+    result: &Value,
+) -> Result<SharedFeedbackReading, ()> {
+    let values = result
+        .as_array()
+        .filter(|values| values.len() == 3)
+        .ok_or(())?;
+    let native_mode = SharedField {
+        value: values[0].as_str().map(str::to_owned),
+        raw: values[0].clone(),
+        reason: values[0]
+            .as_str()
+            .is_none()
+            .then(|| format!("invalid bh_mode value {}", values[0])),
+    };
+    let fan_speed = decode_fan_speed(&values[1]);
+    let temperature = match values[2].as_f64() {
+        Some(value) if value.is_finite() => SharedField {
+            value: Some(value),
+            raw: values[2].clone(),
+            reason: None,
+        },
+        _ => SharedField {
+            value: None,
+            raw: values[2].clone(),
+            reason: Some(format!("invalid temperature value {}", values[2])),
+        },
+    };
+    Ok(SharedFeedbackReading {
+        native_mode,
+        fan_speed,
+        temperature,
+    })
+}
+
+fn decode_fan_speed(raw: &Value) -> SharedFanSpeedReading {
+    let Some(value) = raw.as_i64().filter(|value| *value >= 0) else {
+        let reason = Some(format!("invalid fan_speed_idx value {raw}"));
+        return SharedFanSpeedReading {
+            raw: raw.clone(),
+            blow: SharedFanBit {
+                level: None,
+                reason: reason.clone(),
+            },
+            ventilation: SharedFanBit {
+                level: None,
+                reason,
+            },
+        };
+    };
+    let value = value as u64;
+    SharedFanSpeedReading {
+        raw: raw.clone(),
+        blow: decode_fan_bit((value / 10 % 10) as u32, "blow"),
+        ventilation: decode_fan_bit((value % 10) as u32, "ventilation"),
+    }
+}
+
+fn decode_fan_bit(code: u32, channel: &str) -> SharedFanBit {
+    match code {
+        1 => SharedFanBit {
+            level: Some(1),
+            reason: None,
+        },
+        3 => SharedFanBit {
+            level: Some(2),
+            reason: None,
+        },
+        0 => SharedFanBit {
+            level: None,
+            reason: Some(format!("{channel} speed code is 0")),
+        },
+        _ => SharedFanBit {
+            level: None,
+            reason: Some(format!("unrecognized {channel} speed code {code}")),
+        },
+    }
+}

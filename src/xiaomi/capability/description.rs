@@ -96,7 +96,14 @@ pub(super) struct Service<'a> {
     pub iid: u32,
     pub urn: Urn<'a>,
     pub properties: Vec<Property<'a>>,
+    pub actions: Vec<Action<'a>>,
     pub events: Vec<Event<'a>>,
+}
+
+pub(super) struct Action<'a> {
+    pub iid: u32,
+    pub urn: Urn<'a>,
+    pub value: &'a Value,
 }
 
 pub(super) struct Event<'a> {
@@ -140,6 +147,24 @@ impl<'a> Description<'a> {
                     });
                 }
             }
+            let mut actions = Vec::new();
+            let mut action_ids = HashSet::new();
+            if service.get("actions").is_some() {
+                for action in array(service, "actions")? {
+                    let urn = typed_urn(action, "action")?;
+                    let iid = instance_id(action)?;
+                    if !action_ids.insert(iid) {
+                        return Err(CapabilityError::InvalidDescription("duplicate action iid"));
+                    }
+                    // Argument shapes are only interpreted by the model patch
+                    // that consumes a specific action.
+                    actions.push(Action {
+                        iid,
+                        urn,
+                        value: action,
+                    });
+                }
+            }
             let mut events = Vec::new();
             let mut event_ids = HashSet::new();
             if service.get("events").is_some() {
@@ -170,6 +195,7 @@ impl<'a> Description<'a> {
                 iid,
                 urn,
                 properties,
+                actions,
                 events,
             });
         }

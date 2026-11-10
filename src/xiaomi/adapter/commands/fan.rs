@@ -1,10 +1,10 @@
 use std::{collections::VecDeque, rc::Rc};
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{
     DeviceWriteGate,
-    steps::{self, Operation, StepRequest},
+    steps::{self, Operation, StepRequest, StepTarget},
 };
 use crate::{
     device::{CommandError, FanCommand, FanRequest, FanStep},
@@ -20,28 +20,55 @@ fn encode(
     command: FanCommand,
     bindings: &FanBindings,
     needs_power_on: bool,
-) -> VecDeque<(FanStep, (PropertyBinding, Value))> {
+) -> VecDeque<(FanStep, StepTarget)> {
     let mut steps = VecDeque::new();
     match command {
-        FanCommand::Power(value) => {
-            steps.push_back((FanStep::Power(value), (bindings.power(), json!(value))))
-        }
-        FanCommand::Speed(0) => {
-            steps.push_back((FanStep::Power(false), (bindings.power(), json!(false))))
-        }
+        FanCommand::Power(value) => steps.push_back((
+            FanStep::Power(value),
+            StepTarget::property(bindings.power(), json!(value)),
+        )),
+        FanCommand::Speed(0) => steps.push_back((
+            FanStep::Power(false),
+            StepTarget::property(bindings.power(), json!(false)),
+        )),
         FanCommand::Speed(value) => {
+            if let Some(shared) = bindings.shared_speed() {
+                if value == 1 {
+                    // Low speed is a single native operation and never
+                    // pre-powers the fan through the high-speed boolean.
+                    steps.push_back((
+                        FanStep::Speed(1),
+                        StepTarget::LowSpeed {
+                            anchor: bindings.power(),
+                            speed: shared.clone(),
+                        },
+                    ));
+                } else {
+                    // High speed and independent power-on are the same real
+                    // boolean write. It stays a write even if the cached
+                    // boolean is already true.
+                    steps.push_back((
+                        FanStep::Power(true),
+                        StepTarget::property(bindings.power(), json!(true)),
+                    ));
+                }
+                return steps;
+            }
             if needs_power_on {
-                steps.push_back((FanStep::Power(true), (bindings.power(), json!(true))));
+                steps.push_back((
+                    FanStep::Power(true),
+                    StepTarget::property(bindings.power(), json!(true)),
+                ));
             }
             if let Some(mode) = bindings.mode() {
                 steps.push_back((
                     FanStep::Auxiliary,
-                    (mode.property(), json!(mode.straight())),
+                    StepTarget::property(mode.property(), json!(mode.straight())),
                 ));
             }
             steps.push_back((
                 FanStep::Speed(value),
-                (
+                StepTarget::property(
                     bindings.speed().property(),
                     json!(bindings.speed().encode(value)),
                 ),
@@ -49,7 +76,7 @@ fn encode(
         }
         FanCommand::Swing(value) => steps.push_back((
             FanStep::Swing(value),
-            (bindings.swing().unwrap(), json!(value)),
+            StepTarget::property(bindings.swing().unwrap(), json!(value)),
         )),
     }
     steps
@@ -64,7 +91,7 @@ struct FanSequence {
 impl StepRequest for FanSequence {
     type Step = FanStep;
 
-    fn steps(&self) -> Result<VecDeque<(FanStep, (PropertyBinding, Value))>, CommandError> {
+    fn steps(&self) -> Result<VecDeque<(FanStep, StepTarget)>, CommandError> {
         Ok(encode(
             self.request.command,
             &self.bindings,
@@ -77,6 +104,9 @@ impl StepRequest for FanSequence {
     }
 
     fn first_step_current(&self, step: FanStep) -> bool {
+        if self.bindings.shared_speed().is_some() {
+            return true;
+        }
         !matches!(self.request.command, FanCommand::Speed(1..=100))
             || self.request.needs_power_on() == (step == FanStep::Power(true))
     }

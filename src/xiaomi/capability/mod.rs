@@ -17,8 +17,9 @@ mod thermostat;
 pub(crate) use group::parse_group;
 pub(crate) use model::FanSpeedEncoding;
 pub(crate) use model::{
-    AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-    AirConditionerTemperatureBinding, HeaterBindings,
+    ActionBinding, AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
+    AirConditionerTemperatureBinding, HeaterBindings, LegacyArgument, LegacyCommandBinding,
+    SharedFanChannel, SharedFanSpeedBinding,
 };
 pub use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,
@@ -27,7 +28,7 @@ pub use model::{
     MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
     RecognitionDiagnostic, RecognitionMetadata, TemperatureBinding,
 };
-pub(crate) use native::NativeDescription;
+pub(crate) use native::{NativeDescription, ReadInput, RelatedScope, SHARED_FEEDBACK_CHANNEL};
 pub(crate) use repair::{RepairPlan, compose_group_light};
 pub(crate) use source::{RawDescription, SourceDescription};
 pub use state_sensor::{
@@ -111,6 +112,13 @@ pub fn parse_device_for_model(
         }
     }
     patch::ls2307::apply(
+        model,
+        &description,
+        &mut functions,
+        &mut diagnostics,
+        &mut patches,
+    );
+    patch::bhf::apply(
         model,
         &description,
         &mut functions,

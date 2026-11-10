@@ -239,7 +239,10 @@ impl ParsedFunction {
         match &self.bindings {
             FunctionBindings::Outlet { power } => format!("outlet:{}", power.siid),
             FunctionBindings::Light { power, .. } => format!("light:{}", power.siid),
-            FunctionBindings::Fan { fan } => format!("fan:{}", fan.power().siid),
+            FunctionBindings::Fan { fan } => match fan.shared_speed() {
+                Some(_) => format!("fan:{}:{}", fan.power().siid, fan.power().piid),
+                None => format!("fan:{}", fan.power().siid),
+            },
             FunctionBindings::AirConditioner { air_conditioner } => air_conditioner.function_id(),
             FunctionBindings::Heater { heater } => heater.function_id(),
             FunctionBindings::Curtain { curtain } => {
@@ -329,7 +332,7 @@ impl ParsedFunction {
             FunctionBindings::Curtain { .. } => FunctionKind::Curtain,
             FunctionBindings::Fan { fan } => FunctionKind::Fan {
                 horizontal_swing: fan.swing().is_some(),
-                speed_count: fan.speed().count(),
+                speed_count: fan.speed_count(),
             },
             FunctionBindings::AirConditioner { air_conditioner } => FunctionKind::AirConditioner {
                 temperature: air_conditioner.temperature().grid(),

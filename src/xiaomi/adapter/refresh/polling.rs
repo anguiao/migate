@@ -30,12 +30,21 @@ fn schedule_polls(
             if context.read_path_for(did, function.id()).is_none() {
                 continue;
             }
-            for binding in function.observation_bindings() {
+            for binding in function.observation_bindings().into_iter().chain(
+                function
+                    .heater()
+                    .into_iter()
+                    .flat_map(|heater| heater.diagnostic_bindings()),
+            ) {
                 let interval = if function.curtain().is_some() {
                     CURTAIN_POLL_INTERVAL
+                } else if work.native.plan().fast_poll() {
+                    FAN_POLL_INTERVAL
                 } else if let Some(fan) = function.fan()
                     && (binding == fan.power()
-                        || binding == fan.speed().property()
+                        || fan
+                            .standard_speed()
+                            .is_some_and(|speed| binding == speed.property())
                         || fan.mode().is_some_and(|mode| binding == mode.property()))
                 {
                     FAN_POLL_INTERVAL
@@ -46,6 +55,41 @@ fn schedule_polls(
                     .entry((function.id().to_owned(), interval))
                     .or_default()
                     .push(binding);
+            }
+        }
+        if work.native.plan().shared_feedback().is_some()
+            && context
+                .read_path_for_input(
+                    did,
+                    crate::xiaomi::capability::SHARED_FEEDBACK_CHANNEL,
+                    crate::xiaomi::capability::ReadInput::SharedFeedback,
+                )
+                .is_some()
+        {
+            let key = (
+                did.clone(),
+                crate::xiaomi::capability::SHARED_FEEDBACK_CHANNEL.to_owned(),
+                FAN_POLL_INTERVAL,
+            );
+            eligible.insert(key.clone());
+            let poll = polls.entry(key).or_insert_with(|| Poll {
+                work: work.clone(),
+                due: now + poll_phase(did, FAN_POLL_INTERVAL),
+            });
+            if !Rc::ptr_eq(&poll.work, work) {
+                *poll = Poll {
+                    work: work.clone(),
+                    due: now + poll_phase(did, FAN_POLL_INTERVAL),
+                };
+            }
+            if now >= poll.due {
+                let id = crate::xiaomi::capability::SHARED_FEEDBACK_CHANNEL;
+                let input = crate::xiaomi::capability::ReadInput::SharedFeedback;
+                if work.refresh.borrow_mut().request_poll_input(id, input) {
+                    work.observations.refresh_input(id, input);
+                    work.refresh_changed.notify(usize::MAX);
+                }
+                poll.due = now + FAN_POLL_INTERVAL;
             }
         }
         if let Some(battery) = work.native.device().battery()
@@ -86,7 +130,7 @@ fn schedule_polls(
             !read.periodic
                 || !work.life.is_closed()
                     && !context.is_virtual_group(&work.key.id)
-                    && work.contains(&read.id, read.binding)
+                    && work.contains_input(&read.id, read.input)
                     && context.read_path_for(&work.key.id, &read.id).is_some()
         });
     }

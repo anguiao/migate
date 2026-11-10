@@ -1,11 +1,11 @@
 use super::{
     model::AdapterError,
-    observations::{PropertyKey, key},
+    observations::{PropertyKey, input_key, key},
     routing::ControlPath,
     state::{Context, Lifetime},
     work::DeviceWork,
 };
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::capability::{PropertyBinding, ReadInput};
 use event_listener::Event;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -31,14 +31,14 @@ const RETRY_DELAY: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub(super) struct Refresh {
     pub(super) id: String,
-    pub(super) binding: PropertyBinding,
+    pub(super) input: ReadInput,
     pub(super) attempts: u8,
     pub(super) ready_at: Duration,
     periodic: bool,
     // Reserved reads and cleanup leases retain the notification baseline generation.
     baseline: Option<u64>,
 }
-enum ReadResult {
+pub(super) enum ReadResult {
     Observed,
     Retired,
     Failed(String),
@@ -50,7 +50,7 @@ fn record_battery_read(work: &DeviceWork, read: &Refresh, result: &ReadResult) {
             .native
             .device()
             .battery()
-            .is_none_or(|battery| read.binding != battery.property())
+            .is_none_or(|battery| read.input.property() != Some(battery.property()))
     {
         return;
     }
@@ -62,10 +62,10 @@ fn record_battery_read(work: &DeviceWork, read: &Refresh, result: &ReadResult) {
 }
 
 fn ordered_read(work: &DeviceWork, read: &Refresh) -> bool {
-    work.native
-        .device()
-        .battery()
-        .is_some_and(|battery| read.id == "battery" && read.binding == battery.property())
+    read.input == ReadInput::SharedFeedback && work.shared_feedback_plan()
+        || work.native.device().battery().is_some_and(|battery| {
+            read.id == "battery" && read.input.property() == Some(battery.property())
+        })
         || work.native.device().functions().iter().any(|function| {
             function.id() == read.id
                 && (function.lighting().is_some()
@@ -88,12 +88,12 @@ fn resolve_initial_failure(
 ) {
     if work.life.is_closed()
         || flight.life.is_closed()
-        || !flight.current(context, &work.key.id, &read.id)
-        || !work.contains(&read.id, read.binding)
+        || !flight.current(context, &work.key.id, &read.id, read.input)
+        || !work.contains_input(&read.id, read.input)
         || !work.refresh.borrow().required(read)
         || !work
             .observations
-            .read_is_current(work, &read.id, read.binding, stamp)
+            .read_is_current_input(work, &read.id, read.input, stamp)
     {
         return;
     }
@@ -104,8 +104,8 @@ fn resolve_initial_failure(
         .get(&work.key.id)
         .and_then(|slot| slot.admitted.as_deref())
         .is_some_and(|current| std::ptr::eq(current, work));
-    if current_work {
-        work.resolve_initial(&read.id, read.binding);
+    if current_work && let Some(binding) = read.input.property() {
+        work.resolve_initial(&read.id, binding);
     }
 }
 #[derive(Clone, Copy)]
@@ -173,22 +173,22 @@ impl RefreshState {
         self.initial_changed.notify(usize::MAX);
     }
     pub(super) fn request(&mut self, id: &str, binding: PropertyBinding) {
-        self.queue(id, binding, false);
+        self.request_input(id, ReadInput::Property(binding), false);
     }
     pub(super) fn request_baseline(&mut self, id: &str, binding: PropertyBinding) {
-        self.queue(id, binding, true);
+        self.request_input(id, ReadInput::Property(binding), true);
     }
-    fn queue(&mut self, id: &str, binding: PropertyBinding, baseline: bool) {
+    pub(super) fn request_input(&mut self, id: &str, input: ReadInput, baseline: bool) {
         let baseline = baseline.then(|| {
             *self
                 .baseline_generations
-                .entry(key(id, binding))
+                .entry(input_key(id, input))
                 .or_default()
         });
         if let Some(pending) = self
             .pending
             .iter_mut()
-            .find(|read| read.id == id && read.binding == binding)
+            .find(|read| read.id == id && read.input == input)
         {
             pending.periodic = false;
             if pending.baseline.is_some() {
@@ -197,7 +197,7 @@ impl RefreshState {
         } else {
             self.pending.push_back(Refresh {
                 id: id.into(),
-                binding,
+                input,
                 attempts: 0,
                 ready_at: Duration::ZERO,
                 periodic: false,
@@ -206,12 +206,15 @@ impl RefreshState {
         }
     }
     fn request_poll(&mut self, id: &str, binding: PropertyBinding) -> bool {
-        if self.contains(id, binding) {
+        self.request_poll_input(id, ReadInput::Property(binding))
+    }
+    pub(super) fn request_poll_input(&mut self, id: &str, input: ReadInput) -> bool {
+        if self.contains_input(id, input) {
             return false;
         }
         self.pending.push_back(Refresh {
             id: id.into(),
-            binding,
+            input,
             attempts: 0,
             ready_at: Duration::ZERO,
             periodic: true,
@@ -233,40 +236,50 @@ impl RefreshState {
             .is_none_or(|generation| self.baseline_generations[&read.key()] == generation)
     }
     pub(super) fn contains(&self, id: &str, binding: PropertyBinding) -> bool {
-        self.inflight.contains_key(&key(id, binding))
+        self.contains_input(id, ReadInput::Property(binding))
+    }
+    pub(super) fn contains_input(&self, id: &str, input: ReadInput) -> bool {
+        self.inflight.contains_key(&input_key(id, input))
             || self
                 .pending
                 .iter()
-                .any(|read| read.id == id && read.binding == binding)
+                .any(|read| read.id == id && read.input == input)
     }
     pub(super) fn request_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
-        let key = key(id, binding);
+        self.request_dirty_input(id, ReadInput::Property(binding))
+    }
+    pub(super) fn request_dirty_input(&mut self, id: &str, input: ReadInput) -> bool {
+        let key = input_key(id, input);
         if self.inflight.contains_key(&key) {
             self.dirty_again.insert(key);
             false
-        } else if self.contains(id, binding) {
-            self.request(id, binding);
+        } else if self.contains_input(id, input) {
+            self.request_input(id, input, false);
             false
         } else {
-            self.request(id, binding);
+            self.request_input(id, input, false);
             true
         }
     }
-    fn finish_dirty(&mut self, id: &str, binding: PropertyBinding) -> bool {
-        if self.dirty_again.remove(&key(id, binding)) {
-            self.request(id, binding);
+    fn finish_dirty_input(&mut self, id: &str, input: ReadInput) -> bool {
+        if self.dirty_again.remove(&input_key(id, input)) {
+            self.request_input(id, input, false);
             true
         } else {
             false
         }
     }
-    fn next_due(&self, kind: ReadKind, eligible: impl Fn(&str) -> bool) -> Option<Duration> {
+    fn next_due(
+        &self,
+        kind: ReadKind,
+        eligible: impl Fn(&str, ReadInput) -> bool,
+    ) -> Option<Duration> {
         self.pending
             .iter()
             .filter(|read| {
                 kind.accepts(read.periodic)
                     && !self.inflight.contains_key(&read.key())
-                    && eligible(&read.id)
+                    && eligible(&read.id, read.input)
             })
             .map(|read| read.ready_at)
             .min()
@@ -274,7 +287,7 @@ impl RefreshState {
     fn reserve(
         &mut self,
         now: Duration,
-        path_for: impl Fn(&str) -> Option<ControlPath>,
+        path_for: impl Fn(&str, ReadInput) -> Option<ControlPath>,
         queue: ReadQueue,
         kind: ReadKind,
     ) -> Option<(Refresh, Rc<ReadFlight>)> {
@@ -287,7 +300,7 @@ impl RefreshState {
                 {
                     return None;
                 }
-                let path = path_for(&read.id)?;
+                let path = path_for(&read.id, read.input)?;
                 queue.accepts(&path).then_some((index, path))
             })
         };
@@ -328,7 +341,9 @@ impl RefreshState {
             ReadResult::Retired if read.periodic => {}
             ReadResult::Retired => self.requeue(read),
             ReadResult::Failed(problem) => {
-                self.resolve_initial(&read.id, read.binding);
+                if let Some(binding) = read.input.property() {
+                    self.resolve_initial(&read.id, binding);
+                }
                 self.problems.insert(read.key(), problem);
                 if read.periodic {
                     return;
@@ -355,7 +370,7 @@ impl RefreshState {
         let values = self
             .problems
             .iter()
-            .filter(|((channel, _, _), _)| channel == id)
+            .filter(|((channel, _), _)| channel == id)
             .map(|(_, problem)| problem.clone())
             .collect::<Vec<_>>();
         (!values.is_empty()).then(|| values.join("; "))
@@ -363,10 +378,13 @@ impl RefreshState {
     pub(super) fn property_problem(&self, id: &str, binding: PropertyBinding) -> Option<String> {
         self.problems.get(&key(id, binding)).cloned()
     }
+    pub(super) fn input_problem(&self, id: &str, input: ReadInput) -> Option<String> {
+        self.problems.get(&input_key(id, input)).cloned()
+    }
     pub(super) fn problems_except(&self, id: &str) -> Vec<String> {
         self.problems
             .iter()
-            .filter(|((entry, _, _), _)| entry != id)
+            .filter(|((entry, _), _)| entry != id)
             .map(|(_, problem)| problem.clone())
             .collect()
     }
@@ -382,7 +400,7 @@ impl RefreshState {
     pub(super) fn exhaust_pending(&mut self, id: &str, binding: PropertyBinding) {
         self.pending
             .iter_mut()
-            .find(|read| read.id == id && read.binding == binding)
+            .find(|read| read.id == id && read.input == ReadInput::Property(binding))
             .unwrap()
             .attempts = 3;
     }
@@ -400,13 +418,13 @@ pub(super) struct ReadFlight {
 }
 impl Refresh {
     fn key(&self) -> PropertyKey {
-        key(&self.id, self.binding)
+        input_key(&self.id, self.input)
     }
 }
 impl ReadFlight {
-    fn current(&self, context: &Context, did: &str, id: &str) -> bool {
+    fn current(&self, context: &Context, did: &str, id: &str, input: ReadInput) -> bool {
         context
-            .read_path_for(did, id)
+            .read_path_for_input(did, id, input)
             .is_some_and(|path| self.path.same(&path))
     }
 }
@@ -426,7 +444,7 @@ pub(super) fn cancel(work: &DeviceWork) {
     work.refresh_changed.notify(usize::MAX);
 }
 pub(super) fn cancel_function(work: &DeviceWork, id: &str) {
-    for ((channel, _, _), flight) in &work.refresh.borrow().inflight {
+    for ((channel, _), flight) in &work.refresh.borrow().inflight {
         if channel == id {
             flight.life.close();
         }
@@ -441,26 +459,36 @@ pub(super) fn reconcile_state_read(
     binding: PropertyBinding,
     available: bool,
 ) {
+    reconcile_input(work, context, id, ReadInput::Property(binding), available);
+}
+
+pub(super) fn reconcile_input(
+    work: &DeviceWork,
+    context: &Context,
+    id: &str,
+    input: ReadInput,
+    available: bool,
+) {
     let current = {
         let refresh = work.refresh.borrow();
-        let flight = refresh.inflight.get(&key(id, binding));
+        let flight = refresh.inflight.get(&input_key(id, input));
         if let Some(flight) = flight
-            && !flight.current(context, &work.key.id, id)
+            && !flight.current(context, &work.key.id, id, input)
         {
             flight.life.close();
         }
-        flight.is_some_and(|flight| flight.current(context, &work.key.id, id))
+        flight.is_some_and(|flight| flight.current(context, &work.key.id, id, input))
     };
     if available && !current {
-        work.refresh_property(id, binding);
+        work.refresh_input(id, input);
     }
     work.refresh_changed.notify(usize::MAX);
 }
 fn retire(context: &Context) {
     for work in works(context) {
         let did = &work.key.id;
-        for ((id, _, _), flight) in &work.refresh.borrow().inflight {
-            if work.life.is_closed() || !flight.current(context, did, id) {
+        for ((id, input), flight) in &work.refresh.borrow().inflight {
+            if work.life.is_closed() || !flight.current(context, did, id, *input) {
                 flight.life.close();
             }
         }
@@ -477,8 +505,8 @@ fn reserve(
     }
     work.refresh.borrow_mut().reserve(
         context.clock.now(),
-        |id| {
-            let path = context.read_path_for(&work.key.id, id)?;
+        |id, input| {
+            let path = context.read_path_for_input(&work.key.id, id, input)?;
             if let ControlPath::Local(handle) = &path
                 && !context.local_function_reads_allowed(&work.key.id, id, handle)
             {
@@ -509,7 +537,7 @@ impl Drop for ReadCleanup {
         {
             state.inflight.remove(&self.read.key());
         }
-        let dirty = state.finish_dirty(&self.read.id, self.read.binding);
+        let dirty = state.finish_dirty_input(&self.read.id, self.read.input);
         if self.retry && !self.read.periodic && !self.work.life.is_closed() {
             state.requeue(self.read.clone());
         }
@@ -517,7 +545,7 @@ impl Drop for ReadCleanup {
         if dirty {
             self.work
                 .observations
-                .refresh(&self.read.id, self.read.binding);
+                .refresh_input(&self.read.id, self.read.input);
         }
         self.work.refresh_changed.notify(usize::MAX);
     }

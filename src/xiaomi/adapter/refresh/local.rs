@@ -18,7 +18,7 @@ pub(in crate::xiaomi::adapter) async fn local(
         let ready = candidates
             .iter()
             .filter_map(|work| {
-                work.refresh.borrow().next_due(ReadKind::Any, |id| {
+                work.refresh.borrow().next_due(ReadKind::Any, |id, _input| {
                     context.local_function_reads_allowed(&work.key.id, id, &handle)
                 })
             })

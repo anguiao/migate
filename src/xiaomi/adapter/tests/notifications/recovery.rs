@@ -63,10 +63,9 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
                 let refresh = work.refresh.borrow().snapshot();
                 one.snapshot().power() == Some(Power::Off)
                     || refresh.inflight.is_empty()
-                        && refresh
-                            .pending
-                            .iter()
-                            .any(|read| read.id == "outlet:2" && read.binding == binding)
+                        && refresh.pending.iter().any(|read| {
+                            read.id == "outlet:2" && read.input.property() == Some(binding)
+                        })
                         && c.clock.deadlines.lock().unwrap().contains(&read_due)
             })
             .await;

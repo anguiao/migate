@@ -1,10 +1,10 @@
 use std::{collections::VecDeque, rc::Rc};
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{
     DeviceWriteGate,
-    steps::{self, Operation, StepRequest},
+    steps::{self, Operation, StepRequest, StepTarget},
 };
 use crate::{
     device::{AirConditionerRequest, AirConditionerStep, CommandError},
@@ -27,13 +27,13 @@ struct AirConditionerSequence {
 impl StepRequest for AirConditionerSequence {
     type Step = AirConditionerStep;
 
-    fn steps(&self) -> Result<VecDeque<(Self::Step, (PropertyBinding, Value))>, CommandError> {
+    fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
         Ok(self
             .request
             .plan()?
             .into_iter()
             .map(|step| {
-                let property = match step {
+                let (binding, value) = match step {
                     AirConditionerStep::Power(value) => (self.bindings.power(), json!(value)),
                     AirConditionerStep::Mode(value) => (
                         self.bindings.mode().property(),
@@ -51,7 +51,7 @@ impl StepRequest for AirConditionerSequence {
                         (self.bindings.swing().unwrap(), json!(value))
                     }
                 };
-                (step, property)
+                (step, StepTarget::property(binding, value))
             })
             .collect())
     }

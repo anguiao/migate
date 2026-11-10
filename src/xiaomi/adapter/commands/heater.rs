@@ -1,10 +1,10 @@
 use std::{collections::VecDeque, rc::Rc};
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::{
     DeviceWriteGate,
-    steps::{self, Operation, StepRequest},
+    steps::{self, Operation, StepRequest, StepTarget},
 };
 use crate::{
     device::{CommandError, HeaterRequest, HeaterStep},
@@ -27,20 +27,20 @@ struct HeaterSequence {
 impl StepRequest for HeaterSequence {
     type Step = HeaterStep;
 
-    fn steps(&self) -> Result<VecDeque<(Self::Step, (PropertyBinding, Value))>, CommandError> {
+    fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
         Ok(self
             .request
             .plan()?
             .into_iter()
             .map(|step| {
-                let property = match step {
+                let (binding, value) = match step {
                     HeaterStep::Power(value) => (self.bindings.power(), json!(value)),
                     HeaterStep::Temperature(value) => (
                         self.bindings.temperature().property(),
                         self.bindings.temperature().encode(value),
                     ),
                 };
-                (step, property)
+                (step, StepTarget::property(binding, value))
             })
             .collect())
     }

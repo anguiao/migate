@@ -79,3 +79,35 @@ impl fmt::Debug for RpcOutcome {
         }
     }
 }
+
+impl MijiaClient {
+    /// Read the physical device's shared legacy feedback group exactly once.
+    pub async fn read_legacy_group(
+        &self,
+        session: &MijiaSession,
+        did: &str,
+    ) -> Result<Value, CloudError> {
+        let operation = "read legacy feedback";
+        match self
+            .rpc(
+                session,
+                did,
+                "get_prop",
+                json!(crate::xiaomi::legacy_miio::SHARED_FIELDS),
+            )
+            .await?
+        {
+            RpcOutcome::Result(value) => Ok(value),
+            RpcOutcome::Error(error) => {
+                let code = error
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| CloudError::protocol(operation))?;
+                Err(CloudError::new(
+                    operation,
+                    crate::xiaomi::cloud::CloudErrorKind::Business(code),
+                ))
+            }
+        }
+    }
+}

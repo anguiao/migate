@@ -19,7 +19,12 @@ impl DeviceWork {
             || function.air_conditioner().is_some()
             || function.heater().is_some()
         {
-            return function.observation_bindings();
+            let mut bindings = function.observation_bindings();
+            if let Some(heater) = function.heater() {
+                bindings.extend(heater.diagnostic_bindings());
+                bindings.extend(heater.power_refresh_trigger());
+            }
+            return bindings;
         }
         let mut bindings = self
             .native

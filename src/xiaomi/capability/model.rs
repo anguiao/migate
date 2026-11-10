@@ -20,7 +20,10 @@ pub use curtain::{
 pub use device::{AppliedPatch, ParsedDevice, RecognitionDiagnostic, RecognitionMetadata};
 pub use error::CapabilityError;
 pub(crate) use fan::FanSpeedEncoding;
-pub use fan::{FanBindings, FanModeBinding, FanSpeedBinding};
+pub use fan::{
+    ActionBinding, FanBindings, FanModeBinding, FanSpeedBinding, LegacyArgument,
+    LegacyCommandBinding, SharedFanChannel, SharedFanSpeedBinding,
+};
 pub use function::ParsedFunction;
 pub(crate) use heater::HeaterBindings;
 pub use light::{BrightnessBinding, ColorBinding, LightBindings, ModeBinding, TemperatureBinding};

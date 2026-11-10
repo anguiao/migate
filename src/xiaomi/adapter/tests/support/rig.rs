@@ -52,6 +52,14 @@ pub(in super::super) struct CloudState {
     pub(in super::super) property_writes: Vec<(String, u32, u32, bool, String)>,
     pub(in super::super) property_reads: Vec<(String, u32, u32)>,
     pub(in super::super) read_batches: Vec<Vec<(String, u32, u32)>>,
+    pub(in super::super) rpc_reads: Vec<(String, String, Value)>,
+    pub(in super::super) rpc_results: BTreeMap<String, Value>,
+    pub(in super::super) rpc_status: u16,
+    pub(in super::super) rpc_gate: Option<flume::Receiver<()>>,
+    pub(in super::super) action_requests: Vec<(String, u32, u32, Value)>,
+    pub(in super::super) action_code: i64,
+    pub(in super::super) action_status: u16,
+    pub(in super::super) action_gate: Option<flume::Receiver<()>>,
     pub(in super::super) read_results: Option<Vec<Value>>,
     pub(in super::super) raw_values: BTreeMap<(String, u32, u32), Value>,
     pub(in super::super) update_times: BTreeMap<(String, u32, u32), i64>,
@@ -299,6 +307,8 @@ impl Rig {
             token_lifetime: 1_000_000,
             property_status: 200,
             read_status: 200,
+            rpc_status: 200,
+            action_status: 200,
             info_status: 200,
             catalog_status: 200,
             ..Default::default()
@@ -375,6 +385,58 @@ impl Rig {
                 return MockResponse::raw(
                     "HTTP/1.1 200 Test\r\nSet-Cookie: serviceToken=restored-service; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
+            }
+            if request.target.contains("/app/home/rpc/") {
+                let body = data();
+                let did = request
+                    .target
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                let method = body["method"].as_str().unwrap().to_owned();
+                state
+                    .rpc_reads
+                    .push((did, method.clone(), body["params"].clone()));
+                let result = state
+                    .rpc_results
+                    .get(&method)
+                    .cloned()
+                    .unwrap_or_else(|| json!([null, null, null]));
+                let mut response = MockResponse::json(
+                    state.rpc_status,
+                    &json!({"code":0,"id":body["id"],"result":result}).to_string(),
+                );
+                if let Some(gate) = state.rpc_gate.clone() {
+                    response = response.gated(gate);
+                }
+                return response;
+            }
+            if request.target.ends_with("/miotspec/action") {
+                let body = data();
+                let params = &body["params"];
+                state.action_requests.push((
+                    params["did"].as_str().unwrap().into(),
+                    params["siid"].as_u64().unwrap() as u32,
+                    params["aiid"].as_u64().unwrap() as u32,
+                    params["in"].clone(),
+                ));
+                let result = json!({
+                    "did": params["did"],
+                    "siid": params["siid"],
+                    "aiid": params["aiid"],
+                    "code": state.action_code,
+                    "out": [],
+                });
+                let mut response = MockResponse::json(
+                    state.action_status,
+                    &json!({"code":0,"result":result}).to_string(),
+                );
+                if let Some(gate) = state.action_gate.clone() {
+                    response = response.gated(gate);
+                }
+                return response;
             }
             let value = if request.target.ends_with("/miotspec/prop/get") {
                 let body = data();

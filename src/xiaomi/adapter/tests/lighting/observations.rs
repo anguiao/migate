@@ -473,7 +473,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                         .snapshot()
                         .pending
                         .iter()
-                        .any(|read| read.id == "light:2" && read.binding == active)
+                        .any(|read| read.id == "light:2" && read.input.property() == Some(active))
                 );
                 peer.release_property(
                     "one",
@@ -584,7 +584,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
                         .snapshot()
                         .pending
                         .iter()
-                        .any(|read| read.id == "light:2" && read.binding == COLOR)
+                        .any(|read| read.id == "light:2" && read.input.property() == Some(COLOR))
             );
             peer.release_property("one", COLOR, json!({"value":0xabcdef}))
                 .await;

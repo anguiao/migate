@@ -4,8 +4,18 @@ use super::super::{
     ordered_read, record_battery_read, resolve_initial_failure,
 };
 use super::CloudPoll;
+use crate::xiaomi::{
+    capability::ReadInput,
+    cloud::CloudError,
+    property::{PropertyReading, PropertyResults},
+};
 use futures_lite::future;
 use std::{cell::RefCell, rc::Rc};
+
+enum CloudRead {
+    Properties(PropertyResults<PropertyReading, CloudError>),
+    Shared(serde_json::Value),
+}
 
 pub(super) fn read_cloud_batch(
     work: Rc<DeviceWork>,
@@ -33,29 +43,32 @@ pub(super) fn read_cloud_batch(
         };
         let stamps = reads
             .iter()
-            .map(|read| work.observations.read_stamp(&read.id, read.binding))
+            .map(|read| work.observations.read_stamp_input(&read.id, read.input))
             .collect::<Vec<_>>();
         let selected = reads
             .iter()
             .zip(&stamps)
             .enumerate()
             .filter_map(|(index, (read, stamp))| {
-                (work.contains(&read.id, read.binding)
+                (work.contains_input(&read.id, read.input)
                     && work.refresh.borrow().required(read)
                     && work
                         .observations
-                        .read_is_current(&work, &read.id, read.binding, stamp))
+                        .read_is_current_input(&work, &read.id, read.input, stamp))
                 .then_some(index)
             })
             .collect::<Vec<_>>();
+        let shared = selected
+            .first()
+            .is_some_and(|index| reads[*index].input == ReadInput::SharedFeedback);
         let bindings = selected
             .iter()
-            .map(|index| reads[*index].binding)
+            .filter_map(|index| reads[*index].input.property())
             .collect::<Vec<_>>();
-        let result = if bindings.is_empty()
+        let result = if selected.is_empty()
             || flight.life.is_closed()
             || work.life.is_closed()
-            || !flight.current(&context, did, &reads[0].id)
+            || !flight.current(&context, did, &reads[0].id, reads[0].input)
             || !context.current_mijia(credentials)
         {
             None
@@ -71,12 +84,19 @@ pub(super) fn read_cloud_batch(
                         None
                     },
                     async {
-                        Some(
+                        Some(if shared {
+                            context
+                                .mijia
+                                .read_legacy_group(&credentials.session, did)
+                                .await
+                                .map(CloudRead::Shared)
+                        } else {
                             context
                                 .mijia
                                 .read_properties(&credentials.session, did, &bindings)
-                                .await,
-                        )
+                                .await
+                                .map(CloudRead::Properties)
+                        })
                     },
                 ),
             )
@@ -84,7 +104,7 @@ pub(super) fn read_cloud_batch(
         };
         let current = !flight.life.is_closed()
             && !work.life.is_closed()
-            && flight.current(&context, did, &reads[0].id)
+            && flight.current(&context, did, &reads[0].id, reads[0].input)
             && context.current_mijia(credentials);
         if let Some((poll, generation)) = &poll {
             match &result {
@@ -108,6 +128,43 @@ pub(super) fn read_cloud_batch(
             }
         }
 
+        if let Some(Ok(CloudRead::Shared(raw))) = &result {
+            let read = &reads[0];
+            let stamp = &stamps[0];
+            if work.life.is_closed()
+                || flight.life.is_closed()
+                || !current
+                || !work.contains_input(&read.id, read.input)
+                || !flight.current(&context, did, &read.id, read.input)
+            {
+                return Ok(());
+            }
+            let observed = work.observe_shared_feedback(
+                raw,
+                stamp,
+                Observation {
+                    source: PathKind::Cloud,
+                    source_time: None,
+                    received_at: context.clock.unix_now(),
+                },
+            );
+            work.refresh
+                .borrow_mut()
+                .complete(read.clone(), observed, context.clock.now());
+            for cleanup in &mut cleanups {
+                cleanup.retry = false;
+            }
+            context.refresh_group_states(did);
+            work.report(&context, did);
+            work.refresh_changed.notify(usize::MAX);
+            return Ok(());
+        }
+        let result = match result {
+            Some(Ok(CloudRead::Properties(response))) => Some(Ok(response)),
+            Some(Ok(CloudRead::Shared(_))) => None,
+            Some(Err(error)) => Some(Err(error)),
+            None => None,
+        };
         let mut results = vec![None; reads.len()];
         let batch_error = match result {
             None => false,
@@ -166,7 +223,7 @@ pub(super) fn read_cloud_batch(
             if !batch_error && let Some(Err(error)) = &result {
                 context.cloud_property_read_error(credentials, &work, error);
             }
-            if work.life.is_closed() || !work.contains(&read.id, read.binding) {
+            if work.life.is_closed() || !work.contains_input(&read.id, read.input) {
                 cleanups[index].retry = false;
                 continue;
             }
@@ -175,13 +232,13 @@ pub(super) fn read_cloud_batch(
                 Some(_)
                     if !current
                         || flight.life.is_closed()
-                        || !flight.current(&context, did, &read.id) =>
+                        || !flight.current(&context, did, &read.id, read.input) =>
                 {
                     ReadResult::Retired
                 }
                 Some(Ok(reading)) => match work.observe_read_at(
                     &read.id,
-                    read.binding,
+                    read.input.property().unwrap(),
                     &stamp,
                     &reading.value,
                     Observation {
@@ -194,15 +251,19 @@ pub(super) fn read_cloud_batch(
                         context.refresh_group_states(did);
                         ReadResult::Observed
                     }
-                    Err(error) => ReadResult::Failed(work.problem("read", read.binding, &error)),
+                    Err(error) => {
+                        ReadResult::Failed(work.problem_input("read", read.input, &error))
+                    }
                 },
-                Some(Err(error)) => ReadResult::Failed(work.problem("read", read.binding, &error)),
+                Some(Err(error)) => {
+                    ReadResult::Failed(work.problem_input("read", read.input, &error))
+                }
             };
             let current = !matches!(outcome, ReadResult::Failed(_))
                 || !ordered_read(&work, &read)
                 || work
                     .observations
-                    .read_is_current(&work, &read.id, read.binding, &stamp);
+                    .read_is_current_input(&work, &read.id, read.input, &stamp);
             if current {
                 record_battery_read(&work, &read, &outcome);
                 work.refresh

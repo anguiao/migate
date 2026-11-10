@@ -6,13 +6,15 @@ use crate::xiaomi::capability::NativeDescription;
 use crate::{
     device::{DeviceKey, MeasurementRange, NumericRange, TemperatureGrid},
     xiaomi::capability::{
-        AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-        AirConditionerTemperatureBinding, BatteryBinding, BrightnessBinding, ColorBinding,
-        CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
-        EventArgument, EventBinding, FanBindings, FanModeBinding, FanSpeedBinding,
-        FanSpeedEncoding, HeaterBindings, LightBindings, MeasurementBinding, MeasurementUnit,
-        ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
-        RecognitionMetadata, StateBinding, StateMapping, StateValue, TemperatureBinding,
+        ActionBinding, AirConditionerBindings, AirConditionerModeBinding,
+        AirConditionerSpeedBinding, AirConditionerTemperatureBinding, BatteryBinding,
+        BrightnessBinding, ColorBinding, CurtainBindings, CurtainMotorBinding,
+        CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, FanBindings,
+        FanModeBinding, FanSpeedBinding, FanSpeedEncoding, HeaterBindings, LegacyArgument,
+        LegacyCommandBinding, LightBindings, MeasurementBinding, MeasurementUnit, ModeBinding,
+        MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        RecognitionMetadata, SharedFanChannel, SharedFanSpeedBinding, StateBinding, StateMapping,
+        StateValue, TemperatureBinding,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -71,6 +73,10 @@ enum WireFunction {
         label: String,
         power: WireBinding,
         temperature: WireAirConditionerTemperature,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diagnostic_mode: Option<WireBinding>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        power_refresh_trigger: Option<WireBinding>,
     },
     Curtain {
         id: String,
@@ -151,11 +157,55 @@ struct WireAirConditionerTemperature {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum WireFanSpeed {
+    Property(WireFanSpeedProperty),
+    Shared(WireSharedFanSpeedEnvelope),
+}
+
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireFanSpeed {
+struct WireFanSpeedProperty {
     property: WireBinding,
     format: NumericFormat,
     encoding: FanSpeedEncoding,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSharedFanSpeedEnvelope {
+    shared: WireSharedFanSpeed,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSharedFanSpeed {
+    channel: SharedFanChannel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cloud_action: Option<WireAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    direct_command: Option<WireLegacyCommand>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireAction {
+    siid: u32,
+    aiid: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireLegacyCommand {
+    method: String,
+    args: Vec<WireLegacyArgument>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+enum WireLegacyArgument {
+    String(String),
+    Integer(i64),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -390,6 +440,63 @@ impl WireNative {
         }
         NativeDescription::new(self.model, self.instance_type, device)
             .map_err(|_| "Stored native description is invalid")
+    }
+}
+
+impl WireSharedFanSpeed {
+    fn from_binding(binding: &SharedFanSpeedBinding) -> Self {
+        Self {
+            channel: binding.channel,
+            cloud_action: binding.cloud_action.map(|action| WireAction {
+                siid: action.siid,
+                aiid: action.aiid,
+            }),
+            direct_command: binding
+                .direct_command
+                .as_ref()
+                .map(|command| WireLegacyCommand {
+                    method: command.method.clone(),
+                    args: command
+                        .args
+                        .iter()
+                        .map(|argument| match argument {
+                            LegacyArgument::String(value) => {
+                                WireLegacyArgument::String(value.clone())
+                            }
+                            LegacyArgument::Integer(value) => WireLegacyArgument::Integer(*value),
+                        })
+                        .collect(),
+                }),
+        }
+    }
+
+    fn into_binding(self) -> Result<SharedFanSpeedBinding, &'static str> {
+        let cloud_action = self
+            .cloud_action
+            .map(|action| {
+                ActionBinding::new(action.siid, action.aiid)
+                    .map_err(|_| "Stored fan action is invalid")
+            })
+            .transpose()?;
+        let direct_command = self
+            .direct_command
+            .map(|command| {
+                LegacyCommandBinding::new(
+                    command.method,
+                    command
+                        .args
+                        .into_iter()
+                        .map(|argument| match argument {
+                            WireLegacyArgument::String(value) => LegacyArgument::String(value),
+                            WireLegacyArgument::Integer(value) => LegacyArgument::Integer(value),
+                        })
+                        .collect(),
+                )
+                .map_err(|_| "Stored legacy command is invalid")
+            })
+            .transpose()?;
+        SharedFanSpeedBinding::new(self.channel, cloud_action, direct_command)
+            .map_err(|_| "Stored shared fan binding is invalid")
     }
 }
 

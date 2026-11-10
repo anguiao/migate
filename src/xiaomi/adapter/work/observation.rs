@@ -9,6 +9,7 @@ mod air_conditioner;
 mod curtain;
 mod fan;
 mod heater;
+mod shared;
 
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
@@ -61,6 +62,7 @@ impl DeviceWork {
                 }
             }
         }
+        self.reconcile_shared_feedback(context);
     }
     pub(in crate::xiaomi::adapter) fn observation_source(&self, id: &str) -> Option<PathKind> {
         self.observation_sources.borrow().get(id).copied()
@@ -261,6 +263,10 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
+        if self.is_standard_mode_binding(id, binding) {
+            self.observe_standard_mode(function, binding, value, observation, Origin::Read);
+            return Ok(());
+        }
         if function
             .air_conditioner()
             .is_some_and(|ac| ac.mcn04().is_some())
@@ -273,8 +279,9 @@ impl DeviceWork {
             let decoded = Self::decode_air_conditioner(function, binding, value)?;
             self.observe_air_conditioner(function, binding, decoded, observation, Origin::Read);
         } else if function.fan().is_some() {
-            let decoded = Self::decode_fan(function, binding, value)?;
-            self.observe_fan(function, binding, decoded, observation, Origin::Read);
+            if let Ok(decoded) = Self::decode_fan(function, binding, value) {
+                self.observe_fan(function, binding, decoded, observation, Origin::Read);
+            }
         } else if function.curtain().is_some() {
             let decoded = Self::decode_curtain(function, binding, value)?;
             self.observe_curtain(function, binding, decoded, observation, Origin::Read);

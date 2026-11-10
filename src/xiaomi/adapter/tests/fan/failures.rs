@@ -335,7 +335,7 @@ fn fan_partial_acceptance_then_timeout_reads_over_the_hub() {
                             state
                                 .pending
                                 .iter()
-                                .map(|read| (&read.id, read.binding, read.attempts))
+                                .map(|read| (&read.id, read.input.property(), read.attempts))
                                 .collect::<Vec<_>>(),
                             state.inflight,
                             state.problems

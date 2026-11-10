@@ -394,7 +394,7 @@ fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
                     .snapshot()
                     .pending
                     .iter()
-                    .find(|read| read.id == "fan:2" && read.binding == SPEED)
+                    .find(|read| read.id == "fan:2" && read.input.property() == Some(SPEED))
                     .unwrap()
                     .attempts,
                 1

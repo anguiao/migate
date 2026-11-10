@@ -8,13 +8,13 @@ impl DeviceWork {
         value: FanObservation,
         observation: Observation,
         origin: Origin,
-    ) {
+    ) -> bool {
         if self.life.is_closed() {
-            return;
+            return false;
         }
         let id = function.id();
         if !self.observations.permits(id, binding, origin) {
-            return;
+            return false;
         }
         self.observations.observed(self, id, binding, origin);
         if matches!(origin, Origin::Notification) {
@@ -48,6 +48,7 @@ impl DeviceWork {
             super::super::super::observations::key(id, binding),
             observation.source,
         );
+        true
     }
     pub(in crate::xiaomi::adapter) fn decode_fan(
         function: &ParsedFunction,
@@ -64,9 +65,12 @@ impl DeviceWork {
             )))
         } else if let Some(mode) = fan.mode().filter(|mode| binding == mode.property()) {
             Ok(FanObservation::Mode(mode.read_value(value)?))
-        } else if binding == fan.speed().property() {
+        } else if let Some(speed) = fan
+            .standard_speed()
+            .filter(|speed| binding == speed.property())
+        {
             Ok(FanObservation::Value(FanValue::Speed(
-                fan.speed().read_value(value)?,
+                speed.read_value(value)?,
             )))
         } else {
             debug_assert_eq!(Some(binding), fan.swing());

@@ -89,6 +89,7 @@ fn curtain_local_commands_write_one_quantized_property_without_refresh() {
                     binding: PropertyBinding { siid: 2, piid: 1 },
                     value: json!(2),
                     path: Some(PathKind::Local),
+                    native: None,
                 }]
             );
             assert_eq!(last.actual_path, Some(PathKind::Local));
@@ -144,6 +145,7 @@ fn curtain_cloud_commands_write_single_values_and_retain_the_request_in_diagnost
                     binding: TARGET,
                     value: json!(33),
                     path: Some(PathKind::Cloud),
+                    native: None,
                 }]
             );
             assert_eq!(last.actual_path, Some(PathKind::Cloud));

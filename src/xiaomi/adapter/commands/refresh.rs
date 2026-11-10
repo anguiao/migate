@@ -18,12 +18,18 @@ impl CommandOperation {
         work: &Rc<DeviceWork>,
         sink: &LogicalSink,
     ) {
+        let target = self.status.borrow().target.clone();
+        let scope = work.related_scope_for_command(&self.channel, &target);
         let status = self.status.borrow();
-        if !status
+        let accepted = status
             .steps
             .iter()
-            .any(|step| matches!(step.receipt, StepReceipt::Accepted))
-        {
+            .any(|step| matches!(step.receipt, StepReceipt::Accepted));
+        let uncertain = status
+            .steps
+            .iter()
+            .any(|step| matches!(step.receipt, StepReceipt::Uncertain(_)));
+        if !(accepted || scope.is_some() && uncertain) {
             return;
         }
         let direct = status.steps.iter().any(|step| {
@@ -41,6 +47,10 @@ impl CommandOperation {
                 .and_then(|slot| slot.admitted.as_ref())
                 .is_some_and(|current| Rc::ptr_eq(current, work));
         if !current {
+            return;
+        }
+        if let Some(scope) = scope {
+            work.refresh_related_inputs(scope);
             return;
         }
         if !direct && notifications_ready(context, work, &self.channel) {

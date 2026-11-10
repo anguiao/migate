@@ -26,8 +26,9 @@ mod work;
 
 pub use model::{
     AdapterError, AdapterStatus, ChannelCommands, CommandProperty, CommandStatus, CommandStep,
-    CommandTarget, DeviceStatus, FunctionStatus, GatewayStatus, LanProtocol, LanState, LanStatus,
-    ObservedPropertyStatus, PathKind, PendingDevice, RecoveryStatus, RoutingStatus, StepReceipt,
+    CommandTarget, DeviceStatus, DiagnosticObservation, FunctionStatus, GatewayStatus, LanProtocol,
+    LanState, LanStatus, NativeValueObservation, ObservedPropertyStatus, PathKind, PendingDevice,
+    RecoveryStatus, RoutingStatus, SharedFanSpeedStatus, SharedFeedbackStatus, StepReceipt,
     SubscriptionBinding, SubscriptionStatus, TopologyReady,
 };
 pub use publication::SourceHandle;

@@ -221,6 +221,65 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
     if let Some(reason) = &status.last_switch_reason {
         let _ = write!(report, "\n  Device last switch: {reason}.");
     }
+    if let Some(mode) = &status.standard_mode {
+        let _ = write!(
+            report,
+            "\n  Standard 3.1 mode: {}; {}; observed {}.",
+            native_diagnostic(mode),
+            mode.source.map(path).unwrap_or("source unknown"),
+            mode.received_at
+                .map(timestamp)
+                .unwrap_or_else(|| "unknown".into())
+        );
+    }
+    if let Some(shared) = &status.shared_feedback {
+        let _ = write!(
+            report,
+            "\n  Legacy feedback group: {}; {}; pending {}.",
+            shared.source.map(path).unwrap_or("source unknown"),
+            if shared.pending {
+                "waiting for readback"
+            } else {
+                "settled"
+            },
+            shared.pending
+        );
+        if let Some(problem) = &shared.read_problem {
+            let _ = write!(report, " {problem}.");
+        }
+        for (name, field) in [
+            ("bh_mode", &shared.native_mode),
+            ("fan_speed_idx", &shared.fan_speed_index),
+            ("temperature", &shared.temperature),
+        ] {
+            if let Some(field) = field {
+                let _ = write!(report, "\n    {name}: {}.", native_diagnostic(field));
+            }
+        }
+        for fan in &shared.fans {
+            let _ = write!(
+                report,
+                "\n    {} {}: {}; observed {}.",
+                fan.function,
+                match fan.channel {
+                    crate::xiaomi::capability::SharedFanChannel::Blow => "吹风",
+                    crate::xiaomi::capability::SharedFanChannel::Ventilation => "换气",
+                },
+                match fan.level {
+                    Some(1) => "low (50%)".to_string(),
+                    Some(2) => "high (100%)".to_string(),
+                    Some(level) => format!("level {level}"),
+                    None => "unknown".into(),
+                },
+                fan.received_at
+                    .map(timestamp)
+                    .unwrap_or_else(|| "unknown".into())
+            );
+            if let Some(reason) = &fan.reason {
+                let _ = write!(report, " {reason}.");
+            }
+        }
+    }
     for function in &status.functions {
         let _ = write!(
             report,
@@ -332,6 +391,17 @@ pub(in crate::terminal) fn property_diagnostics(
     fields.join("; ")
 }
 
+fn native_diagnostic(value: &crate::xiaomi::adapter::DiagnosticObservation) -> String {
+    let mut text = format!("raw {}", value.value);
+    if let Some(source_time) = value.source_time {
+        let _ = write!(text, "; source time {}", timestamp(source_time));
+    }
+    if let Some(reason) = &value.reason {
+        let _ = write!(text, "; {reason}");
+    }
+    text
+}
+
 pub(super) fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String {
     let mut text = format!(
         "{channel} {state} command #{}: target {}; {} {}; actual path {}; {}.",
@@ -364,13 +434,16 @@ pub(super) fn format_command(channel: &str, state: &str, command: &CommandStatus
                         format!("result uncertain: {reason}")
                     }
                 };
-                format!(
-                    "{}.{} ({}, {})",
-                    step.binding.siid,
-                    step.binding.piid,
-                    path(step.path),
-                    receipt
-                )
+                match &step.native {
+                    Some(native) => format!("{native} ({}, {receipt})", path(step.path)),
+                    None => format!(
+                        "{}.{} ({}, {})",
+                        step.binding.siid,
+                        step.binding.piid,
+                        path(step.path),
+                        receipt
+                    ),
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");

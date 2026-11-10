@@ -47,9 +47,9 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                 {
                     continue;
                 }
-                let due = refresh.next_due(kind, |id| {
+                let due = refresh.next_due(kind, |id, input| {
                     matches!(
-                        context.read_path_for(&work.key.id, id),
+                        context.read_path_for_input(&work.key.id, id, input),
                         Some(ControlPath::Direct(_))
                     )
                 });
@@ -70,7 +70,10 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                     in_flight += 1;
                     last_did = Some(work.key.id.clone());
                     if let Some(mapping) = context.legacy_mapping(&work.key.id)
-                        && mapping.contains(read.binding)
+                        && read
+                            .input
+                            .property()
+                            .is_some_and(|binding| mapping.contains(binding))
                     {
                         let mut reads = vec![read];
                         {
@@ -80,7 +83,10 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                                 let candidate = &refresh.pending[index];
                                 if candidate.id == reads[0].id
                                     && candidate.ready_at <= now
-                                    && mapping.contains(candidate.binding)
+                                    && candidate
+                                        .input
+                                        .property()
+                                        .is_some_and(|binding| mapping.contains(binding))
                                     && !refresh.inflight.contains_key(&candidate.key())
                                 {
                                     let candidate = refresh.pending.remove(index).unwrap();
@@ -141,7 +147,7 @@ fn read_legacy(
         let did = &work.key.id;
         let stamps = reads
             .iter()
-            .map(|read| work.observations.read_stamp(&read.id, read.binding))
+            .map(|read| work.observations.read_stamp_input(&read.id, read.input))
             .collect::<Vec<_>>();
         let ControlPath::Direct(client) = &flight.path else {
             unreachable!()
@@ -149,11 +155,11 @@ fn read_legacy(
         let eligible = |read: &Refresh, stamp: &super::super::observations::ReadStamp| {
             !flight.life.is_closed()
                 && !work.life.is_closed()
-                && flight.current(&context, did, &read.id)
+                && flight.current(&context, did, &read.id, read.input)
                 && work.refresh.borrow().required(read)
                 && work
                     .observations
-                    .read_is_current(&work, &read.id, read.binding, stamp)
+                    .read_is_current_input(&work, &read.id, read.input, stamp)
         };
         let result = future::or(
             async {
@@ -191,7 +197,10 @@ fn read_legacy(
             context.lan_business_failure(did, client, error)?;
         }
         for (read, stamp) in reads.into_iter().zip(stamps) {
-            if work.life.is_closed() || !work.contains(&read.id, read.binding) {
+            let Some(binding) = read.input.property() else {
+                continue;
+            };
+            if work.life.is_closed() || !work.contains_input(&read.id, read.input) {
                 continue;
             }
             let outcome = match &result {
@@ -202,12 +211,14 @@ fn read_legacy(
                 {
                     ReadResult::Retired
                 }
-                Some(Err(error)) => ReadResult::Failed(work.problem("read", read.binding, error)),
-                Some(Ok(_)) if !flight.current(&context, did, &read.id) => ReadResult::Retired,
-                Some(Ok(values)) => match &values[mapping.index(read.binding).unwrap()] {
+                Some(Err(error)) => ReadResult::Failed(work.problem("read", binding, error)),
+                Some(Ok(_)) if !flight.current(&context, did, &read.id, read.input) => {
+                    ReadResult::Retired
+                }
+                Some(Ok(values)) => match &values[mapping.index(binding).unwrap()] {
                     Ok(value) => match work.observe_read_at(
                         &read.id,
-                        read.binding,
+                        binding,
                         &stamp,
                         value,
                         Observation {
@@ -220,17 +231,15 @@ fn read_legacy(
                             context.refresh_group_states(did);
                             ReadResult::Observed
                         }
-                        Err(error) => {
-                            ReadResult::Failed(work.problem("read", read.binding, &error))
-                        }
+                        Err(error) => ReadResult::Failed(work.problem("read", binding, &error)),
                     },
-                    Err(error) => ReadResult::Failed(work.problem("read", read.binding, error)),
+                    Err(error) => ReadResult::Failed(work.problem("read", binding, error)),
                 },
             };
             let current = !matches!(outcome, ReadResult::Failed(_))
                 || work
                     .observations
-                    .read_is_current(&work, &read.id, read.binding, &stamp);
+                    .read_is_current_input(&work, &read.id, read.input, &stamp);
             if current {
                 work.refresh
                     .borrow_mut()

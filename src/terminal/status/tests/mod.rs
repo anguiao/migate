@@ -200,6 +200,8 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
             sync_limited_reason: Some("cloud property subscriptions pending".into()),
             battery_problem: None,
             last_switch_reason: Some("hub reported device one offline or missing".into()),
+            standard_mode: None,
+            shared_feedback: None,
             commands: vec![ChannelCommands {
                 light_actions: None,
                 channel: "main".into(),
@@ -296,6 +298,8 @@ fn routing_status_displays_disconnection_unsent_work_and_previous_acceptance() {
             sync_limited_reason: Some("no notification source".into()),
             battery_problem: None,
             last_switch_reason: None,
+            standard_mode: None,
+            shared_feedback: None,
             commands: vec![ChannelCommands {
                 light_actions: None,
                 channel: "main".into(),
@@ -461,6 +465,8 @@ fn action_report(function: &crate::device::Function) -> String {
         sync_limited_reason: None,
         battery_problem: None,
         last_switch_reason: None,
+        standard_mode: None,
+        shared_feedback: None,
         commands: vec![ChannelCommands {
             channel: "main".into(),
             light_actions: function.light_action_diagnostics(),
@@ -594,6 +600,8 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
         sync_limited_reason: Some("notifications disconnected or subscriptions not ready".into()),
         battery_problem: None,
         last_switch_reason: None,
+        standard_mode: None,
+        shared_feedback: None,
         commands: Vec::<ChannelCommands>::new(),
     });
     assert!(report.contains("Usable read paths: cloud."), "{report}");
@@ -627,6 +635,8 @@ fn direct_status_identifies_running_and_scheduled_recovery() {
         sync_limited_reason: None,
         battery_problem: None,
         last_switch_reason: None,
+        standard_mode: None,
+        shared_feedback: None,
         commands: Vec::new(),
         functions: Vec::new(),
     };
@@ -676,6 +686,8 @@ fn battery_diagnostics_are_separate_from_physical_reachability() {
         sync_limited_reason: None,
         battery_problem: Some("sensor subscribe 2.1003: denied".into()),
         last_switch_reason: None,
+        standard_mode: None,
+        shared_feedback: None,
         commands: Vec::new(),
     });
     assert!(report.contains("Physical online: unknown."), "{report}");
@@ -699,6 +711,83 @@ fn command_properties(
             binding,
             value,
             path,
+            native: None,
         })
         .collect()
+}
+
+#[test]
+fn bath_diagnostics_show_standard_mode_and_legacy_group_separately() {
+    use crate::xiaomi::adapter::{
+        DiagnosticObservation, SharedFanSpeedStatus, SharedFeedbackStatus,
+    };
+    use crate::xiaomi::capability::SharedFanChannel;
+    use serde_json::json;
+
+    let report = format_device(&DeviceStatus {
+        functions: vec![],
+        lan: None,
+        direct_unavailable_reason: None,
+        did: "bath".into(),
+        read_only: false,
+        usable_control_paths: vec![PathKind::Local, PathKind::Cloud],
+        selected_control: Some(PathKind::Local),
+        usable_read_paths: vec![PathKind::Local, PathKind::Cloud],
+        selected_read: Some(PathKind::Local),
+        physical_online: Some(true),
+        notification_source: Some(PathKind::Local),
+        unavailable_reason: None,
+        sync_limited_reason: None,
+        battery_problem: None,
+        last_switch_reason: None,
+        standard_mode: Some(DiagnosticObservation {
+            value: json!(4),
+            source: Some(PathKind::Local),
+            source_time: Some(1),
+            received_at: Some(2),
+            reason: None,
+        }),
+        shared_feedback: Some(SharedFeedbackStatus {
+            source: Some(PathKind::Cloud),
+            pending: true,
+            read_problem: None,
+            native_mode: Some(DiagnosticObservation {
+                value: json!("quick-heat"),
+                source: Some(PathKind::Cloud),
+                source_time: None,
+                received_at: Some(2),
+                reason: None,
+            }),
+            fan_speed_index: Some(DiagnosticObservation {
+                value: json!(32),
+                source: Some(PathKind::Cloud),
+                source_time: None,
+                received_at: Some(2),
+                reason: Some("ventilation speed code 2".into()),
+            }),
+            temperature: None,
+            fans: vec![SharedFanSpeedStatus {
+                function: "fan:3:2".into(),
+                channel: SharedFanChannel::Blow,
+                level: Some(2),
+                reason: None,
+                source_time: None,
+                received_at: Some(2),
+            }],
+        }),
+        commands: Vec::new(),
+    });
+    assert!(
+        report
+            .contains("Standard 3.1 mode: raw 4; source time 1970-01-01T00:00:01Z; hub; observed"),
+        "{report}"
+    );
+    assert!(
+        report.contains("Legacy feedback group: cloud; waiting for readback; pending true."),
+        "{report}"
+    );
+    assert!(report.contains("bh_mode: raw \"quick-heat\""), "{report}");
+    assert!(report.contains("fan_speed_idx: raw 32"), "{report}");
+    assert!(report.contains("fan:3:2 吹风: high (100%)"), "{report}");
+    assert!(report.contains("ventilation speed code 2"), "{report}");
 }

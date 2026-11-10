@@ -45,6 +45,8 @@ impl WireFunction {
                     max: grid.max(),
                     step: grid.step(),
                 },
+                diagnostic_mode: heater.diagnostic_mode().map(Into::into),
+                power_refresh_trigger: heater.power_refresh_trigger().map(Into::into),
             };
         }
         if let Some(fan) = function.fan() {
@@ -58,10 +60,16 @@ impl WireFunction {
                     straight: mode.straight(),
                     values: mode.values().to_vec(),
                 }),
-                speed: WireFanSpeed {
-                    property: fan.speed().property().into(),
-                    format: fan.speed().format(),
-                    encoding: fan.speed().encoding().clone(),
+                speed: if let Some(speed) = fan.standard_speed() {
+                    WireFanSpeed::Property(WireFanSpeedProperty {
+                        property: speed.property().into(),
+                        format: speed.format(),
+                        encoding: speed.encoding().clone(),
+                    })
+                } else {
+                    WireFanSpeed::Shared(WireSharedFanSpeedEnvelope {
+                        shared: WireSharedFanSpeed::from_binding(fan.shared_speed().unwrap()),
+                    })
                 },
                 swing: fan.swing().map(Into::into),
             };
@@ -248,6 +256,8 @@ impl WireFunction {
                 label,
                 power,
                 temperature,
+                diagnostic_mode,
+                power_refresh_trigger,
             } => {
                 let grid = TemperatureGrid::new(temperature.min, temperature.max, temperature.step)
                     .map_err(|_| "Stored heater binding is invalid")?;
@@ -257,8 +267,14 @@ impl WireFunction {
                     grid,
                 )
                 .map_err(|_| "Stored heater binding is invalid")?;
-                let bindings = HeaterBindings::new(power.into(), temperature)
+                let mut bindings = HeaterBindings::new(power.into(), temperature)
                     .map_err(|_| "Stored heater binding is invalid")?;
+                bindings.set_power_refresh_trigger(power_refresh_trigger.map(Into::into));
+                if let Some(mode) = diagnostic_mode {
+                    bindings
+                        .set_diagnostic_mode(mode.into())
+                        .map_err(|_| "Stored heater binding is invalid")?;
+                }
                 if bindings.function_id() != id {
                     return Err("Stored heater identity is invalid");
                 }
@@ -283,14 +299,24 @@ impl WireFunction {
                     })
                     .transpose()
                     .map_err(|_| "Stored fan binding is invalid")?;
-                let speed =
-                    FanSpeedBinding::new(speed.property.into(), speed.format, speed.encoding)
-                        .map_err(|_| "Stored fan binding is invalid")?;
-                Ok(ParsedFunction::fan_control(
-                    id,
-                    label,
-                    FanBindings::new(power.into(), mode, speed, swing.map(Into::into)),
-                ))
+                let bindings = match speed {
+                    WireFanSpeed::Property(WireFanSpeedProperty {
+                        property,
+                        format,
+                        encoding,
+                    }) => {
+                        let speed = FanSpeedBinding::new(property.into(), format, encoding)
+                            .map_err(|_| "Stored fan binding is invalid")?;
+                        FanBindings::new(power.into(), mode, speed, swing.map(Into::into))
+                    }
+                    WireFanSpeed::Shared(WireSharedFanSpeedEnvelope { shared }) => {
+                        if mode.is_some() || swing.is_some() {
+                            return Err("Stored fan binding is invalid");
+                        }
+                        FanBindings::shared(power.into(), shared.into_binding()?)
+                    }
+                };
+                Ok(ParsedFunction::fan_control(id, label, bindings))
             }
             Self::Curtain {
                 id,

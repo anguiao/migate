@@ -60,15 +60,18 @@ pub(super) fn validate_bindings(
         .iter()
         .filter_map(|function| function.fan())
     {
+        let Some(speed) = fan.standard_speed() else {
+            continue;
+        };
         if fan.mode().is_some()
             && (!identity(model, urn)
-                || fan.speed().encoding()
+                || speed.encoding()
                     != &(FanSpeedEncoding::Range {
                         min: 1,
                         max: 100,
                         step: 1,
                     })
-                || fan.speed().property().siid == fan.power().siid)
+                || speed.property().siid == fan.power().siid)
         {
             return Err("Xiaomi fan mode is incompatible with its model or speed binding");
         }

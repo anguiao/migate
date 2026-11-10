@@ -1,5 +1,6 @@
 //! Built-in source adaptations. Each rule has an explicit match, target and
 //! stage; unrelated candidates never compete through registration order.
+pub(super) mod bhf;
 pub(super) mod cp7pd;
 pub(super) mod dmaker;
 pub(super) mod ls2307;
@@ -38,6 +39,7 @@ pub(super) fn validate_native(
     model: &str,
     urn: &Urn<'_>,
 ) -> Result<(), &'static str> {
+    bhf::validate_bindings(device, model, urn)?;
     cp7pd::validate_trigger(device, model, urn)?;
     if let Some(metadata) = device.recognition() {
         for applied in metadata.patches() {
@@ -48,7 +50,11 @@ pub(super) fn validate_native(
                 .unwrap();
             let matches =
                 |rule: BuiltinPatch| rule.id == applied.id() && rule.stage == applied.stage();
-            if matches(mcn04::PATCH) {
+            if matches(bhf::SHARED_PATCH) {
+                bhf::validate_shared_applied(model, urn, function)?;
+            } else if matches(bhf::FAN_PATCH) || matches(bhf::MODE_PATCH) {
+                bhf::validate_applied(model, urn, function)?;
+            } else if matches(mcn04::PATCH) {
                 mcn04::validate_applied(model, urn, function)?;
             } else if matches(ls2307::PATCH) {
                 ls2307::validate_applied(model, urn, function)?;

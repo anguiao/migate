@@ -44,10 +44,15 @@ fn v13_round_trips_light_and_heating_only_bindings() {
             .iter()
             .map(|function| function.id.as_str())
             .collect::<Vec<_>>(),
-        ["light:2", "heater:3"]
+        ["light:2", "heater:3", "fan:3:2", "fan:3:4"]
     );
-    assert_eq!(entry.functions.len(), 2);
-    assert_ne!(entry.functions[0].endpoint, entry.functions[1].endpoint);
+    assert_eq!(entry.functions.len(), 4);
+    let endpoints = entry
+        .functions
+        .iter()
+        .map(|function| function.endpoint)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(endpoints.len(), entry.functions.len());
     let native = entry.native.as_ref().unwrap().device();
     let heater = native
         .functions()

@@ -1,4 +1,5 @@
 use super::{Function, FunctionSnapshot, MeasurementSnapshot, Power, RuntimeState, RuntimeValue};
+use crate::device::model::PropertyObservation;
 
 impl Function {
     /// Update the function's acquisition eligibility without changing its last reading.
@@ -214,6 +215,24 @@ impl Function {
             self.0.changed.notify(usize::MAX);
         }
     }
+    /// An explicit unusable built-in reading is not a source failure. The
+    /// old cached value stops being current, but eligibility is unchanged.
+    pub(crate) fn observe_heater_temperature_invalid(
+        &self,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) -> bool {
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state.heater_mut().expect("heater function");
+        let changed = runtime
+            .thermostat
+            .observe_invalid_current_temperature(source_time, received_at);
+        if changed {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+        changed
+    }
     pub(crate) fn heater_source_changed(&self) {
         let mut state = self.0.state.lock().unwrap();
         state
@@ -336,6 +355,16 @@ impl Function {
             }
             crate::device::FanValue::Speed(value) => {
                 fan.snapshot.speed.update(value, source_time, received_at)
+            }
+            crate::device::FanValue::SpeedUnknown => {
+                let observed = PropertyObservation {
+                    value: None,
+                    source_time,
+                    received_at: Some(received_at),
+                };
+                let changed = fan.snapshot.speed != observed;
+                fan.snapshot.speed = observed;
+                changed
             }
             crate::device::FanValue::Swing(value) => {
                 fan.snapshot.swing.update(value, source_time, received_at)

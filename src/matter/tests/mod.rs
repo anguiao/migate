@@ -1,4 +1,5 @@
 mod air_conditioner;
+mod bhf;
 mod composition;
 mod diagnostics;
 mod handlers;

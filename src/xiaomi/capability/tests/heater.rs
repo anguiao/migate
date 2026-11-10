@@ -53,7 +53,12 @@ fn public_v13_description_yields_lightning_identity_and_only_heating_thermostat(
             .iter()
             .map(|function| (function.id(), function.label()))
             .collect::<Vec<_>>(),
-        [("light:2", "Light"), (HEATER, "暖风")]
+        [
+            ("light:2", "Light"),
+            (HEATER, "暖风"),
+            ("fan:3:2", "吹风"),
+            ("fan:3:4", "换气"),
+        ]
     );
     let heater = parsed
         .functions()
@@ -66,6 +71,8 @@ fn public_v13_description_yields_lightning_identity_and_only_heating_thermostat(
         [
             PropertyBinding { siid: 3, piid: 3 },
             PropertyBinding { siid: 3, piid: 8 },
+            PropertyBinding { siid: 3, piid: 1 },
+            PropertyBinding { siid: 3, piid: 5 },
         ]
     );
     assert_eq!(

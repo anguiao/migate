@@ -127,6 +127,32 @@ pub(super) fn set_temperature_source_available(
     }
 }
 
+pub(super) fn invalidate_temperature_reading(
+    measurement: &mut MeasurementSnapshot,
+    source: &mut TemperatureSourceState,
+    source_time: Option<i64>,
+    received_at: i64,
+) -> bool {
+    let observed = MeasurementSnapshot {
+        value: None,
+        source_time,
+        received_at: Some(received_at),
+    };
+    let next = match *source {
+        TemperatureSourceState::Available(_) | TemperatureSourceState::AwaitingReading => {
+            TemperatureSourceState::AwaitingReading
+        }
+        other => other,
+    };
+    if *measurement == observed && *source == next {
+        false
+    } else {
+        *measurement = observed;
+        *source = next;
+        true
+    }
+}
+
 pub(super) fn observe_temperature(
     measurement: &mut MeasurementSnapshot,
     source: &mut TemperatureSourceState,
@@ -212,6 +238,18 @@ impl<C: StepCommand, M: Copy + PartialEq> ThermostatRuntime<C, M> {
         self.observation
             .current_temperature
             .observe(value, source_time, received_at)
+    }
+    pub(super) fn observe_invalid_current_temperature(
+        &mut self,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) -> bool {
+        invalidate_temperature_reading(
+            &mut self.observation.current_temperature.measurement,
+            &mut self.observation.current_temperature.source,
+            source_time,
+            received_at,
+        )
     }
     pub(super) fn pending_commands(&self) -> Vec<C> {
         self.commands.pending_commands()
