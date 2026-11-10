@@ -8,6 +8,7 @@ use super::*;
 mod air_conditioner;
 mod curtain;
 mod fan;
+mod heater;
 
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
@@ -16,6 +17,7 @@ impl DeviceWork {
                 || function.curtain().is_some()
                 || function.fan().is_some()
                 || function.air_conditioner().is_some()
+                || function.heater().is_some()
         }) {
             let id = function.id();
             let path = context.read_path_for(&self.key.id, id);
@@ -41,6 +43,12 @@ impl DeviceWork {
                         .function(id)
                         .unwrap()
                         .air_conditioner_source_changed();
+                }
+                if function.heater().is_some() {
+                    self.physical()
+                        .function(id)
+                        .unwrap()
+                        .heater_source_changed();
                 }
                 for binding in function.observation_bindings() {
                     super::super::refresh::reconcile_state_read(
@@ -258,6 +266,9 @@ impl DeviceWork {
             .is_some_and(|ac| ac.mcn04().is_some())
         {
             self.observe_mcn04(function, binding, value, observation, Origin::Read)?;
+        } else if function.heater().is_some() {
+            let decoded = Self::decode_heater(function, binding, value)?;
+            self.observe_heater(function, binding, decoded, observation, Origin::Read);
         } else if function.air_conditioner().is_some() {
             let decoded = Self::decode_air_conditioner(function, binding, value)?;
             self.observe_air_conditioner(function, binding, decoded, observation, Origin::Read);

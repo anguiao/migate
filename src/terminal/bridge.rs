@@ -9,10 +9,10 @@ use render::{configuration_lines, render};
 use super::{AuthStatus, current_time};
 use crate::{
     RuntimeError,
-    device::{Command, DeviceKey, FunctionKey},
+    device::{Command, DeviceKey, FunctionKey, FunctionKind, HeaterCommand, HeaterMode},
     storage::StorageError,
 };
-pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
+pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
 fn invalid(view: &View, status: &AuthStatus, now: i64, reason: &str) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
@@ -95,6 +95,81 @@ impl View {
                         log::info!("terminal {target} {verb}: accepted");
                         format!("{target}: command accepted")
                     }
+                    Err(error) => format!("{target}: {error}"),
+                }
+            }
+            ["mode", did, id, mode @ ("off" | "heat")] => {
+                let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
+                };
+                let Some(function) = physical.function(id) else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown function.")));
+                };
+                if !matches!(function.description().kind, FunctionKind::Heater { .. }) {
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        now,
+                        "Function does not support heating mode control.",
+                    )));
+                }
+                let target = if physical.functions().len() == 1 {
+                    did.to_string()
+                } else {
+                    format!("{did}/{id}")
+                };
+                let command = match *mode {
+                    "off" => HeaterCommand::Mode(HeaterMode::Off),
+                    "heat" => HeaterCommand::Mode(HeaterMode::Heat),
+                    _ => unreachable!(),
+                };
+                match function.begin_heater(command) {
+                    Ok(action) => match action.accepted().await {
+                        Ok(_) => {
+                            log::info!("terminal {target} mode {mode}: accepted");
+                            format!("{target}: command accepted")
+                        }
+                        Err(error) => format!("{target}: {error}"),
+                    },
+                    Err(error) => format!("{target}: {error}"),
+                }
+            }
+            ["temperature", did, id, value] => {
+                let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
+                };
+                let Some(function) = physical.function(id) else {
+                    return Ok(Some(invalid(registry, status, now, "Unknown function.")));
+                };
+                if !matches!(function.description().kind, FunctionKind::Heater { .. }) {
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        now,
+                        "Function does not support heating temperature control.",
+                    )));
+                }
+                let Ok(value) = value.parse::<i16>() else {
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        now,
+                        "Temperature must be a whole number.",
+                    )));
+                };
+                let target = if physical.functions().len() == 1 {
+                    did.to_string()
+                } else {
+                    format!("{did}/{id}")
+                };
+                match function.begin_heater(HeaterCommand::Temperature(value)) {
+                    Ok(action) => match action.accepted().await {
+                        Ok(_) => {
+                            log::info!("terminal {target} temperature {value}: accepted");
+                            format!("{target}: command accepted")
+                        }
+                        Err(error) => format!("{target}: {error}"),
+                    },
                     Err(error) => format!("{target}: {error}"),
                 }
             }

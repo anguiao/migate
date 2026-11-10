@@ -1,6 +1,10 @@
 use super::{
-    AirConditionerConstraints, AirConditionerFanSpeed, AirConditionerMode, AirConditionerSnapshot,
-    AirConditionerValue, ConstraintViolation, TemperatureGrid,
+    AirConditionerConstraints, AirConditionerFanSpeed, AirConditionerMode, AirConditionerValue,
+    ConstraintViolation, TemperatureGrid,
+};
+use crate::device::{
+    Availability, DeviceKey, FunctionDescription, FunctionKind, PhysicalDevice,
+    PhysicalDeviceDescription,
 };
 
 #[test]
@@ -112,37 +116,78 @@ fn runtime_constraint_models_reject_ambiguous_or_off_grid_values() {
 
 #[test]
 fn source_observations_keep_each_field_unknown_until_reported_and_preserve_metadata() {
-    let mut state = AirConditionerSnapshot::default();
+    let description = PhysicalDeviceDescription::new(
+        DeviceKey::new("xiaomi", "thermostat-observation"),
+        "Air conditioner",
+        vec![FunctionDescription {
+            id: "air-conditioner:3".into(),
+            label: "空调".into(),
+            kind: FunctionKind::AirConditioner {
+                temperature: TemperatureGrid::new(16, 30, 1).unwrap(),
+                vertical_swing: true,
+            },
+        }],
+    )
+    .unwrap();
+    let (device, _receiver) = PhysicalDevice::new(description);
+    device.set_availability(Availability::Available);
+    let function = &device.functions()[0];
+    let observed = || function.snapshot().air_conditioner().unwrap();
+
+    let state = observed();
     assert_eq!(state.power.value, None);
     assert_eq!(state.mode.value, None);
     assert_eq!(state.temperature.value, None);
     assert_eq!(state.speed.value, None);
     assert_eq!(state.swing.value, None);
-    assert!(state.update(AirConditionerValue::Power(true), Some(11), 12));
-    assert!(state.update(
+
+    function.observe_air_conditioner(AirConditionerValue::Power(true), Some(11), 12);
+    function.observe_air_conditioner(
         AirConditionerValue::Mode(AirConditionerMode::Cool),
         None,
-        13
-    ));
-    assert!(state.update(AirConditionerValue::Temperature(26), Some(14), 15));
-    assert!(state.update(
+        13,
+    );
+    function.observe_air_conditioner(AirConditionerValue::Temperature(26), Some(14), 15);
+    function.observe_air_conditioner(
         AirConditionerValue::Speed(AirConditionerFanSpeed::Auto),
         Some(16),
-        17
-    ));
-    assert!(state.update(AirConditionerValue::Swing(false), Some(18), 19));
+        17,
+    );
+    function.observe_air_conditioner(AirConditionerValue::Swing(false), Some(18), 19);
+    let state = observed();
     assert_eq!(state.power.value, Some(true));
     assert_eq!(state.mode.value, Some(AirConditionerMode::Cool));
     assert_eq!(state.temperature.value, Some(26));
     assert_eq!(state.speed.value, Some(AirConditionerFanSpeed::Auto));
     assert_eq!(state.swing.value, Some(false));
     assert_eq!(
+        (state.power.source_time, state.power.received_at),
+        (Some(11), Some(12))
+    );
+    assert_eq!(
         (state.mode.source_time, state.mode.received_at),
         (None, Some(13))
     );
-    assert!(!state.update(AirConditionerValue::Temperature(26), Some(20), 21));
+    assert_eq!(
+        (state.temperature.source_time, state.temperature.received_at),
+        (Some(14), Some(15))
+    );
+    assert_eq!(
+        (state.speed.source_time, state.speed.received_at),
+        (Some(16), Some(17))
+    );
+    assert_eq!(
+        (state.swing.source_time, state.swing.received_at),
+        (Some(18), Some(19))
+    );
+
+    let revision = function.snapshot().revision;
+    function.observe_air_conditioner(AirConditionerValue::Temperature(26), Some(20), 21);
+    let state = observed();
+    assert_eq!(state.temperature.value, Some(26));
     assert_eq!(
         (state.temperature.source_time, state.temperature.received_at),
         (Some(20), Some(21))
     );
+    assert_eq!(function.snapshot().revision, revision);
 }

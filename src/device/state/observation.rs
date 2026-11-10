@@ -1,7 +1,4 @@
-use super::{
-    Function, FunctionSnapshot, MeasurementSnapshot, Power, RuntimeState, RuntimeValue,
-    TemperatureSourceState,
-};
+use super::{Function, FunctionSnapshot, MeasurementSnapshot, Power, RuntimeState, RuntimeValue};
 
 impl Function {
     /// Update the function's acquisition eligibility without changing its last reading.
@@ -12,16 +9,7 @@ impl Function {
             .temperature_source
             .as_mut()
             .expect("temperature function");
-        let next = if available {
-            match *source {
-                TemperatureSourceState::Unavailable => TemperatureSourceState::AwaitingReading,
-                current => current,
-            }
-        } else {
-            TemperatureSourceState::Unavailable
-        };
-        if *source != next {
-            *source = next;
+        if super::super::thermostat::set_temperature_source_available(source, available) {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
@@ -37,24 +25,32 @@ impl Function {
         if !self.description().is_measurement() {
             return Err(crate::device::CommandError::Unsupported);
         }
-        let observed = MeasurementSnapshot {
-            value: Some(value),
-            source_time,
-            received_at: Some(received_at),
-        };
         let mut state = self.0.state.lock().unwrap();
         let current = state
             .measurement_mut()
             .expect("measurement function has measurement state");
-        let next_source = match current.temperature_source {
-            Some(
-                TemperatureSourceState::AwaitingReading | TemperatureSourceState::Available(_),
-            ) => Some(TemperatureSourceState::Available(observed)),
-            other => other,
+        let changed = if let Some(source) = current.temperature_source.as_mut() {
+            super::super::thermostat::observe_temperature(
+                &mut current.snapshot,
+                source,
+                value,
+                source_time,
+                received_at,
+            )
+        } else {
+            let observed = MeasurementSnapshot {
+                value: Some(value),
+                source_time,
+                received_at: Some(received_at),
+            };
+            if current.snapshot == observed {
+                false
+            } else {
+                current.snapshot = observed;
+                true
+            }
         };
-        if current.snapshot != observed || current.temperature_source != next_source {
-            current.snapshot = observed;
-            current.temperature_source = next_source;
+        if changed {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
@@ -169,7 +165,7 @@ impl Function {
             runtime.constraints_current = false;
         }
         runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
-        runtime.commands.power_off_sent();
+        runtime.thermostat.commands.power_off_sent();
     }
     pub(crate) fn observe_cached_air_conditioner(
         &self,
@@ -178,6 +174,91 @@ impl Function {
         received_at: i64,
     ) {
         self.apply_air_conditioner_observations(&[value], source_time, received_at, false);
+    }
+
+    pub(crate) fn observe_heater(
+        &self,
+        value: crate::device::HeaterValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_heater_observation(value, source_time, received_at, true);
+    }
+    pub(crate) fn observe_cached_heater(
+        &self,
+        value: crate::device::HeaterValue,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) {
+        self.apply_heater_observation(value, source_time, received_at, false);
+    }
+    fn apply_heater_observation(
+        &self,
+        value: crate::device::HeaterValue,
+        source_time: Option<i64>,
+        received_at: i64,
+        fresh: bool,
+    ) {
+        let mut state = self.0.state.lock().unwrap();
+        let core = &mut state.heater_mut().expect("heater function").thermostat;
+        let changed = match value {
+            crate::device::HeaterValue::Power(power) => {
+                core.observe_power(power, fresh, source_time, received_at)
+            }
+            crate::device::HeaterValue::Temperature(temperature) => {
+                core.observe_target_temperature(temperature, source_time, received_at)
+            }
+        };
+        if changed {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
+    pub(crate) fn heater_source_changed(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        state
+            .heater_mut()
+            .expect("heater function")
+            .thermostat
+            .commands
+            .power_off_sent();
+    }
+    /// Update the built-in heating temperature source without changing its last reading.
+    pub(crate) fn set_heater_temperature_source_available(&self, available: bool) {
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state.heater_mut().expect("heater function");
+        if runtime
+            .thermostat
+            .set_temperature_source_available(available)
+        {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+    }
+    /// Apply one validated built-in current-temperature reading.
+    #[allow(dead_code)] // The shared legacy temperature group is connected in a later slice.
+    pub(crate) fn observe_heater_temperature(
+        &self,
+        value: f64,
+        source_time: Option<i64>,
+        received_at: i64,
+    ) -> Result<FunctionSnapshot, crate::device::CommandError> {
+        if !matches!(
+            self.description().kind,
+            crate::device::FunctionKind::Heater { .. }
+        ) {
+            return Err(crate::device::CommandError::Unsupported);
+        }
+        let mut state = self.0.state.lock().unwrap();
+        let runtime = state.heater_mut().expect("heater function");
+        if runtime
+            .thermostat
+            .observe_current_temperature(value, source_time, received_at)
+        {
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+        }
+        Ok(self.snapshot_locked(&state))
     }
     fn apply_air_conditioner_observations(
         &self,
@@ -192,17 +273,37 @@ impl Function {
             .expect("air-conditioner function");
         let mut changed = false;
         for &value in values {
-            if let crate::device::AirConditionerValue::Power(power) = value {
-                runtime.commands.observe_power(power, fresh);
+            match value {
+                crate::device::AirConditionerValue::Power(power) => {
+                    changed |=
+                        runtime
+                            .thermostat
+                            .observe_power(power, fresh, source_time, received_at);
+                }
+                crate::device::AirConditionerValue::Mode(mode) => {
+                    if fresh {
+                        runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
+                        runtime.planning_mode = None;
+                        runtime.observed_mode = Some(mode);
+                    }
+                    changed |= runtime
+                        .thermostat
+                        .observe_mode(mode, source_time, received_at);
+                }
+                crate::device::AirConditionerValue::Temperature(temperature) => {
+                    changed |= runtime.thermostat.observe_target_temperature(
+                        temperature,
+                        source_time,
+                        received_at,
+                    );
+                }
+                crate::device::AirConditionerValue::Speed(speed) => {
+                    changed |= runtime.speed.update(speed, source_time, received_at);
+                }
+                crate::device::AirConditionerValue::Swing(swing) => {
+                    changed |= runtime.swing.update(swing, source_time, received_at);
+                }
             }
-            if let crate::device::AirConditionerValue::Mode(mode) = value
-                && fresh
-            {
-                runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
-                runtime.planning_mode = None;
-                runtime.observed_mode = Some(mode);
-            }
-            changed |= runtime.snapshot.update(value, source_time, received_at);
         }
         if changed {
             state.revision = state.revision.wrapping_add(1);

@@ -1,6 +1,6 @@
 use super::{
-    air_conditioner, bridged_info::BridgedHandler, curtain, fan, lighting, on_off::OnOffHandler,
-    sensors, states,
+    air_conditioner, bridged_info::BridgedHandler, curtain, fan, heater, lighting,
+    on_off::OnOffHandler, sensors, states,
 };
 use crate::device::{Function, FunctionKind, LightProfileKind, PhysicalDevice};
 use crate::storage::Identity;
@@ -59,6 +59,10 @@ pub(super) const AIR_CONDITIONER_DEVICE_TYPES: &[DeviceType] = &[
     },
     FAN_DEVICE_TYPE,
 ];
+pub(super) const HEATER_DEVICE_TYPES: &[DeviceType] = &[DeviceType {
+    dtype: 0x0301,
+    drev: 6,
+}];
 
 const AGGREGATOR_ENDPOINT: u16 = 1;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);

@@ -273,7 +273,8 @@ impl DeviceWork {
             function.id() == id
                 && (function.curtain().is_some()
                     || function.fan().is_some()
-                    || function.air_conditioner().is_some())
+                    || function.air_conditioner().is_some()
+                    || function.heater().is_some())
         }) {
             if function.curtain().is_some() {
                 self.physical()
@@ -286,6 +287,13 @@ impl DeviceWork {
                     .function(id)
                     .unwrap()
                     .air_conditioner_source_changed();
+            }
+            if function.heater().is_some() {
+                let heater = self.physical().function(id).unwrap();
+                heater.heater_source_changed();
+                // The shared legacy temperature group is not connected yet, so
+                // the built-in reading stays unavailable until a valid source exists.
+                heater.set_heater_temperature_source_available(false);
             }
             for binding in function.observation_bindings() {
                 self.refresh.borrow_mut().request_baseline(id, binding);
@@ -347,6 +355,7 @@ impl DeviceWork {
                     function.curtain().is_some()
                         || function.fan().is_some()
                         || function.air_conditioner().is_some()
+                        || function.heater().is_some()
                 })
             {
                 drop(local.unsubscribe_properties(&self.key.id));
@@ -380,6 +389,7 @@ impl DeviceWork {
                     && function.curtain().is_none()
                     && function.fan().is_none()
                     && function.air_conditioner().is_none()
+                    && function.heater().is_none()
         }) {
             for binding in function.observation_bindings() {
                 self.refresh_property(function.id(), binding);

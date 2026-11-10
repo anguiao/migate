@@ -8,9 +8,11 @@ mod device;
 mod error;
 mod fan;
 mod function;
+mod heater;
 mod light;
 mod measurement;
 mod numeric;
+mod thermostat;
 
 pub use curtain::{
     CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
@@ -20,6 +22,8 @@ pub use error::CapabilityError;
 pub(crate) use fan::FanSpeedEncoding;
 pub use fan::{FanBindings, FanModeBinding, FanSpeedBinding};
 pub use function::ParsedFunction;
+pub(crate) use heater::HeaterBindings;
 pub use light::{BrightnessBinding, ColorBinding, LightBindings, ModeBinding, TemperatureBinding};
 pub use measurement::{BatteryBinding, MeasurementBinding, MeasurementUnit};
 pub use numeric::{NumericFormat, PropertyBinding};
+pub(crate) use thermostat::ThermostatTemperatureBinding;

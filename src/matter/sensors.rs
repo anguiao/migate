@@ -37,6 +37,20 @@ pub(super) type Co2Handler = MeasurementHandler<f32>;
 
 pub(crate) fn measurement_mapping_issue(function: &Function) -> Option<&'static str> {
     let snapshot = function.snapshot();
+    if matches!(
+        function.description().kind,
+        crate::device::FunctionKind::Heater { .. }
+    ) && let Some(crate::device::TemperatureSourceState::Available(reading)) =
+        snapshot.temperature_source()
+    {
+        return units::temperature_matter_value(
+            reading
+                .value
+                .expect("available built-in temperature has a value"),
+        )
+        .is_none()
+        .then_some("native built-in temperature cannot be represented");
+    }
     if let Some(AmbientTemperature::Available(reading)) = snapshot.ambient_temperature() {
         return units::temperature_matter_value(
             reading

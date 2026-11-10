@@ -1,7 +1,7 @@
 use super::super::{MotionBinding, StateBinding};
 use super::{
-    AirConditionerBindings, CurtainBindings, FanBindings, LightBindings, MeasurementBinding,
-    PropertyBinding,
+    AirConditionerBindings, CurtainBindings, FanBindings, HeaterBindings, LightBindings,
+    MeasurementBinding, PropertyBinding,
 };
 use crate::device::{FunctionDescription, FunctionKind};
 
@@ -28,6 +28,9 @@ enum FunctionBindings {
     },
     AirConditioner {
         air_conditioner: AirConditionerBindings,
+    },
+    Heater {
+        heater: HeaterBindings,
     },
     Temperature {
         measurement: MeasurementBinding,
@@ -65,6 +68,19 @@ impl ParsedFunction {
     pub(crate) fn air_conditioner(&self) -> Option<&AirConditionerBindings> {
         match &self.bindings {
             FunctionBindings::AirConditioner { air_conditioner } => Some(air_conditioner),
+            _ => None,
+        }
+    }
+    pub(crate) fn heater_control(label: impl Into<String>, heater: HeaterBindings) -> Self {
+        Self {
+            id: heater.function_id(),
+            label: label.into(),
+            bindings: FunctionBindings::Heater { heater },
+        }
+    }
+    pub(crate) fn heater(&self) -> Option<&HeaterBindings> {
+        match &self.bindings {
+            FunctionBindings::Heater { heater } => Some(heater),
             _ => None,
         }
     }
@@ -225,6 +241,7 @@ impl ParsedFunction {
             FunctionBindings::Light { power, .. } => format!("light:{}", power.siid),
             FunctionBindings::Fan { fan } => format!("fan:{}", fan.power().siid),
             FunctionBindings::AirConditioner { air_conditioner } => air_conditioner.function_id(),
+            FunctionBindings::Heater { heater } => heater.function_id(),
             FunctionBindings::Curtain { curtain } => {
                 format!("curtain:{}", curtain.motor().property().siid)
             }
@@ -258,6 +275,7 @@ impl ParsedFunction {
             }
             FunctionBindings::Fan { fan } => Some(fan.power()),
             FunctionBindings::AirConditioner { air_conditioner } => Some(air_conditioner.power()),
+            FunctionBindings::Heater { heater } => Some(heater.power()),
             FunctionBindings::Temperature { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Humidity { .. }
@@ -273,6 +291,7 @@ impl ParsedFunction {
             FunctionBindings::Outlet { .. }
             | FunctionBindings::Fan { .. }
             | FunctionBindings::AirConditioner { .. }
+            | FunctionBindings::Heater { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Temperature { .. }
             | FunctionBindings::Humidity { .. }
@@ -294,6 +313,7 @@ impl ParsedFunction {
             | FunctionBindings::Light { .. }
             | FunctionBindings::Fan { .. }
             | FunctionBindings::AirConditioner { .. }
+            | FunctionBindings::Heater { .. }
             | FunctionBindings::Curtain { .. }
             | FunctionBindings::Contact { .. }
             | FunctionBindings::Motion { .. }
@@ -314,6 +334,9 @@ impl ParsedFunction {
             FunctionBindings::AirConditioner { air_conditioner } => FunctionKind::AirConditioner {
                 temperature: air_conditioner.temperature().grid(),
                 vertical_swing: air_conditioner.swing().is_some(),
+            },
+            FunctionBindings::Heater { heater } => FunctionKind::Heater {
+                temperature: heater.temperature().grid(),
             },
             FunctionBindings::Light { lighting, .. } => FunctionKind::Light(lighting.profile()),
             FunctionBindings::Temperature { measurement } => {
@@ -343,6 +366,9 @@ impl ParsedFunction {
         if let Some(air_conditioner) = self.air_conditioner() {
             return air_conditioner.bindings();
         }
+        if let Some(heater) = self.heater() {
+            return heater.bindings();
+        }
         if let Some(fan) = self.fan() {
             return fan.bindings();
         }
@@ -365,6 +391,8 @@ impl ParsedFunction {
     pub(crate) fn observation_bindings(&self) -> Vec<PropertyBinding> {
         if let Some(ac) = self.air_conditioner() {
             ac.observation_bindings()
+        } else if let Some(heater) = self.heater() {
+            heater.observation_bindings()
         } else if let Some(curtain) = self.curtain() {
             vec![
                 curtain.status().property(),

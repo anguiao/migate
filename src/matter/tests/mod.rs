@@ -2,6 +2,7 @@ mod air_conditioner;
 mod composition;
 mod diagnostics;
 mod handlers;
+mod heater;
 mod lighting_handlers;
 mod subscriptions;
 pub(crate) mod support;

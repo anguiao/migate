@@ -17,6 +17,7 @@ fn capabilities(description: &crate::device::FunctionDescription) -> String {
             Capability::Curtain => "curtain".into(),
             Capability::Fan => "fan".into(),
             Capability::AirConditioner => "air conditioner".into(),
+            Capability::Heater => "heater".into(),
             Capability::Brightness => "brightness".into(),
             Capability::ColorTemperature(interval) => {
                 format!("temperature {}–{} K", interval.min(), interval.max())
@@ -70,7 +71,12 @@ fn observed_function_lines(
                         name
                     }
             }));
-        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}; {diagnostic}."));
+        let diagnostic = if diagnostic.is_empty() {
+            String::new()
+        } else {
+            format!("; {diagnostic}")
+        };
+        lines.push(format!("    {name}: {value}; upstream time {source_time}; received at {received_at}{diagnostic}."));
     }
     if show_commands {
         lines.extend(
@@ -286,6 +292,89 @@ pub(super) fn render(
                     let pending = function.pending_air_conditioner_commands();
                     if !pending.is_empty() {
                         lines.push(format!("    queued air-conditioner commands: {pending:?}."));
+                    }
+                }
+                crate::device::FunctionState::Heater { heater } => {
+                    let power = heater.power.value.map_or_else(
+                        || "unknown".into(),
+                        |value| if value { "on" } else { "off" }.into(),
+                    );
+                    let mode = match heater.power.value {
+                        None => "unknown".into(),
+                        Some(false) => "Off".into(),
+                        Some(true) => "Heat".into(),
+                    };
+                    let (current, current_source_time, current_received_at) = match heater
+                        .temperature_source
+                    {
+                        crate::device::TemperatureSourceState::Available(reading) => (
+                            reading
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value:.2} °C")),
+                            reading.source_time,
+                            reading.received_at,
+                        ),
+                        crate::device::TemperatureSourceState::AwaitingReading => (
+                            "unknown (awaiting a valid temperature reading)".into(),
+                            None,
+                            None,
+                        ),
+                        crate::device::TemperatureSourceState::Unavailable => {
+                            ("unknown (built-in source unavailable)".into(), None, None)
+                        }
+                    };
+                    let mut entries = vec![
+                        (
+                            "Power",
+                            power,
+                            heater.power.source_time,
+                            heater.power.received_at,
+                        ),
+                        (
+                            "Mode",
+                            mode,
+                            heater.power.source_time,
+                            heater.power.received_at,
+                        ),
+                        (
+                            "Target temperature",
+                            heater
+                                .temperature
+                                .value
+                                .map_or_else(|| "unknown".into(), |value| format!("{value} °C")),
+                            heater.temperature.source_time,
+                            heater.temperature.received_at,
+                        ),
+                        (
+                            "Current temperature",
+                            current,
+                            current_source_time,
+                            current_received_at,
+                        ),
+                    ];
+                    if heater.temperature_source
+                        != crate::device::TemperatureSourceState::Available(
+                            heater.current_temperature,
+                        )
+                        && let Some(value) = heater.current_temperature.value
+                    {
+                        entries.push((
+                            "Last reading (diagnostic only)",
+                            format!("{value:.2} °C"),
+                            heater.current_temperature.source_time,
+                            heater.current_temperature.received_at,
+                        ));
+                    }
+                    lines.extend(observed_function_lines(
+                        status,
+                        &key.id,
+                        function,
+                        entries,
+                        show_commands,
+                    ));
+                    let pending = function.pending_heater_commands();
+                    if !pending.is_empty() {
+                        lines.push(format!("    queued heater commands: {pending:?}."));
                     }
                 }
                 crate::device::FunctionState::Fan { fan } => {

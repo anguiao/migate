@@ -12,6 +12,7 @@ pub(super) enum FunctionHandlerKind {
     FanSwing(fan::Fan<true>),
     AirConditioner(air_conditioner::AirConditioner<false>),
     AirConditionerSwing(air_conditioner::AirConditioner<true>),
+    Heater(heater::Heater),
     Light(Box<lighting::Lighting>),
     Temperature(sensors::TemperatureHandler),
     Humidity(sensors::HumidityHandler),
@@ -117,6 +118,11 @@ impl FunctionHandler {
                 Dataver::new(versions.thermostat),
                 Dataver::new(versions.fan),
             )),
+            FunctionKind::Heater { .. } => FunctionHandlerKind::Heater(heater::Heater::new(
+                function,
+                endpoint,
+                Dataver::new(versions.thermostat),
+            )),
             FunctionKind::Curtain => FunctionHandlerKind::Curtain(curtain::CurtainHandler::new(
                 function,
                 endpoint,
@@ -138,6 +144,7 @@ impl FunctionHandler {
             | FunctionHandlerKind::FanSwing(_)
             | FunctionHandlerKind::AirConditioner(_)
             | FunctionHandlerKind::AirConditionerSwing(_)
+            | FunctionHandlerKind::Heater(_)
             | FunctionHandlerKind::Temperature(_)
             | FunctionHandlerKind::Humidity(_)
             | FunctionHandlerKind::Co2(_)
@@ -174,6 +181,9 @@ impl FunctionHandler {
             FunctionHandlerKind::FanSwing(handler) => handler.bump(cluster),
             FunctionHandlerKind::AirConditioner(handler) => handler.bump(cluster),
             FunctionHandlerKind::AirConditionerSwing(handler) => handler.bump(cluster),
+            FunctionHandlerKind::Heater(handler) if cluster.is_none_or(|id| id == 0x201) => {
+                handler.sync()
+            }
             FunctionHandlerKind::Curtain(handler) if cluster.is_none_or(|id| id == 0x102) =>
                 <curtain::CurtainHandler as window_covering::ClusterAsyncHandler>::dataver_changed(handler),
             FunctionHandlerKind::Temperature(handler)
@@ -213,6 +223,7 @@ impl FunctionHandler {
             | FunctionHandlerKind::AirConditionerSwing(_) => {
                 |_, cluster| matches!(cluster, 6 | 0x201 | 0x202)
             }
+            FunctionHandlerKind::Heater(_) => |_, cluster| cluster == 0x201,
             FunctionHandlerKind::Light(_) => |_, cluster| matches!(cluster, 6 | 8 | 0x300),
             FunctionHandlerKind::Temperature(_) => |_, cluster| cluster == 0x402,
             FunctionHandlerKind::Humidity(_) => |_, cluster| cluster == 0x405,
@@ -284,6 +295,7 @@ macro_rules! dispatch_function {
             FunctionHandlerKind::FanSwing(handler) => AsyncHandler::$method(handler, $($arg),*).await,
             FunctionHandlerKind::AirConditioner(handler) => AsyncHandler::$method(handler, $($arg),*).await,
             FunctionHandlerKind::AirConditionerSwing(handler) => AsyncHandler::$method(handler, $($arg),*).await,
+            FunctionHandlerKind::Heater(handler) => AsyncHandler::$method(handler, $($arg),*).await,
             FunctionHandlerKind::Curtain(handler) => AsyncHandler::$method(&window_covering::HandlerAsyncAdaptor(handler), $($arg),*).await,
             FunctionHandlerKind::Light(light) => AsyncHandler::$method(
                 &lighting::Dispatch(light), $($arg),*

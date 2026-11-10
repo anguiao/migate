@@ -37,6 +37,7 @@ pub enum Capability {
     Curtain,
     Fan,
     AirConditioner,
+    Heater,
     Brightness,
     ColorTemperature(TemperatureInterval),
     ColorRgb,
@@ -63,6 +64,9 @@ pub enum FunctionKind {
         temperature: super::TemperatureGrid,
         vertical_swing: bool,
     },
+    Heater {
+        temperature: super::TemperatureGrid,
+    },
     Temperature(MeasurementRange),
     Humidity(MeasurementRange),
     CarbonDioxide(MeasurementRange),
@@ -80,6 +84,7 @@ impl FunctionKind {
                 | Self::Curtain
                 | Self::Fan { .. }
                 | Self::AirConditioner { .. }
+                | Self::Heater { .. }
         )
     }
     pub fn is_state_sensor(self) -> bool {
@@ -98,6 +103,7 @@ impl FunctionKind {
             | Self::Curtain
             | Self::Fan { .. }
             | Self::AirConditioner { .. }
+            | Self::Heater { .. }
             | Self::Temperature(_)
             | Self::Humidity(_)
             | Self::CarbonDioxide(_)
@@ -130,6 +136,7 @@ impl FunctionKind {
             Self::Curtain => vec![Capability::Curtain],
             Self::Fan { .. } => vec![Capability::OnOff, Capability::Fan],
             Self::AirConditioner { .. } => vec![Capability::OnOff, Capability::AirConditioner],
+            Self::Heater { .. } => vec![Capability::OnOff, Capability::Heater],
             Self::Light(profile) => {
                 let mut capabilities = vec![Capability::OnOff];
                 if profile.has_brightness() {
@@ -480,6 +487,9 @@ pub enum FunctionState {
     AirConditioner {
         air_conditioner: super::AirConditionerSnapshot,
     },
+    Heater {
+        heater: super::HeaterSnapshot,
+    },
     Temperature {
         measurement: MeasurementSnapshot,
     },
@@ -503,7 +513,7 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
-    /// Return the temperature source state, or `None` for other functions.
+    /// Return the measurement or built-in thermostat temperature source state.
     pub fn temperature_source(&self) -> Option<TemperatureSourceState> {
         self.temperature_source
     }
@@ -514,6 +524,12 @@ impl FunctionSnapshot {
     pub fn air_conditioner(&self) -> Option<super::AirConditionerSnapshot> {
         match self.state {
             FunctionState::AirConditioner { air_conditioner } => Some(air_conditioner),
+            _ => None,
+        }
+    }
+    pub fn heater(&self) -> Option<super::HeaterSnapshot> {
+        match self.state {
+            FunctionState::Heater { heater } => Some(heater),
             _ => None,
         }
     }
@@ -545,6 +561,13 @@ impl FunctionSnapshot {
                     .map(Power::from)
                     .unwrap_or(Power::Unknown),
             ),
+            FunctionState::Heater { heater } => Some(
+                heater
+                    .power
+                    .value
+                    .map(Power::from)
+                    .unwrap_or(Power::Unknown),
+            ),
             FunctionState::Temperature { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Humidity { .. }
@@ -562,6 +585,7 @@ impl FunctionSnapshot {
             | FunctionState::Curtain { .. }
             | FunctionState::Fan { .. }
             | FunctionState::AirConditioner { .. }
+            | FunctionState::Heater { .. }
             | FunctionState::Temperature { .. }
             | FunctionState::Humidity { .. }
             | FunctionState::CarbonDioxide { .. }
@@ -582,6 +606,7 @@ impl FunctionSnapshot {
             | FunctionState::Curtain { .. }
             | FunctionState::Fan { .. }
             | FunctionState::AirConditioner { .. }
+            | FunctionState::Heater { .. }
             | FunctionState::Contact { .. }
             | FunctionState::Motion { .. }
             | FunctionState::Occupancy { .. } => None,

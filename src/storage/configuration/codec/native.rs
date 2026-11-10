@@ -10,8 +10,8 @@ use crate::{
         AirConditionerTemperatureBinding, BatteryBinding, BrightnessBinding, ColorBinding,
         CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
         EventArgument, EventBinding, FanBindings, FanModeBinding, FanSpeedBinding,
-        FanSpeedEncoding, LightBindings, MeasurementBinding, MeasurementUnit, ModeBinding,
-        MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        FanSpeedEncoding, HeaterBindings, LightBindings, MeasurementBinding, MeasurementUnit,
+        ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
         RecognitionMetadata, StateBinding, StateMapping, StateValue, TemperatureBinding,
     },
 };
@@ -65,6 +65,12 @@ enum WireFunction {
         swing: Option<WireBinding>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mcn04: Option<WireMcn04>,
+    },
+    Heater {
+        id: String,
+        label: String,
+        power: WireBinding,
+        temperature: WireAirConditionerTemperature,
     },
     Curtain {
         id: String,

@@ -3,6 +3,7 @@ mod bridge;
 mod bridged_info;
 mod curtain;
 mod fan;
+mod heater;
 mod lighting;
 mod model;
 mod on_off;
@@ -11,6 +12,7 @@ mod sensors;
 mod shape;
 mod states;
 mod storage;
+mod thermostat;
 pub(crate) mod units;
 
 pub(crate) use bridge::Advertisement;

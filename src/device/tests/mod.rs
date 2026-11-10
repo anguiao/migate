@@ -2,6 +2,7 @@ mod air_conditioner_commands;
 mod ambient_temperature;
 mod fan;
 mod fan_commands;
+mod heater;
 async fn next_power(
     receiver: &mut crate::device::CommandReceiver,
 ) -> Option<crate::device::CommandRequest> {

@@ -20,6 +20,7 @@ mod curtain;
 mod fan;
 mod feedback;
 mod gates;
+mod heater;
 mod properties;
 mod records;
 mod refresh;
@@ -188,7 +189,10 @@ async fn send_owned(
     let gate = (light
         || matches!(
             &request,
-            DeviceRequest::Curtain(_) | DeviceRequest::Fan(_) | DeviceRequest::AirConditioner(_)
+            DeviceRequest::Curtain(_)
+                | DeviceRequest::Fan(_)
+                | DeviceRequest::AirConditioner(_)
+                | DeviceRequest::Heater(_)
         ))
     .then(|| {
         context
@@ -211,6 +215,9 @@ async fn send_owned(
                 }
                 DeviceRequest::AirConditioner(request) => {
                     air_conditioner::send(request, owner, work, sink, &id, gate).await
+                }
+                DeviceRequest::Heater(request) => {
+                    heater::send(request, owner, work, sink, &id, gate).await
                 }
                 request => lighting::send(request, owner, work, sink, &id, gate).await,
             }

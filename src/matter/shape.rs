@@ -9,7 +9,7 @@
 //! generated attribute/command are deliberately excluded.
 //! Equivalent Kelvin encodings of the same mired span compare equal.
 
-use super::{air_conditioner, model, units};
+use super::{air_conditioner, heater, model, units};
 use crate::device::{FunctionDescription, FunctionKind, LightProfileKind};
 use rs_matter::dm::clusters::decl::thermostat::ClusterAsyncHandler;
 
@@ -38,6 +38,11 @@ enum FixedKind {
     AirConditioner {
         temperature: (i16, i16),
         vertical_swing: bool,
+        device_types: Vec<(u16, u16)>,
+        thermostat_features: u32,
+    },
+    Heater {
+        temperature: (i16, i16),
         device_types: Vec<(u16, u16)>,
         thermostat_features: u32,
     },
@@ -94,6 +99,14 @@ pub(crate) fn fixed_shape_with_battery<'a>(
                             .map(|device_type| (device_type.dtype, device_type.drev))
                             .collect(),
                         thermostat_features: air_conditioner::Thermostat::CLUSTER.feature_map,
+                    },
+                    FunctionKind::Heater { temperature } => FixedKind::Heater {
+                        temperature: (temperature.min(), temperature.effective_max()),
+                        device_types: model::HEATER_DEVICE_TYPES
+                            .iter()
+                            .map(|device_type| (device_type.dtype, device_type.drev))
+                            .collect(),
+                        thermostat_features: heater::HeaterThermostat::CLUSTER.feature_map,
                     },
                     FunctionKind::Contact => FixedKind::Contact,
                     FunctionKind::Motion => FixedKind::Motion,

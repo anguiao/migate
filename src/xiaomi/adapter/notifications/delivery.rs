@@ -69,6 +69,34 @@ impl Context {
         }
         if let Some(work) = &work
             && let Some(function) = work.native.device().functions().iter().find(|function| {
+                function.heater().is_some() && function.observation_bindings().contains(&binding)
+            })
+        {
+            if let Ok(value) = DeviceWork::decode_heater(function, binding, value)
+                && self.accept_state_notification(work, function.id(), source)
+            {
+                work.observe_heater(
+                    function,
+                    binding,
+                    value,
+                    Observation {
+                        source: source.kind(),
+                        source_time: update_time,
+                        received_at: self.clock.unix_now(),
+                    },
+                    if cached_report {
+                        Origin::Cache
+                    } else {
+                        Origin::Notification
+                    },
+                );
+                self.update_routing("heater property observed");
+                self.status_changed.notify(usize::MAX);
+            }
+            return;
+        }
+        if let Some(work) = &work
+            && let Some(function) = work.native.device().functions().iter().find(|function| {
                 function.fan().is_some() && function.observation_bindings().contains(&binding)
             })
         {
@@ -202,7 +230,8 @@ impl Context {
                 function.id() == id
                     && (function.curtain().is_some()
                         || function.fan().is_some()
-                        || function.air_conditioner().is_some())
+                        || function.air_conditioner().is_some()
+                        || function.heater().is_some())
             }) {
                 work.install_observer(id, source.clone());
             } else {

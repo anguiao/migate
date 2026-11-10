@@ -11,6 +11,7 @@ mod diagnostics;
 mod fan;
 mod group_composition;
 mod groups;
+mod heater;
 mod http_routing;
 mod initial_reads;
 mod lan;

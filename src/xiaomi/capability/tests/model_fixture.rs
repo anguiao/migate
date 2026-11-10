@@ -108,6 +108,22 @@ pub(crate) fn native_for(description: &PhysicalDeviceDescription) -> SourceFixtu
                 }
                 continue;
             }
+            FunctionKind::Heater { temperature } => {
+                let heating = property(2, "heating", 0xc7, "bool");
+                let target = numeric(
+                    3,
+                    "target-temperature",
+                    0x21,
+                    "uint8",
+                    "celsius",
+                    json!([temperature.min(), temperature.max(), temperature.step()]),
+                );
+                services.insert(
+                    3,
+                    service(3, "ptc-bath-heater", 0x783b, vec![heating, target]),
+                );
+                continue;
+            }
             FunctionKind::Curtain => {
                 let input: Value = serde_json::from_str(include_str!(
                     "../../../../tests/fixtures/miot/xiaomi-acn010.json"
@@ -218,6 +234,12 @@ pub(crate) fn native_for(description: &PhysicalDeviceDescription) -> SourceFixtu
         .any(|function| function.kind == FunctionKind::Outlet)
     {
         ("outlet", 0xa002)
+    } else if description
+        .functions()
+        .iter()
+        .any(|function| matches!(function.kind, FunctionKind::Heater { .. }))
+    {
+        ("bath-heater", 0xa028)
     } else if description
         .functions()
         .iter()

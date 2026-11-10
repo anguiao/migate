@@ -23,6 +23,12 @@ const AIR_CONDITIONER_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     <air_conditioner::Thermostat as thermostat::ClusterAsyncHandler>::CLUSTER,
     <air_conditioner::AirConditionerFan<false> as fan_control::ClusterAsyncHandler>::CLUSTER
 );
+const HEATER_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::CLUSTER_TAG_LIST,
+    groups::GroupsHandler::CLUSTER,
+    identify::IdentifyHandler::<()>::CLUSTER,
+    <heater::HeaterThermostat as thermostat::ClusterAsyncHandler>::CLUSTER
+);
 const AIR_CONDITIONER_ROCKING_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     desc::CLUSTER_TAG_LIST,
     groups::GroupsHandler::CLUSTER,
@@ -258,6 +264,10 @@ impl Entry {
                     AIR_CONDITIONER_ROCKING_CLUSTERS,
                 )
                 .with_tags(tags),
+                FunctionHandlerKind::Heater(_) => {
+                    Endpoint::new(self.endpoint, HEATER_DEVICE_TYPES, HEATER_CLUSTERS)
+                        .with_tags(tags)
+                }
                 FunctionHandlerKind::Fan(_) => {
                     Endpoint::new(self.endpoint, devices!(FAN_DEVICE_TYPE), FAN_CHILD_CLUSTERS)
                         .with_tags(tags)

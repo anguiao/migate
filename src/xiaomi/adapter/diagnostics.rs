@@ -207,6 +207,15 @@ impl Context {
                                     binding.map(|binding| (name, binding))
                                 }),
                             )
+                        } else if let Some(heater) = function.heater() {
+                            property_statuses(
+                                &work,
+                                function.id(),
+                                [
+                                    ("Power", heater.power()),
+                                    ("Temperature", heater.temperature().property()),
+                                ],
+                            )
                         } else if let Some(fan) = function.fan() {
                             property_statuses(
                                 &work,

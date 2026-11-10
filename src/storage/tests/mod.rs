@@ -2,6 +2,7 @@ mod configuration;
 mod configuration_air_conditioner;
 mod configuration_curtain;
 mod configuration_fan;
+mod configuration_heater;
 mod configuration_sensors;
 mod configuration_temperature_bindings;
 pub(crate) mod fixtures;

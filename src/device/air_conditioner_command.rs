@@ -1,18 +1,18 @@
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Instant,
 };
 
 use super::{
-    AirConditionerFanSpeed, AirConditionerMode, AirConditionerSnapshot, AirConditionerTarget,
-    Command, CommandError, CommandReceiver, DeviceRequest, Function, FunctionKind,
-    FunctionSnapshot,
+    AirConditionerFanSpeed, AirConditionerMode, AirConditionerTarget, Command, CommandError,
+    CommandReceiver, DeviceRequest, Function, FunctionKind, FunctionSnapshot,
     air_conditioner::{AirConditionerConstraints, ConstraintViolation},
     state::AirConditionerRuntime,
-    step_command::{StepCommand, StepCoordinator, StepEntry},
+    step_command::StepCommand,
+    thermostat::{
+        self, AirConditionerProfile, ThermostatAction, ThermostatEntry, ThermostatPowerSubmission,
+        ThermostatProfile,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,9 +47,7 @@ impl StepCommand for AirConditionerCommand {
         matches!(self, Self::Power(false)) && !matches!(previous, Self::Power(_))
     }
 }
-pub(super) type AirConditionerCoordinator = StepCoordinator<AirConditionerCommand>;
-
-pub struct AirConditionerAction(Arc<StepEntry<AirConditionerCommand>>);
+pub struct AirConditionerAction(ThermostatAction<AirConditionerCommand>);
 impl AirConditionerAction {
     pub async fn accepted(&self) -> Result<FunctionSnapshot, CommandError> {
         self.0.accepted().await
@@ -70,46 +68,28 @@ impl Function {
         {
             return Err(CommandError::Unsupported);
         }
-        self.submit_air_conditioner(|_| Ok(command))
-    }
-
-    fn submit_air_conditioner(
-        &self,
-        resolve: impl FnOnce(AirConditionerSnapshot) -> Result<AirConditionerCommand, CommandError>,
-    ) -> Result<AirConditionerAction, CommandError> {
-        let mut state = self.0.state.lock().unwrap();
-        let runtime = state.air_conditioner().unwrap();
-        if runtime.commands.is_closed() {
-            return Err(CommandError::Cancelled);
-        }
-        self.snapshot_locked(&state).availability.command_result()?;
-        let command = resolve(runtime.snapshot)?;
-        let action = AirConditionerAction(
-            state
-                .air_conditioner_mut()
-                .unwrap()
-                .commands
-                .submit(command),
-        );
-        self.0.submitted.notify(usize::MAX);
-        Ok(action)
+        thermostat::submit::<AirConditionerProfile>(self, |_| Ok(command)).map(AirConditionerAction)
     }
 
     pub(super) async fn execute_air_conditioner_power(
         &self,
         command: Command,
     ) -> Result<FunctionSnapshot, CommandError> {
-        let action = self.submit_air_conditioner(|snapshot| {
+        let action = thermostat::submit::<AirConditionerProfile>(self, |runtime| {
             Ok(AirConditionerCommand::Power(match command {
                 Command::On => true,
                 Command::Off => false,
-                Command::Toggle => !snapshot.power.value.ok_or(CommandError::UnknownState)?,
+                Command::Toggle => !runtime
+                    .observation
+                    .power
+                    .value
+                    .ok_or(CommandError::UnknownState)?,
             }))
         })?;
-        let _submission = PowerSubmission {
-            function: self.clone(),
-            entry: action.0.clone(),
-        };
+        let _submission = ThermostatPowerSubmission::<AirConditionerProfile>::new(
+            self.clone(),
+            action.entry().clone(),
+        );
         action.accepted().await
     }
 
@@ -154,76 +134,30 @@ impl Function {
         let state = self.0.state.lock().unwrap();
         state
             .air_conditioner()
-            .map_or_else(Vec::new, |runtime| runtime.commands.pending_commands())
-    }
-}
-
-struct PowerSubmission {
-    function: Function,
-    entry: Arc<StepEntry<AirConditionerCommand>>,
-}
-impl Drop for PowerSubmission {
-    fn drop(&mut self) {
-        let mut state = self.function.0.state.lock().unwrap();
-        state
-            .air_conditioner_mut()
-            .unwrap()
-            .commands
-            .cancel_pending(&self.entry);
+            .map_or_else(Vec::new, |runtime| runtime.thermostat.pending_commands())
     }
 }
 
 impl CommandReceiver {
     pub(super) async fn next_air_conditioner_operation(&mut self) -> Option<DeviceRequest> {
-        let flight = self
-            .function
-            .0
-            .state
-            .lock()
-            .unwrap()
-            .air_conditioner()
-            .unwrap()
-            .commands
-            .flight();
-        if let Some(flight) = flight {
-            flight.wait_gate().await;
-            self.function
-                .0
-                .state
-                .lock()
-                .unwrap()
-                .air_conditioner_mut()
-                .unwrap()
-                .commands
-                .release_flight(&flight);
-        }
-        loop {
-            let listener = self.function.0.submitted.listen();
-            {
-                let mut state = self.function.0.state.lock().unwrap();
-                let commands = &mut state.air_conditioner_mut().unwrap().commands;
-                if let Some(entry) = commands.take_next() {
-                    return Some(DeviceRequest::AirConditioner(AirConditionerRequest {
-                        command: entry.command,
-                        function: self.function.clone(),
-                        entry,
-                        mode_revision: AtomicU64::new(0),
-                        mode_pending: AtomicBool::new(false),
-                    }));
-                }
-                if commands.is_closed() {
-                    return None;
-                }
-            }
-            listener.await;
-        }
+        let entry = thermostat::next::<AirConditionerProfile>(&self.function).await?;
+        let command = entry.command;
+        Some(DeviceRequest::AirConditioner(AirConditionerRequest {
+            command,
+            entry: ThermostatEntry::new(
+                self.function.clone(),
+                entry,
+                AirConditionerProfile::MISSING_WRITE,
+            ),
+            mode_revision: AtomicU64::new(0),
+            mode_pending: AtomicBool::new(false),
+        }))
     }
 }
 
 pub struct AirConditionerRequest {
     pub command: AirConditionerCommand,
-    function: Function,
-    entry: Arc<StepEntry<AirConditionerCommand>>,
+    entry: ThermostatEntry<AirConditionerCommand>,
     mode_revision: AtomicU64,
     mode_pending: AtomicBool,
 }
@@ -232,7 +166,7 @@ impl AirConditionerRequest {
         self.entry.queued_at()
     }
     pub(crate) fn plan(&self) -> Result<Vec<AirConditionerStep>, CommandError> {
-        let state = self.function.0.state.lock().unwrap();
+        let state = self.entry.function().0.state.lock().unwrap();
         let runtime = state.air_conditioner().unwrap();
         self.plan_with_runtime(runtime)
     }
@@ -269,7 +203,9 @@ impl AirConditionerRequest {
         }
         validate_target(runtime, target)?;
         let mut steps = Vec::new();
-        if (target.mode.is_some() || target.speed.is_some()) && runtime.commands.needs_power_on() {
+        if (target.mode.is_some() || target.speed.is_some())
+            && runtime.thermostat.commands.needs_power_on()
+        {
             steps.push(AirConditionerStep::Power(true));
         }
         if let Some(mode) = target.mode {
@@ -294,7 +230,7 @@ impl AirConditionerRequest {
         runtime: &AirConditionerRuntime,
         step: AirConditionerStep,
     ) -> Result<(), CommandError> {
-        if !self.entry.started() {
+        if !self.entry.entry().started() {
             self.plan_with_runtime(runtime)?;
             return Ok(());
         }
@@ -316,18 +252,18 @@ impl AirConditionerRequest {
         validate_target(runtime, target)
     }
     pub(crate) fn send_result(&self, step: AirConditionerStep) -> Result<(), CommandError> {
-        let state = self.function.0.state.lock().unwrap();
+        let state = self.entry.function().0.state.lock().unwrap();
         self.entry.current_result()?;
         self.validate_step(state.air_conditioner().unwrap(), step)
     }
     pub(crate) fn mark_sent(&self, step: AirConditionerStep) -> Result<(), CommandError> {
-        let mut state = self.function.0.state.lock().unwrap();
+        let mut state = self.entry.function().0.state.lock().unwrap();
         self.entry.current_result()?;
         self.validate_step(state.air_conditioner().unwrap(), step)?;
         self.entry.mark_sent()?;
         let runtime = state.air_conditioner_mut().unwrap();
         if step == AirConditionerStep::Power(false) {
-            runtime.commands.power_off_sent();
+            runtime.thermostat.commands.power_off_sent();
         }
         if matches!(step, AirConditionerStep::Mode(_)) {
             self.mode_revision
@@ -337,7 +273,7 @@ impl AirConditionerRequest {
         Ok(())
     }
     pub(crate) fn step_accepted(&self, step: AirConditionerStep) -> Result<(), CommandError> {
-        let mut state = self.function.0.state.lock().unwrap();
+        let mut state = self.entry.function().0.state.lock().unwrap();
         self.entry.step_accepted()?;
         if let AirConditionerStep::Mode(mode) = step {
             self.mode_pending.store(false, Ordering::Relaxed);
@@ -349,17 +285,14 @@ impl AirConditionerRequest {
         Ok(())
     }
     pub(crate) fn accept(self) -> Result<FunctionSnapshot, CommandError> {
-        let state = self.function.0.state.lock().unwrap();
-        self.entry.accept(
-            || self.function.snapshot_locked(&state),
-            "air-conditioner request has no settled write",
-        )
+        self.entry.accept()
     }
     pub(crate) fn reject(self, error: CommandError) {
-        let mut state = self.function.0.state.lock().unwrap();
+        let mut state = self.entry.function().0.state.lock().unwrap();
         if self.mode_pending.swap(false, Ordering::Relaxed) {
             state.air_conditioner_mut().unwrap().planning_mode = None;
         }
+        drop(state);
         self.entry.reject(error);
     }
 }
@@ -404,10 +337,11 @@ fn validate_target(
 }
 impl Drop for AirConditionerRequest {
     fn drop(&mut self) {
-        let mut state = self.function.0.state.lock().unwrap();
+        let mut state = self.entry.function().0.state.lock().unwrap();
         if self.mode_pending.swap(false, Ordering::Relaxed) {
             state.air_conditioner_mut().unwrap().planning_mode = None;
         }
+        drop(state);
         self.entry.cancel();
     }
 }

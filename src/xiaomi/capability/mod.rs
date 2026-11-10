@@ -3,6 +3,7 @@ mod curtain;
 mod description;
 mod fan;
 mod group;
+mod heater;
 mod light;
 mod model;
 mod native;
@@ -12,11 +13,12 @@ mod repair;
 mod sensor;
 mod source;
 mod state_sensor;
+mod thermostat;
 pub(crate) use group::parse_group;
 pub(crate) use model::FanSpeedEncoding;
 pub(crate) use model::{
     AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-    AirConditionerTemperatureBinding,
+    AirConditionerTemperatureBinding, HeaterBindings,
 };
 pub use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,
@@ -68,6 +70,12 @@ pub fn parse_device_for_model(
                     })
                     .map(|bindings| ParsedFunction::air_conditioner_control("空调", bindings))
                     .map_err(|error| diagnostic("air-conditioner", error)),
+            )
+        } else if service.urn.standard("service", "ptc-bath-heater", 0x783b) {
+            Some(
+                heater::parse_heater_service(service)
+                    .map(|bindings| ParsedFunction::heater_control("暖风", bindings))
+                    .map_err(|error| diagnostic("heater", error)),
             )
         } else if service.urn.standard("service", "light", 0x7802) {
             Some(
@@ -202,6 +210,7 @@ fn is_core(urn: &description::Urn<'_>, function: &ParsedFunction) -> bool {
             urn.standard("device", "air-condition-outlet", 0xa045)
                 || urn.standard("device", "air-conditioner", 0xa004)
         }
+        FunctionKind::Heater { .. } => urn.standard("device", "bath-heater", 0xa028),
         FunctionKind::Curtain => urn.standard("device", "curtain", 0xa00c),
         FunctionKind::Outlet => urn.standard("device", "outlet", 0xa002),
         FunctionKind::Temperature(_) | FunctionKind::Humidity(_) => {

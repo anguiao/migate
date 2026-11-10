@@ -1,5 +1,7 @@
 //! Validated air-conditioner values and source-independent control constraints.
 
+pub(crate) use super::thermostat::TemperatureGrid;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AirConditionerMode {
     Cool,
@@ -67,65 +69,6 @@ pub(crate) enum AirConditionerValue {
     Temperature(i16),
     Speed(AirConditionerFanSpeed),
     Swing(bool),
-}
-impl AirConditionerSnapshot {
-    /// The source has already validated the value against its native binding.
-    pub(crate) fn update(
-        &mut self,
-        value: AirConditionerValue,
-        source_time: Option<i64>,
-        received_at: i64,
-    ) -> bool {
-        match value {
-            AirConditionerValue::Power(value) => self.power.update(value, source_time, received_at),
-            AirConditionerValue::Mode(value) => self.mode.update(value, source_time, received_at),
-            AirConditionerValue::Temperature(value) => {
-                self.temperature.update(value, source_time, received_at)
-            }
-            AirConditionerValue::Speed(value) => self.speed.update(value, source_time, received_at),
-            AirConditionerValue::Swing(value) => self.swing.update(value, source_time, received_at),
-        }
-    }
-}
-
-/// A native grid in whole degrees Celsius, representable in Matter centidegrees.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TemperatureGrid {
-    min: i16,
-    max: i16,
-    step: i16,
-}
-impl TemperatureGrid {
-    pub fn new(min: i16, max: i16, step: i16) -> Result<Self, &'static str> {
-        if min < -273 || max > 327 || min > max || step <= 0 {
-            return Err("invalid air-conditioner temperature grid");
-        }
-        Ok(Self { min, max, step })
-    }
-
-    pub(crate) fn min(self) -> i16 {
-        self.min
-    }
-    pub(crate) fn max(self) -> i16 {
-        self.max
-    }
-    pub(crate) fn step(self) -> i16 {
-        self.step
-    }
-    pub(crate) fn effective_max(self) -> i16 {
-        let min = i32::from(self.min);
-        let step = i32::from(self.step);
-        (min + (i32::from(self.max) - min) / step * step) as i16
-    }
-    pub(crate) fn contains(self, value: i16) -> bool {
-        (self.min..=self.max).contains(&value)
-            && (i32::from(value) - i32::from(self.min)) % i32::from(self.step) == 0
-    }
-    fn values(self) -> impl Iterator<Item = i16> {
-        (i32::from(self.min)..=i32::from(self.max))
-            .step_by(self.step as usize)
-            .map(|value| value as i16)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

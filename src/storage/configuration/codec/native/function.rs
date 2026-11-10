@@ -32,6 +32,21 @@ impl WireFunction {
                 }),
             };
         }
+        if let Some(heater) = function.heater() {
+            let grid = heater.temperature().grid();
+            return Self::Heater {
+                id: function.id().into(),
+                label: function.label().into(),
+                power: heater.power().into(),
+                temperature: WireAirConditionerTemperature {
+                    property: heater.temperature().property().into(),
+                    format: heater.temperature().format(),
+                    min: grid.min(),
+                    max: grid.max(),
+                    step: grid.step(),
+                },
+            };
+        }
         if let Some(fan) = function.fan() {
             return Self::Fan {
                 id: function.id().to_owned(),
@@ -227,6 +242,27 @@ impl WireFunction {
                     return Err("Stored air-conditioner identity is invalid");
                 }
                 Ok(ParsedFunction::air_conditioner_control(label, bindings))
+            }
+            Self::Heater {
+                id,
+                label,
+                power,
+                temperature,
+            } => {
+                let grid = TemperatureGrid::new(temperature.min, temperature.max, temperature.step)
+                    .map_err(|_| "Stored heater binding is invalid")?;
+                let temperature = AirConditionerTemperatureBinding::new(
+                    temperature.property.into(),
+                    temperature.format,
+                    grid,
+                )
+                .map_err(|_| "Stored heater binding is invalid")?;
+                let bindings = HeaterBindings::new(power.into(), temperature)
+                    .map_err(|_| "Stored heater binding is invalid")?;
+                if bindings.function_id() != id {
+                    return Err("Stored heater identity is invalid");
+                }
+                Ok(ParsedFunction::heater_control(label, bindings))
             }
             Self::Fan {
                 id,

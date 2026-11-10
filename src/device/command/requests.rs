@@ -14,6 +14,12 @@ impl Function {
         }
         if matches!(
             self.description().kind,
+            super::super::FunctionKind::Heater { .. }
+        ) {
+            return self.execute_heater_power(command).await;
+        }
+        if matches!(
+            self.description().kind,
             super::super::FunctionKind::Fan { .. }
         ) {
             return self.execute_fan_power(command).await;
@@ -271,6 +277,7 @@ pub enum DeviceRequest {
     Curtain(super::super::CurtainRequest),
     Fan(super::super::FanRequest),
     AirConditioner(super::super::AirConditionerRequest),
+    Heater(super::super::HeaterRequest),
 }
 impl DeviceRequest {
     pub(crate) fn queued_at(&self) -> Instant {
@@ -280,6 +287,7 @@ impl DeviceRequest {
             Self::Curtain(request) => request.queued_at(),
             Self::Fan(request) => request.queued_at(),
             Self::AirConditioner(request) => request.queued_at(),
+            Self::Heater(request) => request.queued_at(),
         }
     }
 }
@@ -291,6 +299,12 @@ impl CommandReceiver {
             super::super::FunctionKind::AirConditioner { .. }
         ) {
             return self.next_air_conditioner_operation().await;
+        }
+        if matches!(
+            self.function.description().kind,
+            super::super::FunctionKind::Heater { .. }
+        ) {
+            return self.next_heater_operation().await;
         }
         if self.function.description().kind == super::super::FunctionKind::Curtain {
             return self.next_curtain_operation().await;

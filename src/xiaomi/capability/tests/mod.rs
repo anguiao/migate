@@ -2,6 +2,7 @@ mod air_conditioner;
 mod composition;
 mod curtain;
 mod fan;
+mod heater;
 mod labels;
 pub(crate) mod model_fixture;
 

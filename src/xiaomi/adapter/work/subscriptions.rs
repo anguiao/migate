@@ -17,6 +17,7 @@ impl DeviceWork {
             || function.curtain().is_some()
             || function.fan().is_some()
             || function.air_conditioner().is_some()
+            || function.heater().is_some()
         {
             return function.observation_bindings();
         }

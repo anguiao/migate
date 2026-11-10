@@ -3,12 +3,9 @@ use super::{
     description::{
         Description, Property, Service, array, binding, control_access, integer_format, string,
     },
-    model::{
-        AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-        AirConditionerTemperatureBinding,
-    },
+    model::{AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding},
+    thermostat::target_temperature,
 };
-use crate::device::air_conditioner::TemperatureGrid;
 
 /// Recognize only an unambiguous standard air-conditioner and fan-control pair.
 pub(super) fn parse_air_conditioner(
@@ -26,30 +23,7 @@ pub(super) fn parse_air_conditioner(
         numeric_format(mode)?,
         codes(mode, &["cool", "heat", "auto", "fan", "dry"])?,
     )?;
-    let temperature = required(service, "target-temperature", 0x21)?;
-    control_access(temperature)?;
-    if string(temperature.value, "unit")? != "celsius" {
-        return Err(CapabilityError::InvalidDescription(
-            "air-conditioner temperature unit",
-        ));
-    }
-    if temperature.value.get("value-list").is_some() {
-        return Err(CapabilityError::InvalidDescription(
-            "air-conditioner temperature shape",
-        ));
-    }
-    let [min, max, step] = array(temperature.value, "value-range")? else {
-        return Err(CapabilityError::InvalidDescription(
-            "air-conditioner temperature range",
-        ));
-    };
-    let grid = TemperatureGrid::new(integer(min)?, integer(max)?, integer(step)?)
-        .map_err(|_| CapabilityError::InvalidDescription("air-conditioner temperature range"))?;
-    let temperature = AirConditionerTemperatureBinding::new(
-        binding(service, temperature),
-        numeric_format(temperature)?,
-        grid,
-    )?;
+    let temperature = target_temperature(service, true)?;
     let speed = required(fan_service, "fan-level", 0x16)?;
     control_access(speed)?;
     let speed = AirConditionerSpeedBinding::new(
@@ -127,21 +101,6 @@ fn numeric_format(property: &Property<'_>) -> Result<NumericFormat, CapabilityEr
     } else {
         integer_format(property)
     }
-}
-fn integer(value: &serde_json::Value) -> Result<i16, CapabilityError> {
-    let raw = value.as_f64().ok_or(CapabilityError::InvalidDescription(
-        "air-conditioner temperature range",
-    ))?;
-    if !raw.is_finite()
-        || raw.fract() != 0.0
-        || raw < f64::from(i16::MIN)
-        || raw > f64::from(i16::MAX)
-    {
-        return Err(CapabilityError::InvalidDescription(
-            "air-conditioner temperature range",
-        ));
-    }
-    Ok(raw as i16)
 }
 fn codes<const N: usize>(
     property: &Property<'_>,
