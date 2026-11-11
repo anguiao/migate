@@ -42,7 +42,7 @@ fn observe(function: &Function, power: bool, temperature: i16) {
 }
 
 #[test]
-fn temperature_and_mode_commands_write_only_their_declared_native_fields() {
+fn out_of_range_targets_leave_the_valid_temperature_command_queued() {
     block_on(async {
         let (device, mut receiver) = heater();
         let function = &device.functions()[0];
@@ -52,70 +52,58 @@ fn temperature_and_mode_commands_write_only_their_declared_native_fields() {
         let temperature = function
             .begin_heater(HeaterCommand::Temperature(30))
             .unwrap();
+        for value in [24, 46] {
+            assert!(matches!(
+                function.begin_heater(HeaterCommand::Temperature(value)),
+                Err(CommandError::Constraint)
+            ));
+        }
         let request = next_heater(&mut receiver).await;
-        assert_eq!(request.plan().unwrap(), [HeaterStep::Temperature(30)]);
-        request.mark_sent(HeaterStep::Temperature(30)).unwrap();
-        request.step_accepted(HeaterStep::Temperature(30)).unwrap();
+        assert_eq!(request.step(), HeaterStep::Temperature(30));
+        request.mark_sent().unwrap();
+        request.step_accepted().unwrap();
         request.accept().unwrap();
         temperature.accepted().await.unwrap();
         assert_eq!(function.snapshot(), original);
 
-        let heat = function
-            .begin_heater(HeaterCommand::Mode(HeaterMode::Heat))
-            .unwrap();
-        let request = next_heater(&mut receiver).await;
-        assert_eq!(request.plan().unwrap(), [HeaterStep::Power(true)]);
-        request.mark_sent(HeaterStep::Power(true)).unwrap();
-        request.step_accepted(HeaterStep::Power(true)).unwrap();
-        request.accept().unwrap();
-        heat.accepted().await.unwrap();
-        assert_eq!(function.snapshot(), original);
-
-        observe(function, true, 30);
+        observe(function, false, 30);
         let heater = snapshot(function);
         assert_eq!(
             (heater.power.value, heater.temperature.value),
-            (Some(true), Some(30))
+            (Some(false), Some(30))
         );
     });
 }
 
 #[test]
-fn only_whole_target_temperatures_in_range_are_accepted_and_power_stays_explicit() {
+fn temperature_and_mode_commands_write_only_their_declared_native_fields() {
     block_on(async {
         let (device, mut receiver) = heater();
         let function = &device.functions()[0];
         observe(function, false, 25);
-        for value in [24, 46] {
-            let action = function
-                .begin_heater(HeaterCommand::Temperature(value))
-                .unwrap();
-            let request = next_heater(&mut receiver).await;
-            assert_eq!(request.plan(), Err(CommandError::Constraint));
-            request.reject(CommandError::Constraint);
-            assert_eq!(action.accepted().await, Err(CommandError::Constraint));
-        }
-        for (command, steps) in [
-            (
-                HeaterCommand::Temperature(25),
-                vec![HeaterStep::Temperature(25)],
-            ),
+        let original = function.snapshot();
+        for (command, step) in [
+            (HeaterCommand::Temperature(25), HeaterStep::Temperature(25)),
+            (HeaterCommand::Temperature(45), HeaterStep::Temperature(45)),
             (
                 HeaterCommand::Mode(HeaterMode::Heat),
-                vec![HeaterStep::Power(true)],
+                HeaterStep::Power(true),
             ),
             (
                 HeaterCommand::Mode(HeaterMode::Off),
-                vec![HeaterStep::Power(false)],
+                HeaterStep::Power(false),
             ),
-            (HeaterCommand::Power(true), vec![HeaterStep::Power(true)]),
-            (HeaterCommand::Power(false), vec![HeaterStep::Power(false)]),
+            (HeaterCommand::Power(true), HeaterStep::Power(true)),
+            (HeaterCommand::Power(false), HeaterStep::Power(false)),
         ] {
             let action = function.begin_heater(command).unwrap();
             let request = next_heater(&mut receiver).await;
-            assert_eq!(request.plan().unwrap(), steps);
-            request.reject(CommandError::Cancelled);
-            assert_eq!(action.accepted().await, Err(CommandError::Cancelled));
+            assert_eq!(request.step(), step);
+            request.mark_sent().unwrap();
+            request.step_accepted().unwrap();
+            request.accept().unwrap();
+            action.accepted().await.unwrap();
+            assert_eq!(function.snapshot(), original);
         }
     });
 }
@@ -130,16 +118,16 @@ fn accepted_commands_never_infer_state_and_off_keeps_a_following_temperature() {
             .begin_heater(HeaterCommand::Temperature(28))
             .unwrap();
         let pending = next_heater(&mut receiver).await;
-        assert_eq!(pending.plan().unwrap(), [HeaterStep::Temperature(28)]);
+        assert_eq!(pending.step(), HeaterStep::Temperature(28));
         let off = function
             .begin_heater(HeaterCommand::Mode(HeaterMode::Off))
             .unwrap();
         assert_eq!(temperature.accepted().await, Err(CommandError::Superseded));
         drop(pending);
         let request = next_heater(&mut receiver).await;
-        assert_eq!(request.plan().unwrap(), [HeaterStep::Power(false)]);
-        request.mark_sent(HeaterStep::Power(false)).unwrap();
-        request.step_accepted(HeaterStep::Power(false)).unwrap();
+        assert_eq!(request.step(), HeaterStep::Power(false));
+        request.mark_sent().unwrap();
+        request.step_accepted().unwrap();
         request.accept().unwrap();
         off.accepted().await.unwrap();
         assert_eq!(snapshot(function).power.value, Some(true));
@@ -148,7 +136,7 @@ fn accepted_commands_never_infer_state_and_off_keeps_a_following_temperature() {
             .begin_heater(HeaterCommand::Temperature(30))
             .unwrap();
         let request = next_heater(&mut receiver).await;
-        assert_eq!(request.plan().unwrap(), [HeaterStep::Temperature(30)]);
+        assert_eq!(request.step(), HeaterStep::Temperature(30));
         request.reject(CommandError::Cancelled);
         assert_eq!(later.accepted().await, Err(CommandError::Cancelled));
         assert_eq!(snapshot(function).power.value, Some(true));

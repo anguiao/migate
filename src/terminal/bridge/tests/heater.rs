@@ -49,11 +49,8 @@ async fn next_heater(receiver: &mut CommandReceiver) -> crate::device::HeaterReq
 }
 
 fn settle(request: crate::device::HeaterRequest) {
-    let steps = request.plan().unwrap();
-    for step in steps {
-        request.mark_sent(step).unwrap();
-        request.step_accepted(step).unwrap();
-    }
+    request.mark_sent().unwrap();
+    request.step_accepted().unwrap();
     request.accept().unwrap();
 }
 
@@ -112,7 +109,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
             async {
                 let request = next_heater(&mut receiver).await;
                 assert_eq!(request.command, HeaterCommand::Temperature(30));
-                assert_eq!(request.plan().unwrap(), [HeaterStep::Temperature(30)]);
+                assert_eq!(request.step(), HeaterStep::Temperature(30));
                 settle(request);
             },
         )
@@ -134,7 +131,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
             async {
                 let request = next_heater(&mut receiver).await;
                 assert_eq!(request.command, HeaterCommand::Mode(HeaterMode::Heat));
-                assert_eq!(request.plan().unwrap(), [HeaterStep::Power(true)]);
+                assert_eq!(request.step(), HeaterStep::Power(true));
                 settle(request);
             },
         )
@@ -156,7 +153,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
             async {
                 let request = next_heater(&mut receiver).await;
                 assert_eq!(request.command, HeaterCommand::Mode(HeaterMode::Off));
-                assert_eq!(request.plan().unwrap(), [HeaterStep::Power(false)]);
+                assert_eq!(request.step(), HeaterStep::Power(false));
                 settle(request);
             },
         )
@@ -169,7 +166,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
                 async {
                     let request = next_heater(&mut receiver).await;
                     assert_eq!(request.command, HeaterCommand::Power(power));
-                    assert_eq!(request.plan().unwrap(), [HeaterStep::Power(power)]);
+                    assert_eq!(request.step(), HeaterStep::Power(power));
                     settle(request);
                 },
             )
@@ -200,26 +197,21 @@ fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
         assert!(invalid.contains("whole number"), "{invalid}");
         assert!(poll_once(receiver.next_operation()).await.is_none());
 
-        let (result, ()) = zip(
-            handle_line(
-                &registry,
-                &store.devices(),
-                &status,
-                "temperature bath heater:3 24",
-                0,
-            ),
-            async {
-                let request = next_heater(&mut receiver).await;
-                assert_eq!(request.plan(), Err(crate::device::CommandError::Constraint));
-                request.reject(crate::device::CommandError::Constraint);
-            },
+        let reply = handle_line(
+            &registry,
+            &store.devices(),
+            &status,
+            "temperature bath heater:3 24",
+            0,
         )
-        .await;
-        let reply = result.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
         assert!(
             reply.contains("outside the supported constraint"),
             "{reply}"
         );
+        assert!(poll_once(receiver.next_operation()).await.is_none());
 
         let (outlet, _) = PhysicalDevice::new(
             PhysicalDeviceDescription::new(

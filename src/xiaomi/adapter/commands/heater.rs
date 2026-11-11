@@ -28,42 +28,31 @@ impl StepRequest for HeaterSequence {
     type Step = HeaterStep;
 
     fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
-        Ok(self
-            .request
-            .plan()?
-            .into_iter()
-            .map(|step| {
-                let (binding, value) = match step {
-                    HeaterStep::Power(value) => (self.bindings.power(), json!(value)),
-                    HeaterStep::Temperature(value) => (
-                        self.bindings.temperature().property(),
-                        self.bindings.temperature().encode(value),
-                    ),
-                };
-                (step, StepTarget::property(binding, value))
-            })
-            .collect())
+        let step = self.request.step();
+        let (binding, value) = match step {
+            HeaterStep::Power(value) => (self.bindings.power(), json!(value)),
+            HeaterStep::Temperature(value) => (
+                self.bindings.temperature().property(),
+                self.bindings.temperature().encode(value),
+            ),
+        };
+        Ok(VecDeque::from([(
+            step,
+            StepTarget::property(binding, value),
+        )]))
     }
     fn current_result(&self) -> Result<(), CommandError> {
         self.request.current_result()
     }
-    fn send_result(&self, step: Self::Step) -> Result<(), CommandError> {
-        self.request.send_result(step)
-    }
-    fn first_step_current(&self, step: Self::Step) -> bool {
-        self.request
-            .plan()
-            .is_ok_and(|steps| steps.first() == Some(&step))
-    }
     fn mark_sent(&self, step: Self::Step, binding: PropertyBinding) -> Result<(), CommandError> {
-        self.request.mark_sent(step)?;
+        self.request.mark_sent()?;
         if step == HeaterStep::Power(false) {
             self.work.observations.invalidate_write(&self.id, binding);
         }
         Ok(())
     }
-    fn step_accepted(&self, step: Self::Step) -> Result<(), CommandError> {
-        self.request.step_accepted(step)
+    fn step_accepted(&self, _step: Self::Step) -> Result<(), CommandError> {
+        self.request.step_accepted()
     }
     fn accept(self) -> Result<(), CommandError> {
         self.request.accept().map(|_| ())

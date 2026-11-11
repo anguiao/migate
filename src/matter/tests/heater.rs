@@ -154,10 +154,8 @@ fn reads_only_real_heating_values_and_writes_each_target_separately() {
             assert!(poll_once(write.as_mut()).await.is_none());
             let request = next_heater(&mut receiver).await;
             assert_eq!(request.command, expected);
-            for step in request.plan().unwrap() {
-                request.mark_sent(step).unwrap();
-                request.step_accepted(step).unwrap();
-            }
+            request.mark_sent().unwrap();
+            request.step_accepted().unwrap();
             request.accept().unwrap();
             write.await.unwrap();
         }
@@ -173,9 +171,9 @@ fn reads_only_real_heating_values_and_writes_each_target_separately() {
         let mut write = pin!(handler.write(&context));
         assert!(poll_once(write.as_mut()).await.is_none());
         let request = next_heater(&mut receiver).await;
-        assert_eq!(request.plan().unwrap(), [HeaterStep::Temperature(25)]);
-        request.mark_sent(HeaterStep::Temperature(25)).unwrap();
-        request.step_accepted(HeaterStep::Temperature(25)).unwrap();
+        assert_eq!(request.step(), HeaterStep::Temperature(25));
+        request.mark_sent().unwrap();
+        request.step_accepted().unwrap();
         request.accept().unwrap();
         write.await.unwrap();
         assert_eq!(
@@ -325,9 +323,9 @@ fn setpoint_raise_lower_follows_the_heating_only_profile() {
                 HeaterCommand::Temperature(26),
                 "mode {mode}"
             );
-            assert_eq!(request.plan().unwrap(), [HeaterStep::Temperature(26)]);
-            request.mark_sent(HeaterStep::Temperature(26)).unwrap();
-            request.step_accepted(HeaterStep::Temperature(26)).unwrap();
+            assert_eq!(request.step(), HeaterStep::Temperature(26));
+            request.mark_sent().unwrap();
+            request.step_accepted().unwrap();
             request.accept().unwrap();
             invoke.await.unwrap();
             assert_eq!(
@@ -373,13 +371,9 @@ fn setpoint_raise_lower_follows_the_heating_only_profile() {
             assert!(poll_once(invoke.as_mut()).await.is_none());
             let request = next_heater(&mut receiver).await;
             assert_eq!(request.command, HeaterCommand::Temperature(expected));
-            assert_eq!(request.plan().unwrap(), [HeaterStep::Temperature(expected)]);
-            request
-                .mark_sent(HeaterStep::Temperature(expected))
-                .unwrap();
-            request
-                .step_accepted(HeaterStep::Temperature(expected))
-                .unwrap();
+            assert_eq!(request.step(), HeaterStep::Temperature(expected));
+            request.mark_sent().unwrap();
+            request.step_accepted().unwrap();
             request.accept().unwrap();
             invoke.await.unwrap();
         }

@@ -3,9 +3,8 @@ use std::time::Instant;
 use super::{
     Command, CommandError, CommandReceiver, DeviceRequest, Function, FunctionKind,
     FunctionSnapshot, HeaterMode,
-    thermostat::{self, TemperatureGrid},
     thermostat::{
-        HeaterProfile, ThermostatAction, ThermostatEntry, ThermostatPowerSubmission,
+        self, HeaterProfile, ThermostatAction, ThermostatEntry, ThermostatPowerSubmission,
         ThermostatProfile,
     },
 };
@@ -45,7 +44,16 @@ impl HeaterAction {
 
 impl Function {
     pub fn begin_heater(&self, command: HeaterCommand) -> Result<HeaterAction, CommandError> {
-        thermostat::submit::<HeaterProfile>(self, |_| Ok(command)).map(HeaterAction)
+        thermostat::submit::<HeaterProfile>(self, |_| {
+            if let (HeaterCommand::Temperature(value), FunctionKind::Heater { temperature }) =
+                (command, &self.description().kind)
+                && !temperature.contains(value)
+            {
+                return Err(CommandError::Constraint);
+            }
+            Ok(command)
+        })
+        .map(HeaterAction)
     }
 
     pub(super) async fn execute_heater_power(
@@ -95,43 +103,19 @@ impl HeaterRequest {
     pub(crate) fn queued_at(&self) -> Instant {
         self.entry.queued_at()
     }
-    pub(crate) fn plan(&self) -> Result<Vec<HeaterStep>, CommandError> {
-        let grid = grid(self.entry.function())?;
-        Ok(match self.command {
-            HeaterCommand::Power(value) => vec![HeaterStep::Power(value)],
-            HeaterCommand::Mode(HeaterMode::Off) => vec![HeaterStep::Power(false)],
-            HeaterCommand::Mode(HeaterMode::Heat) => vec![HeaterStep::Power(true)],
-            HeaterCommand::Temperature(value) => {
-                if !grid.contains(value) {
-                    return Err(CommandError::Constraint);
-                }
-                vec![HeaterStep::Temperature(value)]
-            }
-        })
+    pub(crate) fn step(&self) -> HeaterStep {
+        match self.command {
+            HeaterCommand::Power(value) => HeaterStep::Power(value),
+            HeaterCommand::Mode(mode) => HeaterStep::Power(mode == HeaterMode::Heat),
+            HeaterCommand::Temperature(value) => HeaterStep::Temperature(value),
+        }
     }
     pub(crate) fn current_result(&self) -> Result<(), CommandError> {
         self.entry.current_result()
     }
-    pub(crate) fn send_result(&self, step: HeaterStep) -> Result<(), CommandError> {
-        self.entry.current_result()?;
-        let grid = grid(self.entry.function())?;
-        match step {
-            HeaterStep::Temperature(value) if !grid.contains(value) => {
-                Err(CommandError::Constraint)
-            }
-            HeaterStep::Temperature(_) | HeaterStep::Power(_) => Ok(()),
-        }
-    }
-    pub(crate) fn mark_sent(&self, step: HeaterStep) -> Result<(), CommandError> {
-        self.entry.current_result()?;
-        let grid = grid(self.entry.function())?;
-        if let HeaterStep::Temperature(value) = step
-            && !grid.contains(value)
-        {
-            return Err(CommandError::Constraint);
-        }
+    pub(crate) fn mark_sent(&self) -> Result<(), CommandError> {
         self.entry.mark_sent()?;
-        if step == HeaterStep::Power(false) {
+        if self.step() == HeaterStep::Power(false) {
             let mut state = self.entry.function().0.state.lock().unwrap();
             state
                 .heater_mut()
@@ -142,7 +126,7 @@ impl HeaterRequest {
         }
         Ok(())
     }
-    pub(crate) fn step_accepted(&self, _step: HeaterStep) -> Result<(), CommandError> {
+    pub(crate) fn step_accepted(&self) -> Result<(), CommandError> {
         self.entry.step_accepted()
     }
     pub(crate) fn accept(self) -> Result<FunctionSnapshot, CommandError> {
@@ -155,12 +139,5 @@ impl HeaterRequest {
 impl Drop for HeaterRequest {
     fn drop(&mut self) {
         self.entry.cancel();
-    }
-}
-
-fn grid(function: &Function) -> Result<TemperatureGrid, CommandError> {
-    match function.description().kind {
-        FunctionKind::Heater { temperature } => Ok(temperature),
-        _ => Err(CommandError::Unsupported),
     }
 }
