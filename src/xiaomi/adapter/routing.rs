@@ -359,14 +359,12 @@ impl Context {
         }
         None
     }
-    /// The real per-operation candidates: an absent direct command or cloud
-    /// action never appears as a selectable path.
     pub(super) fn low_speed_candidate_paths(
         &self,
         did: &str,
         id: &str,
     ) -> Vec<super::model::PathKind> {
-        let (direct, cloud) = self
+        let Some(has_cloud_action) = self
             .live
             .borrow()
             .devices
@@ -381,13 +379,18 @@ impl Context {
             })
             .and_then(|function| function.fan())
             .and_then(|fan| fan.shared_speed())
-            .map(|speed| (speed.direct_command.is_some(), speed.cloud_action.is_some()))
-            .unwrap_or((false, false));
+            .map(|speed| speed.cloud_action.is_some())
+        else {
+            return Vec::new();
+        };
         let mut paths = Vec::new();
-        if direct && self.direct_candidate(did).is_ok() {
+        if self.direct_candidate(did).is_ok() {
             paths.push(super::model::PathKind::Direct);
         }
-        if cloud && self.cloud_candidate(did, true).is_ok() && self.mijia_path().is_some() {
+        if has_cloud_action
+            && self.cloud_candidate(did, true).is_ok()
+            && self.mijia_path().is_some()
+        {
             paths.push(super::model::PathKind::Cloud);
         }
         paths

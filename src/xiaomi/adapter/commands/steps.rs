@@ -45,19 +45,15 @@ impl StepTarget {
         match self {
             Self::Property((binding, value)) => (*binding, value.clone(), None),
             Self::LowSpeed { anchor, speed } => {
-                let cloud = speed
-                    .cloud_action
-                    .map(|action| format!("cloud action {}.{}", action.siid, action.aiid));
-                let direct = speed
-                    .direct_command
-                    .as_ref()
-                    .map(|command| format!("direct {} {}", command.method, command.params()));
-                let native = [cloud, direct].into_iter().flatten().collect::<Vec<_>>();
-                (
-                    *anchor,
-                    Value::Null,
-                    Some(format!("low-speed {}", native.join(" or "))),
-                )
+                let (method, params) = speed.channel.direct_low_speed();
+                let native = match speed.cloud_action {
+                    Some(action) => format!(
+                        "cloud action {}.{} or direct {method} {params}",
+                        action.siid, action.aiid
+                    ),
+                    None => format!("direct {method} {params}"),
+                };
+                (*anchor, Value::Null, Some(format!("low-speed {native}")))
             }
         }
     }
@@ -287,14 +283,6 @@ async fn submit_low_speed(
     if let crate::xiaomi::adapter::routing::ControlPath::Direct(client) = &path {
         use super::properties::{direct_command_error, direct_receipt};
         use crate::xiaomi::adapter::model::PathKind;
-        let Some(command) = speed.direct_command.as_ref() else {
-            return BatchAttempt::Settled(BatchReceipt {
-                result: Err(CommandError::Unavailable(
-                    "direct low-speed command is unavailable".into(),
-                )),
-                maintenance: None,
-            });
-        };
         if !context
             .low_speed_path(did, function_id)
             .is_some_and(|selected| {
@@ -328,14 +316,9 @@ async fn submit_low_speed(
             operation.submitted(PathKind::Direct);
         };
         use super::super::legacy_miio::CommandError as LegacyCommandError;
-        let result = super::super::legacy_miio::command(
-            client,
-            &command.method,
-            command.params(),
-            guard,
-            on_sent,
-        )
-        .await;
+        let (method, params) = speed.channel.direct_low_speed();
+        let result =
+            super::super::legacy_miio::command(client, method, params, guard, on_sent).await;
         match result {
             Ok(()) => {
                 operation.receipts(vec![crate::xiaomi::adapter::StepReceipt::Accepted]);

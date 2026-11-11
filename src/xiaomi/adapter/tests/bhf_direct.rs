@@ -159,30 +159,27 @@ fn v13_direct_low_speed_sends_only_set_bh_mode_without_a_high_speed_write() {
         })
         .await;
 
-        let before = peer.requests.lock().unwrap().len();
-        blow.begin_fan(FanCommand::Speed(1))
-            .unwrap()
-            .accepted()
-            .await
-            .unwrap();
-        let requests = peer.requests.lock().unwrap().clone();
-        let fresh = &requests[before..];
-        let low = fresh
-            .iter()
-            .filter(|request| request["method"] == "set_bh_mode")
-            .collect::<Vec<_>>();
-        assert_eq!(
-            low.len(),
-            1,
-            "low speed is one selected native command: {fresh:?}"
-        );
-        assert_eq!(low[0]["params"], json!(["coolwind", 1]), "{fresh:?}");
-        assert!(
-            !fresh
+        for (id, mode) in [(BLOW, "coolwind"), (VENTILATION, "venting")] {
+            let before = peer.requests.lock().unwrap().len();
+            function(&c, id)
+                .begin_fan(FanCommand::Speed(1))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            let requests = peer.requests.lock().unwrap();
+            let writes = requests[before..]
                 .iter()
-                .any(|request| request["method"] == "set_properties"),
-            "low speed must not pre-power the fan or write the high-speed boolean: {fresh:?}"
-        );
+                .filter(|request| {
+                    matches!(
+                        request["method"].as_str(),
+                        Some("set_bh_mode" | "set_properties")
+                    )
+                })
+                .map(|request| (&request["method"], &request["params"]))
+                .collect::<Vec<_>>();
+            assert_eq!(writes, [(&json!("set_bh_mode"), &json!([mode, 1]))], "{id}");
+        }
         assert!(
             c.cloud.lock().unwrap().action_requests.is_empty(),
             "a selected direct legacy command must not also invoke the cloud action"

@@ -8,7 +8,7 @@ use super::{
     },
     BuiltinPatch,
 };
-use crate::xiaomi::capability::{FanBindings, LegacyArgument, LegacyCommandBinding};
+use crate::xiaomi::capability::FanBindings;
 
 const MODEL: &str = "yeelink.bhf_light.v13";
 const HEAT_LEVEL: PropertyBinding = PropertyBinding { siid: 3, piid: 5 };
@@ -16,6 +16,16 @@ const MODE: PropertyBinding = PropertyBinding { siid: 3, piid: 1 };
 const BLOW: &str = "fan:3:2";
 const VENTILATION: &str = "fan:3:4";
 const HEATER: &str = "heater:3";
+
+impl SharedFanChannel {
+    pub(crate) fn direct_low_speed(self) -> (&'static str, serde_json::Value) {
+        let mode = match self {
+            Self::Blow => "coolwind",
+            Self::Ventilation => "venting",
+        };
+        ("set_bh_mode", serde_json::json!([mode, 1]))
+    }
+}
 
 pub(in crate::xiaomi::capability) const FAN_PATCH: BuiltinPatch = BuiltinPatch {
     id: "yeelink.bhf-light.v13.shared-fans",
@@ -142,24 +152,10 @@ fn parse_fan(
             None
         }
     };
-    let (method, args) = match channel {
-        SharedFanChannel::Blow => (
-            "set_bh_mode",
-            vec![
-                LegacyArgument::String("coolwind".into()),
-                LegacyArgument::Integer(1),
-            ],
-        ),
-        SharedFanChannel::Ventilation => (
-            "set_bh_mode",
-            vec![
-                LegacyArgument::String("venting".into()),
-                LegacyArgument::Integer(1),
-            ],
-        ),
+    let speed = SharedFanSpeedBinding {
+        channel,
+        cloud_action,
     };
-    let direct = LegacyCommandBinding::new(method, args)?;
-    let speed = SharedFanSpeedBinding::new(channel, cloud_action, Some(direct))?;
     Ok(FanBindings::shared(binding(service, property), speed))
 }
 
@@ -274,29 +270,21 @@ pub(super) fn validate_applied(
         let Some(speed) = fan.shared_speed() else {
             return Err("Xiaomi bhf shared fan patch is invalid");
         };
-        let (channel, cloud_aiid, mode) = match function.id() {
-            BLOW => (SharedFanChannel::Blow, 4, "coolwind"),
-            VENTILATION => (SharedFanChannel::Ventilation, 5, "venting"),
+        let (channel, power_piid, cloud_aiid) = match function.id() {
+            BLOW => (SharedFanChannel::Blow, 2, 4),
+            VENTILATION => (SharedFanChannel::Ventilation, 4, 5),
             _ => return Err("Xiaomi bhf shared fan patch is invalid"),
         };
-        let direct = speed.direct_command.as_ref();
-        let direct_valid = direct.is_none_or(|command| {
-            command.method == "set_bh_mode"
-                && command.args
-                    == [
-                        LegacyArgument::String(mode.into()),
-                        LegacyArgument::Integer(1),
-                    ]
-        });
-        let cloud_valid = speed
-            .cloud_action
-            .is_none_or(|action| action.siid == 4 && action.aiid == cloud_aiid);
-        let path_valid =
-            (direct.is_some() || speed.cloud_action.is_some()) && direct_valid && cloud_valid;
-        let valid = fan.power() == shared_power(function.id())
+        let power = PropertyBinding {
+            siid: 3,
+            piid: power_piid,
+        };
+        let valid = fan.power() == power
             && fan.speed_count() == 2
             && speed.channel == channel
-            && path_valid
+            && speed
+                .cloud_action
+                .is_none_or(|action| action.siid == 4 && action.aiid == cloud_aiid)
             && fan.mode().is_none()
             && fan.swing().is_none();
         return if valid {
@@ -313,14 +301,6 @@ pub(super) fn validate_applied(
         };
     }
     Err("Xiaomi bhf patch target is invalid")
-}
-
-fn shared_power(id: &str) -> PropertyBinding {
-    match id {
-        BLOW => PropertyBinding { siid: 3, piid: 2 },
-        VENTILATION => PropertyBinding { siid: 3, piid: 4 },
-        _ => PropertyBinding { siid: 0, piid: 0 },
-    }
 }
 
 pub(super) fn validate_bindings(

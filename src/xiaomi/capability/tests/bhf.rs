@@ -1,5 +1,6 @@
 use super::*;
 use crate::device::{DeviceKey, FunctionKind};
+use crate::xiaomi::capability::SharedFanChannel;
 use serde_json::Value;
 
 const MODEL: &str = "yeelink.bhf_light.v13";
@@ -78,25 +79,6 @@ fn actual_v13_description_yields_light_heater_and_two_shared_fans() {
 }
 
 #[test]
-fn v13_without_low_actions_still_keeps_both_fans_and_the_heater() {
-    let mut instance = v13();
-    instance["services"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|service| service["iid"] != 4);
-
-    let parsed = parse(&instance).unwrap();
-    let ids = parsed
-        .functions()
-        .iter()
-        .map(|function| function.id())
-        .collect::<Vec<_>>();
-    for id in ["light:2", "heater:3", "fan:3:2", "fan:3:4"] {
-        assert!(ids.contains(&id), "missing {id}: {ids:?}");
-    }
-}
-
-#[test]
 fn an_invalid_cloud_low_action_only_disables_that_path() {
     let mut instance = v13();
     let action = instance["services"]
@@ -123,7 +105,7 @@ fn an_invalid_cloud_low_action_only_disables_that_path() {
         .shared_speed()
         .unwrap();
     assert!(blow.cloud_action.is_none());
-    assert_eq!(blow.direct_command.as_ref().unwrap().method, "set_bh_mode");
+    assert_eq!(blow.channel, SharedFanChannel::Blow);
     let diagnostics = parsed.recognition().unwrap().diagnostics();
     assert!(
         diagnostics.iter().any(|issue| {

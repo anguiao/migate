@@ -67,8 +67,13 @@ impl WireFunction {
                         encoding: speed.encoding().clone(),
                     })
                 } else {
+                    let speed = fan.shared_speed().unwrap();
                     WireFanSpeed::Shared(WireSharedFanSpeedEnvelope {
-                        shared: WireSharedFanSpeed::from_binding(fan.shared_speed().unwrap()),
+                        shared: WireSharedFanSpeed {
+                            channel: speed.channel,
+                            cloud_action: speed.cloud_action,
+                            _old_direct_command: None,
+                        },
                     })
                 },
                 swing: fan.swing().map(Into::into),
@@ -313,7 +318,13 @@ impl WireFunction {
                         if mode.is_some() || swing.is_some() {
                             return Err("Stored fan binding is invalid");
                         }
-                        FanBindings::shared(power.into(), shared.into_binding()?)
+                        FanBindings::shared(
+                            power.into(),
+                            SharedFanSpeedBinding {
+                                channel: shared.channel,
+                                cloud_action: shared.cloud_action,
+                            },
+                        )
                     }
                 };
                 Ok(ParsedFunction::fan_control(id, label, bindings))

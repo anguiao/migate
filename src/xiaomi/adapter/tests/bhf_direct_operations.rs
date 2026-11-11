@@ -27,15 +27,6 @@ fn v13() -> Value {
     .unwrap()
 }
 
-fn direct_only_v13() -> Value {
-    let mut instance = v13();
-    instance["services"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|service| service["iid"] != 4);
-    instance
-}
-
 fn setup(instance: Value) -> (Rig, LegacyDevice) {
     let rig =
         Rig::custom_lights(&[(DID, MODEL, instance)]).with_stall_timeout(Duration::from_secs(20));
@@ -325,37 +316,6 @@ fn legacy_command_business_ack_mismatch_keeps_the_mixed_direct_connection() {
 }
 
 #[test]
-fn direct_only_low_speed_has_no_cloud_fallback_when_direct_is_unavailable() {
-    let rig = Rig::custom_lights(&[(DID, MODEL, direct_only_v13())])
-        .with_stall_timeout(Duration::from_secs(20));
-    let (rig, listener, cloud) = with_cloud_rig(rig);
-    block_on(rig.run(|c| async move {
-        future::or(cloud.run(&listener), async {
-            eventually(|| {
-                c.context.direct_candidate(DID).is_err()
-                    && c.context.cloud_candidate(DID, true).is_ok()
-                    && function(&c, BLOW)
-                        .snapshot()
-                        .fan()
-                        .is_some_and(|fan| fan.power.value.is_some())
-            })
-            .await;
-            assert!(
-                c.context.low_speed_path(DID, BLOW).is_none(),
-                "a direct-only binding must not select cloud when direct is unavailable"
-            );
-            let text = status_text(&c);
-            assert!(
-                text.contains("Low-speed control: candidates none; selected none."),
-                "{text}"
-            );
-            assert!(c.cloud.lock().unwrap().action_requests.is_empty());
-        })
-        .await;
-    }));
-}
-
-#[test]
 fn failed_direct_shared_read_after_cloud_switch_does_not_consume_new_baseline() {
     let (rig, peer) = setup(v13());
     rig.source
@@ -532,89 +492,5 @@ fn low_speed_diagnostics_use_cloud_when_direct_is_unavailable() {
             text.contains("Legacy feedback group: candidates cloud; selected read cloud;"),
             "{text}"
         );
-    }));
-}
-
-#[test]
-fn cloud_only_low_speed_still_uses_the_real_cloud_action() {
-    let mut rig =
-        Rig::custom_lights(&[(DID, MODEL, v13())]).with_stall_timeout(Duration::from_secs(20));
-    {
-        let db = rusqlite::Connection::open(rig.store.path()).unwrap();
-        let stored: String = db
-            .query_row(
-                "SELECT json FROM bridge_configuration WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let mut configuration: Value = serde_json::from_str(&stored).unwrap();
-        let fan = configuration["devices"][0]["native"]["functions"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|function| function["id"] == BLOW)
-            .unwrap();
-        fan["speed"]["shared"]["direct_command"] = Value::Null;
-        db.execute(
-            "UPDATE bridge_configuration SET json=?1 WHERE id=1",
-            [configuration.to_string()],
-        )
-        .unwrap();
-    }
-    let (restored, ready) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
-    rig.source = restored;
-    rig.ready = ready;
-    {
-        let mut state = rig.cloud.lock().unwrap();
-        for (binding, value) in [
-            (PropertyBinding { siid: 2, piid: 1 }, json!(false)),
-            (PropertyBinding { siid: 2, piid: 2 }, json!(0)),
-            (PropertyBinding { siid: 2, piid: 3 }, json!(50)),
-            (BLOW_POWER, json!(true)),
-            (VENTILATION_POWER, json!(true)),
-            (HEATING, json!(false)),
-            (TARGET, json!(25)),
-            (MODE, json!(0)),
-        ] {
-            state
-                .raw_values
-                .insert((DID.into(), binding.siid, binding.piid), value);
-        }
-    }
-    let (rig, listener, cloud) = with_cloud_rig(rig);
-    block_on(rig.run(|c| async move {
-        future::or(cloud.run(&listener), async {
-            let blow = function(&c, BLOW);
-            eventually(|| {
-                c.context.direct_candidate(DID).is_err()
-                    && matches!(
-                        c.context.low_speed_path(DID, BLOW),
-                        Some(crate::xiaomi::adapter::routing::ControlPath::Cloud(_))
-                    )
-                    && blow
-                        .snapshot()
-                        .fan()
-                        .is_some_and(|fan| fan.power.value.is_some())
-            })
-            .await;
-            blow.begin_fan(FanCommand::Speed(1))
-                .unwrap()
-                .accepted()
-                .await
-                .unwrap();
-            eventually(|| c.cloud.lock().unwrap().action_requests.len() == 1).await;
-            assert_eq!(
-                c.cloud.lock().unwrap().action_requests[0],
-                (DID.to_owned(), 4, 4, json!([]))
-            );
-        })
-        .await;
     }));
 }

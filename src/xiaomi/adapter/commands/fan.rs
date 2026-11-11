@@ -40,7 +40,7 @@ fn encode(
                         FanStep::Speed(1),
                         StepTarget::LowSpeed {
                             anchor: bindings.power(),
-                            speed: shared.clone(),
+                            speed: shared,
                         },
                     ));
                 } else {

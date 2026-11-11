@@ -21,8 +21,8 @@ pub use device::{AppliedPatch, ParsedDevice, RecognitionDiagnostic, RecognitionM
 pub use error::CapabilityError;
 pub(crate) use fan::FanSpeedEncoding;
 pub use fan::{
-    ActionBinding, FanBindings, FanModeBinding, FanSpeedBinding, LegacyArgument,
-    LegacyCommandBinding, SharedFanChannel, SharedFanSpeedBinding,
+    ActionBinding, FanBindings, FanModeBinding, FanSpeedBinding, SharedFanChannel,
+    SharedFanSpeedBinding,
 };
 pub use function::ParsedFunction;
 pub(crate) use heater::HeaterBindings;
