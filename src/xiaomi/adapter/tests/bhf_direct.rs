@@ -836,6 +836,61 @@ fn direct_outage_switches_shared_and_low_to_cloud_and_recovery_rebaselines_direc
 }
 
 #[test]
+fn an_unsent_direct_low_speed_start_can_use_the_cloud() {
+    let (rig, direct) = setup();
+    rig.source
+        .context
+        .lan_timeout
+        .set(Duration::from_millis(200));
+    let (rig, listener, cloud) = with_cloud_rig(rig);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let blow = function(&c, BLOW);
+            eventually(|| {
+                c.context.direct_candidate(DID).is_ok()
+                    && blow.snapshot().fan().unwrap().speed.value == Some(2)
+                    && work(&c).refresh.borrow().snapshot().inflight.is_empty()
+            })
+            .await;
+            c.clock.automatic.store(false, Ordering::Relaxed);
+            let client = c.context.direct_candidate(DID).unwrap();
+            let requests = direct.requests.clone();
+            drop(direct);
+            // Losing an unrelated reply expires the client's timestamp. The next
+            // operation must handshake before it can send its business datagram.
+            assert!(
+                Box::pin(client.request_with_timeout(
+                    "get_prop",
+                    json!(["temperature"]),
+                    Duration::from_millis(50)
+                ))
+                .await
+                .is_err()
+            );
+            assert!(c.context.direct_candidate(DID).is_ok());
+            blow.begin_fan(FanCommand::Speed(1))
+                .unwrap()
+                .accepted()
+                .await
+                .unwrap();
+            assert!(c.context.direct_candidate(DID).is_err());
+            assert!(
+                requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|r| r["method"] != "set_bh_mode")
+            );
+            assert_eq!(
+                c.cloud.lock().unwrap().action_requests.as_slice(),
+                &[(DID.into(), 4, 4, json!([]))]
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn sent_direct_low_speed_timeout_stays_uncertain_and_is_not_replayed_on_cloud() {
     let (rig, direct) = setup();
     rig.source

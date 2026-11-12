@@ -12,7 +12,7 @@ use crate::{
         capability::PropertyBinding,
         central::{CentralError, RequestStage, SendDecision, SendHooks},
         cloud::{CloudError, CloudErrorKind},
-        lan::{Failure, RequestError, SendStage},
+        lan::{Client, Failure, RequestError, SendStage},
     },
 };
 use serde_json::Value;
@@ -78,6 +78,23 @@ pub(super) enum BatchAttempt {
     /// No byte was written; the caller re-encodes and retries.
     Withdrawn,
     Settled(BatchReceipt),
+}
+
+pub(super) fn settle_direct_failure(
+    context: &Rc<Context>,
+    did: &str,
+    client: &Client,
+    error: &RequestError,
+) -> BatchAttempt {
+    let maintenance = context.lan_business_failure(did, client, error).err();
+    if error.stage == SendStage::BeforeSend && maintenance.is_none() {
+        BatchAttempt::Withdrawn
+    } else {
+        BatchAttempt::Settled(BatchReceipt {
+            result: Err(direct_command_error(error)),
+            maintenance,
+        })
+    }
 }
 
 fn settled(result: Result<(), CommandError>) -> BatchAttempt {
@@ -389,15 +406,7 @@ pub(super) async fn submit_properties(
                         operation.receipts(vec![direct_receipt(&error); properties.len()]);
                     }
                     gate.cancel_feedback();
-                    let maintenance = context.lan_business_failure(&did, &client, &error).err();
-                    if error.stage == SendStage::BeforeSend && maintenance.is_none() {
-                        BatchAttempt::Withdrawn
-                    } else {
-                        BatchAttempt::Settled(BatchReceipt {
-                            result: Err(direct_command_error(&error)),
-                            maintenance,
-                        })
-                    }
+                    settle_direct_failure(context, &did, &client, &error)
                 }
             }
         }

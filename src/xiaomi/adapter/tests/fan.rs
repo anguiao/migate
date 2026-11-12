@@ -352,6 +352,40 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
 }
 
 #[test]
+fn an_invalid_p5c_speed_settles_the_initial_read_as_failed_and_retries() {
+    block_on(rig().run(|c| async move {
+        c.announce();
+        let hub = peer();
+        hub.value("one", SPEED, json!(101));
+        let control = &c;
+        c.peer(hub, |hub| async move {
+            let device = work(control);
+            until(|| {
+                device
+                    .refresh
+                    .borrow()
+                    .property_problem("fan:2", SPEED)
+                    .is_some()
+            })
+            .await;
+            assert!(device.refresh.borrow().initial_complete("fan:2", SPEED));
+            assert_eq!(fan(control).speed.value, None);
+            hub.value("one", SPEED, json!(40));
+            control.clock.advance(Duration::from_secs(2));
+            until(|| fan(control).speed.value == Some(40)).await;
+            assert!(
+                device
+                    .refresh
+                    .borrow()
+                    .property_problem("fan:2", SPEED)
+                    .is_none()
+            );
+        })
+        .await;
+    }));
+}
+
+#[test]
 fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
     block_on(rig().run(|c| async move {
         c.announce();

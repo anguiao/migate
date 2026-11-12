@@ -280,9 +280,8 @@ impl DeviceWork {
             let decoded = Self::decode_air_conditioner(function, binding, value)?;
             self.observe_air_conditioner(function, binding, decoded, observation, Origin::Read);
         } else if function.fan().is_some() {
-            if let Ok(decoded) = Self::decode_fan(function, binding, value) {
-                self.observe_fan(function, binding, decoded, observation, Origin::Read);
-            }
+            let decoded = Self::decode_fan(function, binding, value)?;
+            self.observe_fan(function, binding, decoded, observation, Origin::Read);
         } else if function.curtain().is_some() {
             let decoded = Self::decode_curtain(function, binding, value)?;
             self.observe_curtain(function, binding, decoded, observation, Origin::Read);

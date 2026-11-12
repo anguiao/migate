@@ -293,7 +293,7 @@ async fn submit_low_speed(
         });
     };
     if let crate::xiaomi::adapter::routing::ControlPath::Direct(client) = &path {
-        use super::properties::{direct_command_error, direct_receipt};
+        use super::properties::{direct_receipt, settle_direct_failure};
         use crate::xiaomi::adapter::model::PathKind;
         if !context
             .low_speed_path(did, function_id)
@@ -360,19 +360,7 @@ async fn submit_low_speed(
                 if sent {
                     operation.receipts(vec![direct_receipt(&error)]);
                 }
-                let maintenance = if sent {
-                    context.lan_business_failure(did, client, &error).err()
-                } else {
-                    None
-                };
-                return BatchAttempt::Settled(BatchReceipt {
-                    result: if sent {
-                        Err(direct_command_error(&error))
-                    } else {
-                        Err(CommandError::SendFailed(error.to_string()))
-                    },
-                    maintenance,
-                });
+                return settle_direct_failure(context, did, client, &error);
             }
         }
     }
