@@ -13,11 +13,7 @@ use super::{CommandError, FunctionSnapshot, command::Completion};
 pub(super) trait StepCommand: Copy {
     fn supersedes(self, previous: Self) -> bool;
     fn interrupts(self, previous: Self) -> bool;
-    fn follow(
-        self,
-        _previous: &Arc<StepEntry<Self>>,
-        _power_on: bool,
-    ) -> Option<Arc<StepEntry<Self>>> {
+    fn follow(self, _previous: &Arc<StepEntry<Self>>) -> Option<Arc<StepEntry<Self>>> {
         None
     }
 }
@@ -169,7 +165,7 @@ impl<C: StepCommand> StepCoordinator<C> {
             .back()
             .or(self.flight.as_ref())
             .filter(|previous| !previous.completion.is_finished())
-            .and_then(|previous| command.follow(previous, self.confirmed_power_on));
+            .and_then(|previous| command.follow(previous));
         self.pending.retain(|entry| {
             if command.interrupts(entry.command) {
                 entry.invalidate(CommandError::Superseded, true);

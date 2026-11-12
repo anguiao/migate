@@ -30,6 +30,12 @@ pub(in crate::xiaomi::adapter) struct SharedFanPower {
     low_receipt: Option<(Instant, Result<(), CommandError>)>,
 }
 
+enum PowerOnPlan {
+    Write,
+    ReadPower,
+    Settle(Result<(), CommandError>),
+}
+
 impl SharedFanPower {
     pub(in crate::xiaomi::adapter) fn observe(&mut self, running: bool) {
         self.running = running;
@@ -40,29 +46,36 @@ impl SharedFanPower {
         }
     }
 
-    pub(in crate::xiaomi::adapter) fn source_changed(&mut self) {
-        self.running = false;
-        self.awaiting_low_power = false;
-    }
-
     pub(in crate::xiaomi::adapter) fn require_read(&mut self) {
         self.needs_read = true;
         self.awaiting_low_power = false;
         self.low_receipt = None;
     }
 
-    fn ensure_on(&self, queued_at: Instant) -> Option<Result<(), CommandError>> {
-        if self.needs_read {
-            return Some(Err(CommandError::UnknownState));
+    fn plan_on(&self, queued_at: Instant, unsent_low_failure: Option<CommandError>) -> PowerOnPlan {
+        if let Some(error) = unsent_low_failure {
+            // A cancelled start also cancels its follower. A fan already running
+            // needs no write when a queued speed change is cancelled.
+            return PowerOnPlan::Settle(if self.running && !self.needs_read {
+                Ok(())
+            } else {
+                Err(error)
+            });
         }
         // A queued On shares the actual outcome of a low operation it overlapped.
         // After settlement only an outstanding power confirmation can extend it.
         if let Some((settled_at, result)) = &self.low_receipt
             && (self.awaiting_low_power || queued_at <= *settled_at)
         {
-            return Some(result.clone());
+            return PowerOnPlan::Settle(result.clone());
         }
-        self.running.then_some(Ok(()))
+        if self.needs_read {
+            PowerOnPlan::ReadPower
+        } else if self.running {
+            PowerOnPlan::Settle(Ok(()))
+        } else {
+            PowerOnPlan::Write
+        }
     }
 }
 
@@ -140,15 +153,15 @@ struct FanSequence {
     starting_low: Cell<bool>,
 }
 impl FanSequence {
-    fn ensure_on(&self) -> Option<Result<(), CommandError>> {
-        if self.request.command == FanCommand::Power(true) {
-            let power = self.shared_power.as_ref()?.borrow();
-            self.request
-                .unsent_low_failure()
-                .map(Err)
-                .or_else(|| power.ensure_on(self.request.queued_at()))
+    fn power_on_plan(&self) -> PowerOnPlan {
+        if self.request.command == FanCommand::Power(true)
+            && let Some(power) = &self.shared_power
+        {
+            power
+                .borrow()
+                .plan_on(self.request.queued_at(), self.request.unsent_low_failure())
         } else {
-            None
+            PowerOnPlan::Write
         }
     }
 }
@@ -160,38 +173,36 @@ impl StepRequest for FanSequence {
         context: &Context,
         sink: &LogicalSink,
     ) -> Result<VecDeque<(FanStep, StepTarget)>, CommandError> {
-        if self.request.command == FanCommand::Power(true)
-            && let Some(power) = &self.shared_power
+        let mut plan = self.power_on_plan();
+        if matches!(plan, PowerOnPlan::ReadPower)
+            && context.read_path_for(&self.work.key.id, &self.id).is_some()
         {
-            if power.borrow().needs_read
-                && context.read_path_for(&self.work.key.id, &self.id).is_some()
-            {
-                self.work
-                    .request_dirty_read(&self.id, self.bindings.power());
-            }
-            while power.borrow().needs_read {
-                let changed = self.work.refresh_changed.listen();
-                self.request.current_result()?;
-                if self.work.life.is_closed() || sink.life.is_closed() {
-                    return Err(CommandError::Cancelled);
-                }
-                if context.read_path_for(&self.work.key.id, &self.id).is_none()
-                    || !self
-                        .work
-                        .refresh
-                        .borrow()
-                        .contains(&self.id, self.bindings.power())
-                {
-                    return Err(CommandError::UnknownState);
-                }
-                futures_lite::future::or(
-                    changed,
-                    futures_lite::future::or(self.work.life.ended(), sink.life.ended()),
-                )
-                .await;
-            }
+            self.work
+                .request_dirty_read(&self.id, self.bindings.power());
         }
-        if let Some(result) = self.ensure_on() {
+        while matches!(plan, PowerOnPlan::ReadPower) {
+            let changed = self.work.refresh_changed.listen();
+            self.request.current_result()?;
+            if self.work.life.is_closed() || sink.life.is_closed() {
+                return Err(CommandError::Cancelled);
+            }
+            if context.read_path_for(&self.work.key.id, &self.id).is_none()
+                || !self
+                    .work
+                    .refresh
+                    .borrow()
+                    .contains(&self.id, self.bindings.power())
+            {
+                return Err(CommandError::UnknownState);
+            }
+            futures_lite::future::or(
+                changed,
+                futures_lite::future::or(self.work.life.ended(), sink.life.ended()),
+            )
+            .await;
+            plan = self.power_on_plan();
+        }
+        if let PowerOnPlan::Settle(result) = plan {
             self.unchanged.set(true);
             return result.map(|()| VecDeque::new());
         }
@@ -208,7 +219,7 @@ impl StepRequest for FanSequence {
 
     fn first_step_current(&self, step: FanStep) -> bool {
         if self.shared_power.is_some() {
-            return self.ensure_on().is_none();
+            return matches!(self.power_on_plan(), PowerOnPlan::Write);
         }
         !matches!(self.request.command, FanCommand::Speed(1..=100))
             || self.request.needs_power_on() == (step == FanStep::Power(true))
@@ -222,9 +233,6 @@ impl StepRequest for FanSequence {
             let start = step == FanStep::Speed(1) && (!power.running || power.needs_read);
             self.starting_low.set(start);
             power.awaiting_low_power = start;
-            if start {
-                power.needs_read = false;
-            }
         }
         if step == FanStep::Power(false) || self.shared_power.is_some() {
             self.work.observations.invalidate_write(&self.id, binding);

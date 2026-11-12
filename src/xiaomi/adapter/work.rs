@@ -168,7 +168,7 @@ impl DeviceWork {
     }
     fn reset_shared_fan_power(&self, id: &str) {
         if let Some(power) = self.shared_fan_power.borrow().get(id) {
-            power.borrow_mut().source_changed();
+            power.borrow_mut().require_read();
         }
     }
     pub(super) fn invalidate_interlocked_blow(&self) {

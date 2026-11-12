@@ -38,12 +38,8 @@ impl StepCommand for FanCommand {
         self.is_off() && previous.is_speed()
     }
 
-    fn follow(
-        self,
-        previous: &Arc<StepEntry<Self>>,
-        power_on: bool,
-    ) -> Option<Arc<StepEntry<Self>>> {
-        if self != Self::Power(true) || power_on {
+    fn follow(self, previous: &Arc<StepEntry<Self>>) -> Option<Arc<StepEntry<Self>>> {
+        if self != Self::Power(true) {
             return None;
         }
         match previous.command {

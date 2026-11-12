@@ -19,7 +19,8 @@ impl DeviceWork {
             self.resolve_initial(id, binding);
         } else {
             if matches!(value, crate::device::HeaterValue::Power(true))
-                && physical.snapshot().heater().unwrap().power.value != Some(true)
+                && (matches!(origin, Origin::Notification)
+                    || physical.snapshot().heater().unwrap().power.value != Some(true))
             {
                 self.invalidate_interlocked_blow();
             }
