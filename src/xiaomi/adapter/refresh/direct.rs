@@ -180,6 +180,7 @@ fn read_shared(
         if let Some(Err(error)) = &result
             && !(error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
         {
+            resolve_initial_failure(&context, &work, &read, &flight, &stamp);
             context.lan_business_failure(did, client, error)?;
         }
         let current = !flight.life.is_closed()

@@ -220,9 +220,7 @@ impl Observations {
         if work.life.is_closed() {
             return;
         }
-        if let Some(binding) = input.property() {
-            work.resolve_initial(id, binding);
-        }
+        work.resolve_initial(id, input);
         if matches!(origin, Origin::Cache) {
             return;
         }

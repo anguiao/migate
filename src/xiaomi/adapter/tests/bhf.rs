@@ -4,6 +4,7 @@ use crate::xiaomi::capability::PropertyBinding;
 use serde_json::json;
 
 mod fan_power;
+mod readiness;
 
 const DID: &str = "one";
 const BLOW: &str = "fan:3:2";

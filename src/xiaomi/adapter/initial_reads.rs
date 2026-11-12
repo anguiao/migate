@@ -7,7 +7,7 @@ use super::{
 use crate::{
     configuration::CommittedConfiguration,
     device::{DeviceKey, FunctionDescription, FunctionKey},
-    xiaomi::capability::{ParsedFunction, PropertyBinding},
+    xiaomi::capability::{ParsedFunction, PropertyBinding, ReadInput, SHARED_FEEDBACK_CHANNEL},
 };
 
 pub(super) fn ready(context: &Context, configuration: &CommittedConfiguration) -> bool {
@@ -20,7 +20,20 @@ pub(super) fn ready(context: &Context, configuration: &CommittedConfiguration) -
         };
         let group = graph.rules.get(&device.id);
         let virtual_group = group.is_some_and(|group| !group.is_physical);
-        for function in graph.visible_functions(device) {
+        let functions = graph.visible_functions(device);
+        if work.native.plan().shared_feedback().is_some_and(|plan| {
+            functions.iter().any(|function| {
+                plan.heater_temperature.as_ref() == Some(&function.id)
+                    || plan.fans.iter().any(|fan| fan.function == function.id)
+            })
+        }) && !work
+            .refresh
+            .borrow()
+            .initial_complete(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback)
+        {
+            return false;
+        }
+        for function in functions {
             if !virtual_group && !function_ready(work, &function.id) {
                 return false;
             }

@@ -256,9 +256,9 @@ impl DeviceWork {
     pub(super) fn physical(&self) -> PhysicalDevice {
         self.current_sink().physical.clone()
     }
-    pub(super) fn resolve_initial(&self, id: &str, binding: PropertyBinding) {
+    pub(super) fn resolve_initial(&self, id: &str, input: impl Into<ReadInput>) {
         if !self.life.is_closed() {
-            self.refresh.borrow_mut().resolve_initial(id, binding);
+            self.refresh.borrow_mut().resolve_initial(id, input.into());
         }
     }
     pub(super) fn binding(&self, id: &str) -> PropertyBinding {

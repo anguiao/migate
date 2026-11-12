@@ -54,6 +54,11 @@ pub(crate) enum ReadInput {
     Property(PropertyBinding),
     SharedFeedback,
 }
+impl From<PropertyBinding> for ReadInput {
+    fn from(binding: PropertyBinding) -> Self {
+        Self::Property(binding)
+    }
+}
 impl ReadInput {
     pub(crate) fn property(self) -> Option<PropertyBinding> {
         match self {

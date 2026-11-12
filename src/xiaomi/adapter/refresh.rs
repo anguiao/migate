@@ -104,8 +104,8 @@ fn resolve_initial_failure(
         .get(&work.key.id)
         .and_then(|slot| slot.admitted.as_deref())
         .is_some_and(|current| std::ptr::eq(current, work));
-    if current_work && let Some(binding) = read.input.property() {
-        work.resolve_initial(&read.id, binding);
+    if current_work {
+        work.resolve_initial(&read.id, read.input);
     }
 }
 #[derive(Clone, Copy)]
@@ -157,11 +157,11 @@ impl RefreshState {
             ..Self::default()
         }
     }
-    pub(super) fn initial_complete(&self, id: &str, binding: PropertyBinding) -> bool {
-        self.initial_results.contains(&key(id, binding))
+    pub(super) fn initial_complete(&self, id: &str, input: impl Into<ReadInput>) -> bool {
+        self.initial_results.contains(&input_key(id, input.into()))
     }
-    pub(super) fn resolve_initial(&mut self, id: &str, binding: PropertyBinding) {
-        if self.initial_results.insert(key(id, binding)) {
+    pub(super) fn resolve_initial(&mut self, id: &str, input: ReadInput) {
+        if self.initial_results.insert(input_key(id, input)) {
             self.initial_changed.notify(usize::MAX);
         }
     }
@@ -341,9 +341,7 @@ impl RefreshState {
             ReadResult::Retired if read.periodic => {}
             ReadResult::Retired => self.requeue(read),
             ReadResult::Failed(problem) => {
-                if let Some(binding) = read.input.property() {
-                    self.resolve_initial(&read.id, binding);
-                }
+                self.resolve_initial(&read.id, read.input);
                 self.problems.insert(read.key(), problem);
                 if read.periodic {
                     return;

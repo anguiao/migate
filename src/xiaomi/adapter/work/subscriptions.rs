@@ -13,6 +13,11 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
+        if function.lighting().is_some() {
+            let mut bindings = function.observation_bindings();
+            bindings.extend(self.native.device().refresh_trigger());
+            return bindings;
+        }
         if function.kind().is_read_only()
             || function.curtain().is_some()
             || function.fan().is_some()
