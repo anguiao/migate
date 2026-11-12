@@ -192,30 +192,49 @@ fn on_uses_new_power_feedback_after_the_heater_interlock_or_an_uncertain_off() {
 
 #[test]
 fn plain_on_waits_for_the_new_source_power_baseline() {
-    for running in [true, false] {
+    for (old_read_succeeded, running) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
         let (rig, listener, cloud) = rig();
-        rig.cloud
-            .lock()
-            .unwrap()
-            .rpc_results
-            .insert("get_prop".into(), json!(["coolwind", 13, 22]));
+        let binding = (DID.into(), 3, 2);
+        let hub = standard_peer();
+        {
+            let mut state = rig.cloud.lock().unwrap();
+            state
+                .rpc_results
+                .insert("get_prop".into(), json!(["coolwind", 13, 22]));
+            if !old_read_succeeded {
+                state.read_codes.insert(binding.clone(), -704);
+                hub.state.borrow_mut().read_fail.insert(binding.clone());
+            }
+        }
         block_on(rig.run(|c| async move {
             future::or(cloud.run(&listener), async {
                 c.announce();
                 let control = &c;
-                c.peer(standard_peer(), |hub| async move {
+                c.peer(hub, |hub| async move {
                     let blow = function(control, BLOW);
                     eventually(|| {
-                        work(control).property_source(BLOW, BLOW_POWER) == Some(PathKind::Local)
+                        let device = work(control);
+                        device
+                            .function_observer(BLOW)
+                            .is_some_and(|source| source.kind() == PathKind::Local)
+                            && (old_read_succeeded
+                                || device
+                                    .refresh
+                                    .borrow()
+                                    .property_problem(BLOW, BLOW_POWER)
+                                    .is_some())
                             && blow.snapshot().fan().is_some_and(|fan| {
-                                fan.power.value == Some(true) && fan.speed.value == Some(1)
+                                fan.power.value == old_read_succeeded.then_some(true)
+                                    && fan.speed.value == Some(1)
                             })
                     })
                     .await;
-                    let binding = (DID.into(), 3, 2);
                     let (release, gate) = flume::bounded(1);
                     let before = {
                         let mut state = control.cloud.lock().unwrap();
+                        state.read_codes.remove(&binding);
                         state.raw_values.insert(binding.clone(), json!(running));
                         state.read_gates.insert(binding.clone(), gate);
                         state
@@ -236,6 +255,7 @@ fn plain_on_waits_for_the_new_source_power_baseline() {
                             .filter(|read| **read == binding)
                             .count()
                             > before
+                            && control.context.local_candidate(DID, false).is_err()
                     })
                     .await;
                     let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
@@ -260,6 +280,94 @@ fn plain_on_waits_for_the_new_source_power_baseline() {
             .await;
         }));
     }
+}
+
+#[test]
+fn a_failed_first_power_read_releases_the_next_fan_command() {
+    for timeout in [false, true] {
+        let (rig, listener, cloud) = rig();
+        let binding = (DID.into(), 3, 2);
+        rig.cloud
+            .lock()
+            .unwrap()
+            .read_codes
+            .insert(binding.clone(), -704);
+        let hub = standard_peer();
+        if timeout {
+            hub.state.borrow_mut().read_timeout.insert(binding);
+        } else {
+            hub.state.borrow_mut().read_fail.insert(binding);
+        }
+        block_on(rig.run(|c| async move {
+            future::or(cloud.run(&listener), async {
+                c.announce();
+                let control = &c;
+                c.peer(hub, |hub| async move {
+                    let blow = function(control, BLOW);
+                    eventually(|| {
+                        work(control)
+                            .function_observer(BLOW)
+                            .is_some_and(|source| source.kind() == PathKind::Local)
+                            && work(control)
+                                .refresh
+                                .borrow()
+                                .property_problem(BLOW, BLOW_POWER)
+                                .is_some()
+                    })
+                    .await;
+                    assert_eq!(blow.snapshot().fan().unwrap().power.value, None);
+                    let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
+                    let off = blow.begin_fan(FanCommand::Power(false)).unwrap();
+                    assert_eq!(on.accepted().await, Err(CommandError::UnknownState));
+                    off.accepted().await.unwrap();
+                    let peer = hub.state.borrow();
+                    let writes = peer
+                        .seen
+                        .iter()
+                        .filter(|(op, _)| op == "rpcReq")
+                        .map(|(_, request)| &request["rpc"]["params"])
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        writes,
+                        [&json!([{"did":DID,"siid":3,"piid":2,"value":false}])]
+                    );
+                })
+                .await;
+            })
+            .await;
+        }));
+    }
+}
+
+#[test]
+fn retiring_a_fan_waiting_for_its_first_power_read_settles_queued_commands() {
+    let (rig, listener, cloud) = rig();
+    let binding = (DID.into(), 3, 2);
+    let (_hold, gate) = flume::bounded(1);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .read_gates
+        .insert(binding.clone(), gate);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            eventually(|| c.cloud.lock().unwrap().property_reads.contains(&binding)).await;
+            let blow = function(&c, BLOW);
+            assert_eq!(blow.snapshot().fan().unwrap().power.value, None);
+            let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
+            let off = blow.begin_fan(FanCommand::Power(false)).unwrap();
+            assert_waiting_for_power(&on).await;
+            c.context.retire_work(DID);
+            for action in [on, off] {
+                assert!(matches!(
+                    action.accepted().await,
+                    Err(CommandError::Unavailable(_) | CommandError::Cancelled)
+                ));
+            }
+            assert!(c.cloud.lock().unwrap().numeric_writes.is_empty());
+        })
+        .await;
+    }));
 }
 
 #[test]

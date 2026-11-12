@@ -24,8 +24,7 @@ use crate::{
 /// On a shared-speed fan the native power-on write also selects high speed.
 #[derive(Default)]
 pub(in crate::xiaomi::adapter) struct SharedFanPower {
-    running: bool,
-    needs_read: bool,
+    running: Option<bool>,
     awaiting_low_power: bool,
     low_receipt: Option<(Instant, Result<(), CommandError>)>,
 }
@@ -38,8 +37,7 @@ enum PowerOnPlan {
 
 impl SharedFanPower {
     pub(in crate::xiaomi::adapter) fn observe(&mut self, running: bool) {
-        self.running = running;
-        self.needs_read = false;
+        self.running = Some(running);
         // A read may still return off while the low-speed request is in flight.
         if running || self.low_receipt.is_some() {
             self.awaiting_low_power = false;
@@ -47,7 +45,7 @@ impl SharedFanPower {
     }
 
     pub(in crate::xiaomi::adapter) fn require_read(&mut self) {
-        self.needs_read = true;
+        self.running = None;
         self.awaiting_low_power = false;
         self.low_receipt = None;
     }
@@ -56,7 +54,7 @@ impl SharedFanPower {
         if let Some(error) = unsent_low_failure {
             // A cancelled start also cancels its follower. A fan already running
             // needs no write when a queued speed change is cancelled.
-            return PowerOnPlan::Settle(if self.running && !self.needs_read {
+            return PowerOnPlan::Settle(if self.running == Some(true) {
                 Ok(())
             } else {
                 Err(error)
@@ -69,12 +67,10 @@ impl SharedFanPower {
         {
             return PowerOnPlan::Settle(result.clone());
         }
-        if self.needs_read {
-            PowerOnPlan::ReadPower
-        } else if self.running {
-            PowerOnPlan::Settle(Ok(()))
-        } else {
-            PowerOnPlan::Write
+        match self.running {
+            None => PowerOnPlan::ReadPower,
+            Some(true) => PowerOnPlan::Settle(Ok(())),
+            Some(false) => PowerOnPlan::Write,
         }
     }
 }
@@ -230,7 +226,7 @@ impl StepRequest for FanSequence {
         if let Some(power) = &self.shared_power {
             let mut power = power.borrow_mut();
             power.low_receipt = None;
-            let start = step == FanStep::Speed(1) && (!power.running || power.needs_read);
+            let start = step == FanStep::Speed(1) && power.running != Some(true);
             self.starting_low.set(start);
             power.awaiting_low_power = start;
         }
@@ -244,9 +240,7 @@ impl StepRequest for FanSequence {
         if step == FanStep::Power(false)
             && let Some(power) = &self.shared_power
         {
-            let mut power = power.borrow_mut();
-            power.running = false;
-            power.needs_read = false;
+            power.borrow_mut().running = Some(false);
         }
         self.request.step_accepted()
     }
