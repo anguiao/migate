@@ -25,7 +25,7 @@ pub use fan::{
     SharedFanSpeedBinding,
 };
 pub use function::ParsedFunction;
-pub(crate) use heater::HeaterBindings;
+pub(crate) use heater::{HeaterBindings, HeaterFeedbackBinding};
 pub use light::{BrightnessBinding, ColorBinding, LightBindings, ModeBinding, TemperatureBinding};
 pub use measurement::{BatteryBinding, MeasurementBinding, MeasurementUnit};
 pub use numeric::{NumericFormat, PropertyBinding};

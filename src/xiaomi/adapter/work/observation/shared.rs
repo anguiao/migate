@@ -141,6 +141,7 @@ fn native_value<T>(
 impl DeviceWork {
     /// Store the real standard mode as a diagnostic-only observation. It never
     /// changes heater/fan power or reinterprets the legacy `bh_mode` string.
+    /// Returns whether the recorded value belongs to the instance enumeration.
     pub(in crate::xiaomi::adapter) fn observe_standard_mode(
         &self,
         function: &ParsedFunction,
@@ -148,12 +149,13 @@ impl DeviceWork {
         raw: &serde_json::Value,
         observation: Observation,
         origin: Origin,
-    ) -> bool {
+    ) -> Option<bool> {
+        let mode = function.heater()?.diagnostic_mode()?;
         if self.life.is_closed()
-            || !self.is_standard_mode_binding(function.id(), binding)
+            || mode.property != binding
             || !self.observations.permits(function.id(), binding, origin)
         {
-            return false;
+            return None;
         }
         self.observations
             .observed(self, function.id(), binding, origin);
@@ -162,21 +164,19 @@ impl DeviceWork {
                 .borrow_mut()
                 .satisfy_baseline(function.id(), binding);
         }
+        let valid = mode.accepts(raw);
         *self.standard_mode.borrow_mut() =
             Some(super::super::super::model::NativeValueObservation {
                 value: raw.clone(),
                 source_time: observation.source_time,
                 received_at: observation.received_at,
-                reason: raw
-                    .as_u64()
-                    .is_none()
-                    .then(|| format!("unrecognized standard mode value {raw}")),
+                reason: (!valid).then(|| format!("unrecognized standard mode value {raw}")),
             });
         self.property_sources.borrow_mut().insert(
             super::super::super::observations::key(function.id(), binding),
             observation.source,
         );
-        true
+        Some(valid)
     }
 }
 

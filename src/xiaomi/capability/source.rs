@@ -73,6 +73,13 @@ impl RawDescription {
             .standard("device", "light", 0x0000a001)
     }
 
+    pub(crate) fn heater_feedback(
+        &self,
+        property: super::PropertyBinding,
+    ) -> Result<super::HeaterFeedbackBinding, CapabilityError> {
+        super::patch::bhf::feedback_property(&Description::parse(&self.instance)?, property)
+    }
+
     /// Re-run the current parser without changing the original source document.
     pub(crate) fn recognize(&self, group: bool) -> Result<SourceDescription, CapabilityError> {
         let parsed = if group {

@@ -98,12 +98,14 @@ fn v13_round_trips_two_shared_fans_and_their_low_speed_operations() {
         .heater()
         .unwrap();
     assert_eq!(
-        heater.diagnostic_mode(),
+        heater.diagnostic_mode().map(|mode| mode.property),
         Some(crate::xiaomi::capability::PropertyBinding { siid: 3, piid: 1 })
     );
 
     assert_eq!(
-        heater.power_refresh_trigger(),
+        heater
+            .power_refresh_trigger()
+            .map(|trigger| trigger.property),
         Some(crate::xiaomi::capability::PropertyBinding { siid: 3, piid: 5 })
     );
 
@@ -151,6 +153,65 @@ fn previous_v13_configuration_restores_the_same_identity_and_bindings() {
         serde_json::from_str::<Value>(&raw(&store)).unwrap(),
         current
     );
+}
+
+#[test]
+fn restored_heater_feedback_uses_the_original_instance_enum_tables() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let mut instance = v13();
+    let properties = instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| service["iid"] == 3)
+        .unwrap()["properties"]
+        .as_array_mut()
+        .unwrap();
+    for (piid, value) in [(1, 6), (5, 3)] {
+        let property = properties
+            .iter_mut()
+            .find(|property| property["iid"] == piid)
+            .unwrap();
+        property["value-list"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"value": value, "description": "Extension"}));
+    }
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![SourceFixture::new("bath", MODEL, instance)],
+    )
+    .configuration;
+    save(&store, &planned);
+    let wire: Value = serde_json::from_str(&raw(&store)).unwrap();
+    let record = wire["devices"][0]["native"]["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|function| function["id"] == "heater:3")
+        .unwrap();
+    assert_eq!(record["diagnostic_mode"], json!({"siid":3,"piid":1}));
+    assert_eq!(record["power_refresh_trigger"], json!({"siid":3,"piid":5}));
+    let restored = load(&store);
+    assert_eq!(restored, planned);
+    let heater = restored.devices[0]
+        .native
+        .as_ref()
+        .unwrap()
+        .device()
+        .functions()
+        .iter()
+        .find_map(|function| function.heater())
+        .unwrap();
+    for (binding, value) in [
+        (heater.diagnostic_mode().unwrap(), 6),
+        (heater.power_refresh_trigger().unwrap(), 3),
+    ] {
+        assert!(binding.accepts(&json!(value)));
+        assert!(!binding.accepts(&json!(255)));
+    }
 }
 
 #[test]

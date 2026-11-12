@@ -2,9 +2,9 @@
 
 mod function;
 
-use crate::xiaomi::capability::NativeDescription;
+use crate::xiaomi::capability::{NativeDescription, RawDescription};
 use crate::{
-    device::{DeviceKey, MeasurementRange, NumericRange, TemperatureGrid},
+    device::{MeasurementRange, NumericRange, TemperatureGrid},
     xiaomi::capability::{
         ActionBinding, AirConditionerBindings, AirConditionerModeBinding,
         AirConditionerSpeedBinding, AirConditionerTemperatureBinding, BatteryBinding,
@@ -393,7 +393,10 @@ impl WireNative {
         }
     }
 
-    pub(super) fn into_native(self, key: &DeviceKey) -> Result<NativeDescription, &'static str> {
+    pub(super) fn into_native(
+        self,
+        source: &RawDescription,
+    ) -> Result<NativeDescription, &'static str> {
         let refresh_trigger = self.refresh_trigger.map(PropertyBinding::from);
         let battery = self
             .battery
@@ -402,10 +405,10 @@ impl WireNative {
         let functions = self
             .functions
             .into_iter()
-            .map(WireFunction::into_parsed)
+            .map(|function| function.into_parsed(source))
             .collect::<Result<Vec<_>, _>>()?;
         let mut device = ParsedDevice::new_with_battery_diagnostic(
-            key.clone(),
+            source.key.clone(),
             functions,
             refresh_trigger,
             battery,

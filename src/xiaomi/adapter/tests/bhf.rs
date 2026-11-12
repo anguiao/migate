@@ -1341,7 +1341,7 @@ fn external_heat_level_notifications_read_the_actual_heater_power() {
                 flush_all_polls(control).await;
 
                 // The notification is a hint. Only the heating property supplies Home's state.
-                for (level, heating) in [(1, true), (2, false)] {
+                for (level, heating) in [(1, true), (2, false), (2, true)] {
                     let seen = peer.state.borrow().seen.len();
                     peer.value(DID, HEATING, json!(heating));
                     peer.notify_value(DID, HEAT_LEVEL, json!(level), false);
@@ -1398,21 +1398,37 @@ fn only_an_accepted_valid_new_notification_starts_related_reads() {
                     "a cached report must not trigger related reads"
                 );
 
-                peer.notify_value_at(DID, MODE, json!("bad"), Some(952), false);
-                eventually(|| {
-                    work(control)
-                        .standard_mode_value()
-                        .is_some_and(|value| value.reason.is_some())
-                })
-                .await;
-                async_io::Timer::after(Duration::from_millis(100)).await;
-                assert!(
-                    !has_shared_demand(control),
-                    "an invalid standard mode must not trigger related reads"
-                );
+                for raw in [json!("bad"), json!(255)] {
+                    control.context.property_value_event(
+                        &source,
+                        DID,
+                        MODE,
+                        &raw,
+                        Some(952),
+                        false,
+                    );
+                    let observed = work(control).standard_mode_value().unwrap();
+                    assert_eq!(observed.value, raw);
+                    assert_eq!(observed.source_time, Some(952));
+                    assert!(observed.reason.unwrap().contains("unrecognized"));
+                    assert!(!has_shared_demand(control));
 
-                peer.notify_value_at(DID, HEATING, json!(false), Some(953), false);
+                    control.context.property_value_event(
+                        &source,
+                        DID,
+                        HEAT_LEVEL,
+                        &raw,
+                        Some(952),
+                        false,
+                    );
+                    assert!(!work(control).refresh.borrow().contains(HEATER, HEATING));
+                }
+
+                peer.notify_value_at(DID, MODE, json!(4), Some(953), false);
                 eventually(|| has_shared_demand(control)).await;
+                let observed = work(control).standard_mode_value().unwrap();
+                assert_eq!(observed.value, json!(4));
+                assert!(observed.reason.is_none());
             })
             .await;
         })

@@ -18,7 +18,8 @@ pub(crate) use group::parse_group;
 pub(crate) use model::FanSpeedEncoding;
 pub(crate) use model::{
     ActionBinding, AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-    AirConditionerTemperatureBinding, HeaterBindings, SharedFanChannel, SharedFanSpeedBinding,
+    AirConditionerTemperatureBinding, HeaterBindings, HeaterFeedbackBinding, SharedFanChannel,
+    SharedFanSpeedBinding,
 };
 pub use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,

@@ -265,7 +265,7 @@ impl DeviceWork {
             .find(|function| function.id() == id)
             .unwrap();
         if self.is_standard_mode_binding(id, binding) {
-            self.observe_standard_mode(function, binding, value, observation, Origin::Read);
+            let _ = self.observe_standard_mode(function, binding, value, observation, Origin::Read);
             return Ok(());
         }
         if function

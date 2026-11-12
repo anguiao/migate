@@ -45,8 +45,10 @@ impl WireFunction {
                     max: grid.max(),
                     step: grid.step(),
                 },
-                diagnostic_mode: heater.diagnostic_mode().map(Into::into),
-                power_refresh_trigger: heater.power_refresh_trigger().map(Into::into),
+                diagnostic_mode: heater.diagnostic_mode().map(|mode| mode.property.into()),
+                power_refresh_trigger: heater
+                    .power_refresh_trigger()
+                    .map(|trigger| trigger.property.into()),
             };
         }
         if let Some(fan) = function.fan() {
@@ -209,7 +211,10 @@ impl WireFunction {
         }
     }
 
-    pub(super) fn into_parsed(self) -> Result<ParsedFunction, &'static str> {
+    pub(super) fn into_parsed(
+        self,
+        source: &RawDescription,
+    ) -> Result<ParsedFunction, &'static str> {
         match self {
             Self::AirConditioner {
                 id,
@@ -274,10 +279,18 @@ impl WireFunction {
                 .map_err(|_| "Stored heater binding is invalid")?;
                 let mut bindings = HeaterBindings::new(power.into(), temperature)
                     .map_err(|_| "Stored heater binding is invalid")?;
-                bindings.set_power_refresh_trigger(power_refresh_trigger.map(Into::into));
+                // The original instance already stores the enum tables, including in older records.
+                let feedback = |binding: WireBinding| {
+                    source
+                        .heater_feedback(binding.into())
+                        .map_err(|_| "Stored heater feedback binding is invalid")
+                };
+                if let Some(trigger) = power_refresh_trigger {
+                    bindings.set_power_refresh_trigger(feedback(trigger)?);
+                }
                 if let Some(mode) = diagnostic_mode {
                     bindings
-                        .set_diagnostic_mode(mode.into())
+                        .set_diagnostic_mode(feedback(mode)?)
                         .map_err(|_| "Stored heater binding is invalid")?;
                 }
                 if bindings.function_id() != id {

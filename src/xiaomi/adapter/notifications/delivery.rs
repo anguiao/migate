@@ -17,18 +17,21 @@ impl Context {
             .get(did)
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = &work
-            && let Some((id, power)) =
+            && let Some((id, power, trigger)) =
                 work.native
                     .device()
                     .functions()
                     .iter()
                     .find_map(|function| {
                         let heater = function.heater()?;
-                        (heater.power_refresh_trigger() == Some(binding))
-                            .then(|| (function.id(), heater.power()))
+                        let trigger = heater.power_refresh_trigger()?;
+                        (trigger.property == binding)
+                            .then(|| (function.id(), heater.power(), trigger))
                     })
         {
-            if !cached_report && value.is_u64() && self.accept_state_notification(work, id, source)
+            if !cached_report
+                && trigger.accepts(value)
+                && self.accept_state_notification(work, id, source)
             {
                 work.refresh_property(id, power);
             }
@@ -43,7 +46,7 @@ impl Context {
                 .find(|function| work.is_standard_mode_binding(function.id(), binding))
         {
             if self.accept_state_notification(work, function.id(), source)
-                && work.observe_standard_mode(
+                && let Some(valid) = work.observe_standard_mode(
                     function,
                     binding,
                     value,
@@ -60,7 +63,7 @@ impl Context {
                 )
             {
                 if !cached_report
-                    && value.as_u64().is_some()
+                    && valid
                     && let Some(scope) = work.related_scope_for_notification(function.id(), binding)
                 {
                     work.refresh_related_inputs(scope);

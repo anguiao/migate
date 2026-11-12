@@ -27,7 +27,11 @@ impl DeviceWork {
             let mut bindings = function.observation_bindings();
             if let Some(heater) = function.heater() {
                 bindings.extend(heater.diagnostic_bindings());
-                bindings.extend(heater.power_refresh_trigger());
+                bindings.extend(
+                    heater
+                        .power_refresh_trigger()
+                        .map(|trigger| trigger.property),
+                );
             }
             return bindings;
         }

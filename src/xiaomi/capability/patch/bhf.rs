@@ -1,7 +1,8 @@
 use super::{
     super::{
-        ActionBinding, AppliedPatch, CapabilityError, ParsedDevice, ParsedFunction,
-        PropertyBinding, RecognitionDiagnostic, SharedFanChannel, SharedFanSpeedBinding,
+        ActionBinding, AppliedPatch, CapabilityError, HeaterFeedbackBinding, ParsedDevice,
+        ParsedFunction, PropertyBinding, RecognitionDiagnostic, SharedFanChannel,
+        SharedFanSpeedBinding,
         description::{
             Description, Service, Urn, array, binding, control_access, integer_format, string,
         },
@@ -90,14 +91,12 @@ pub(in crate::xiaomi::capability) fn apply(
     };
     // The shared group exists independently of fan/mode admission.
     patches.push(SHARED_PATCH.applied(HEATER));
-    match feedback_property(instance, MODE, "mode", 0x08, &["read", "notify"])
-        .and_then(|mode| heater.set_diagnostic_mode(mode))
-    {
+    match feedback_property(instance, MODE).and_then(|mode| heater.set_diagnostic_mode(mode)) {
         Ok(()) => patches.push(MODE_PATCH.applied(HEATER)),
         Err(error) => diagnostics.push(MODE_PATCH.failed(HEATER, error)),
     }
-    match feedback_property(instance, HEAT_LEVEL, "heat-level", 0x47, &["notify"]) {
-        Ok(trigger) => heater.set_power_refresh_trigger(Some(trigger)),
+    match feedback_property(instance, HEAT_LEVEL) {
+        Ok(trigger) => heater.set_power_refresh_trigger(trigger),
         Err(error) => diagnostics.push(SHARED_PATCH.failed(HEATER, error)),
     }
     functions[index] = ParsedFunction::heater_control(functions[index].label(), heater);
@@ -159,13 +158,19 @@ fn parse_fan(
     Ok(FanBindings::shared(binding(service, property), speed))
 }
 
-fn feedback_property(
+pub(in crate::xiaomi::capability) fn feedback_property(
     instance: &Description<'_>,
     expected: PropertyBinding,
-    name: &'static str,
-    type_id: u32,
-    permissions: &[&'static str],
-) -> Result<PropertyBinding, CapabilityError> {
+) -> Result<HeaterFeedbackBinding, CapabilityError> {
+    let (name, type_id, permissions): (_, _, &[&str]) = match expected {
+        MODE => ("mode", 0x08, &["read", "notify"]),
+        HEAT_LEVEL => ("heat-level", 0x47, &["notify"]),
+        _ => {
+            return Err(CapabilityError::InvalidDescription(
+                "heater feedback binding",
+            ));
+        }
+    };
     let service = ptc_service(instance)?;
     let properties = service
         .properties
@@ -181,14 +186,25 @@ fn feedback_property(
             return Err(CapabilityError::MissingAccess(permission));
         }
     }
-    integer_format(property)?;
+    let format = integer_format(property)?;
     let binding = binding(service, property);
     if binding != expected {
         return Err(CapabilityError::InvalidDescription(
             "heater feedback binding",
         ));
     }
-    Ok(binding)
+    let values = array(property.value, "value-list")?
+        .iter()
+        .map(|item| {
+            item["value"]
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(CapabilityError::InvalidDescription(
+                    "heater feedback enumeration",
+                ))
+        })
+        .collect::<Result<_, _>>()?;
+    HeaterFeedbackBinding::new(binding, format, values)
 }
 
 fn low_action(
@@ -294,7 +310,10 @@ pub(super) fn validate_applied(
         };
     }
     if let Some(heater) = function.heater() {
-        return if heater.diagnostic_mode() == Some(MODE) {
+        return if heater
+            .diagnostic_mode()
+            .is_some_and(|mode| mode.property == MODE)
+        {
             Ok(())
         } else {
             Err("Xiaomi bhf native mode patch is invalid")
@@ -332,7 +351,7 @@ pub(super) fn validate_bindings(
         if let Some(trigger) = function
             .heater()
             .and_then(|heater| heater.power_refresh_trigger())
-            && (!supported || function.id() != HEATER || trigger != HEAT_LEVEL)
+            && (!supported || function.id() != HEATER || trigger.property != HEAT_LEVEL)
         {
             return Err("Xiaomi heater power refresh trigger is invalid");
         }

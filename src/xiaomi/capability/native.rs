@@ -131,9 +131,9 @@ impl AdaptationPlan {
     fn from_device(device: &ParsedDevice) -> Self {
         let standard_mode = device.functions().iter().find_map(|function| {
             function.heater().and_then(|heater| {
-                heater.diagnostic_mode().map(|binding| StandardModePlan {
+                heater.diagnostic_mode().map(|mode| StandardModePlan {
                     function: function.id().to_owned(),
-                    binding,
+                    binding: mode.property,
                 })
             })
         });

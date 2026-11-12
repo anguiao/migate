@@ -295,7 +295,7 @@ impl DeviceWork {
                 .device()
                 .functions()
                 .iter()
-                .filter_map(|function| function.heater()?.power_refresh_trigger()),
+                .filter_map(|function| Some(function.heater()?.power_refresh_trigger()?.property)),
         );
         if let Some(trigger) = self.native.device().refresh_trigger() {
             values.push(trigger);

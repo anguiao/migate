@@ -8,6 +8,7 @@ use crate::{
     xiaomi::capability::RawDescription,
 };
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
 mod native;
 use native::WireNative;
 
@@ -174,7 +175,7 @@ impl WireConfiguration {
                 uid: scope.uid,
                 home_id: scope.home_id,
             });
-        let mut temperature_bindings = std::collections::BTreeMap::new();
+        let mut temperature_bindings = BTreeMap::new();
         for binding in self.temperature_bindings {
             if temperature_bindings
                 .insert(binding.target.into_key(), binding.source.into_key())
@@ -183,19 +184,24 @@ impl WireConfiguration {
                 return Err("Temperature binding target is duplicated");
             }
         }
+        let descriptions = self
+            .descriptions
+            .into_iter()
+            .map(WireDescription::into_raw)
+            .collect::<Result<Vec<_>, _>>()?;
+        let sources = descriptions
+            .iter()
+            .map(|source| (&source.key, source))
+            .collect();
         let configuration = CommittedConfiguration {
             scope,
             root_version: self.root_version,
             devices: self
                 .devices
                 .into_iter()
-                .map(WireIdentity::into_committed)
+                .map(|device| device.into_committed(&sources))
                 .collect::<Result<Vec<_>, _>>()?,
-            descriptions: self
-                .descriptions
-                .into_iter()
-                .map(WireDescription::into_raw)
-                .collect::<Result<Vec<_>, _>>()?,
+            descriptions,
             groups: self
                 .groups
                 .into_iter()
@@ -256,12 +262,21 @@ impl WireIdentity {
         }
     }
 
-    fn into_committed(self) -> Result<CommittedDevice, &'static str> {
+    fn into_committed(
+        self,
+        sources: &BTreeMap<&DeviceKey, &RawDescription>,
+    ) -> Result<CommittedDevice, &'static str> {
         let key = DeviceKey::new(self.source, self.device_id);
         let native = self
             .native
             .ok_or("Stored native facts field is missing")?
-            .map(|native| native.into_native(&key))
+            .map(|native| {
+                native.into_native(
+                    sources
+                        .get(&key)
+                        .ok_or("Committed source description is missing")?,
+                )
+            })
             .transpose()?;
         Ok(CommittedDevice {
             key,
