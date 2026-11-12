@@ -1,5 +1,5 @@
 use super::{
-    commands::DeviceWriteGate,
+    commands::{DeviceWriteGate, SharedFanPower},
     model::{
         AdapterError, NativeModeObservation, NativeValueObservation, PathKind, SubscriptionBinding,
         SubscriptionStatus,
@@ -86,6 +86,7 @@ pub(super) struct DeviceWork {
     mcn04_problems: RefCell<BTreeMap<super::observations::PropertyKey, String>>,
     mcn04_ranges: RefCell<BTreeMap<String, String>>,
     fan_modes: RefCell<BTreeMap<String, NativeModeObservation>>,
+    shared_fan_power: RefCell<BTreeMap<String, Rc<RefCell<SharedFanPower>>>>,
     shared_feedback: RefCell<SharedFeedbackState>,
     standard_mode: RefCell<Option<NativeValueObservation>>,
     shared_read_path: RefCell<Option<Option<super::routing::ControlPath>>>,
@@ -136,6 +137,7 @@ impl DeviceWork {
             mcn04_problems: RefCell::new(BTreeMap::new()),
             mcn04_ranges: RefCell::new(BTreeMap::new()),
             fan_modes: RefCell::new(BTreeMap::new()),
+            shared_fan_power: RefCell::default(),
             shared_feedback: RefCell::new(SharedFeedbackState::default()),
             standard_mode: RefCell::new(None),
             shared_read_path: RefCell::new(None),
@@ -156,6 +158,34 @@ impl DeviceWork {
     }
     pub(super) fn shared_feedback(&self) -> std::cell::Ref<'_, SharedFeedbackState> {
         self.shared_feedback.borrow()
+    }
+    pub(super) fn shared_fan_power(&self, id: &str) -> Rc<RefCell<SharedFanPower>> {
+        self.shared_fan_power
+            .borrow_mut()
+            .entry(id.to_owned())
+            .or_default()
+            .clone()
+    }
+    fn reset_shared_fan_power(&self, id: &str) {
+        if let Some(power) = self.shared_fan_power.borrow().get(id) {
+            power.borrow_mut().source_changed();
+        }
+    }
+    pub(super) fn invalidate_interlocked_blow(&self) {
+        let Some(function) = self.native.device().functions().iter().find(|function| {
+            function
+                .fan()
+                .and_then(|fan| fan.shared_speed())
+                .is_some_and(|speed| {
+                    speed.channel == crate::xiaomi::capability::SharedFanChannel::Blow
+                })
+        }) else {
+            return;
+        };
+        let id = function.id();
+        self.shared_fan_power(id).borrow_mut().require_read();
+        self.observations
+            .refresh(id, function.fan().unwrap().power());
     }
     pub(super) fn standard_mode_value(&self) -> Option<NativeValueObservation> {
         self.standard_mode.borrow().clone()
@@ -199,6 +229,7 @@ impl DeviceWork {
     }
     /// Swap the logical delivery target and return the retired one.
     pub(super) fn replace_sink(&self, sink: Rc<LogicalSink>) -> Rc<LogicalSink> {
+        self.shared_fan_power.borrow_mut().clear();
         for function in self.native.device().functions() {
             if function
                 .air_conditioner()
@@ -337,6 +368,7 @@ impl DeviceWork {
         }
     }
     fn function_source_changed(&self, id: &str) {
+        self.reset_shared_fan_power(id);
         self.observations.function_source_changed(id);
         if let Some(function) = self.native.device().functions().iter().find(|function| {
             function.id() == id

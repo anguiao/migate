@@ -27,7 +27,11 @@ struct HeaterSequence {
 impl StepRequest for HeaterSequence {
     type Step = HeaterStep;
 
-    fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
+    async fn steps(
+        &self,
+        _: &Context,
+        _: &LogicalSink,
+    ) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
         let step = self.request.step();
         let (binding, value) = match step {
             HeaterStep::Power(value) => (self.bindings.power(), json!(value)),

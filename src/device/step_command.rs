@@ -13,6 +13,13 @@ use super::{CommandError, FunctionSnapshot, command::Completion};
 pub(super) trait StepCommand: Copy {
     fn supersedes(self, previous: Self) -> bool;
     fn interrupts(self, previous: Self) -> bool;
+    fn follow(
+        self,
+        _previous: &Arc<StepEntry<Self>>,
+        _power_on: bool,
+    ) -> Option<Arc<StepEntry<Self>>> {
+        None
+    }
 }
 
 pub(super) struct StepEntry<C> {
@@ -23,6 +30,7 @@ pub(super) struct StepEntry<C> {
     in_flight: AtomicBool,
     interrupted: Mutex<Option<CommandError>>,
     queued_at: Instant,
+    pub(super) preceding: Option<Arc<StepEntry<C>>>,
 }
 impl<C> StepEntry<C> {
     fn invalidate(&self, error: CommandError, immediate: bool) {
@@ -51,6 +59,13 @@ impl<C> StepEntry<C> {
 
     pub(super) fn started(&self) -> bool {
         self.started.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn unsent_failure(&self) -> Option<CommandError> {
+        self.completion
+            .result()
+            .and_then(Result::err)
+            .filter(|_| !self.started())
     }
 
     pub(super) fn current_result(&self) -> Result<(), CommandError> {
@@ -101,6 +116,17 @@ impl<C> StepEntry<C> {
         self.finish(result);
     }
 
+    pub(super) fn accept_unchanged(
+        &self,
+        snapshot: impl FnOnce() -> FunctionSnapshot,
+    ) -> Result<FunctionSnapshot, CommandError> {
+        self.current_result()?;
+        assert!(!self.started());
+        let snapshot = snapshot();
+        self.finish(Ok(snapshot.clone()));
+        Ok(snapshot)
+    }
+
     pub(super) fn cancel(&self) {
         let result = self.completion.result().unwrap_or_else(|| {
             Err(self
@@ -138,6 +164,12 @@ impl<C> Default for StepCoordinator<C> {
 }
 impl<C: StepCommand> StepCoordinator<C> {
     pub(super) fn submit(&mut self, command: C) -> Arc<StepEntry<C>> {
+        let preceding = self
+            .pending
+            .back()
+            .or(self.flight.as_ref())
+            .filter(|previous| !previous.completion.is_finished())
+            .and_then(|previous| command.follow(previous, self.confirmed_power_on));
         self.pending.retain(|entry| {
             if command.interrupts(entry.command) {
                 entry.invalidate(CommandError::Superseded, true);
@@ -171,6 +203,7 @@ impl<C: StepCommand> StepCoordinator<C> {
             in_flight: AtomicBool::new(false),
             interrupted: Mutex::new(None),
             queued_at: Instant::now(),
+            preceding,
         });
         self.pending.push_back(entry.clone());
         entry

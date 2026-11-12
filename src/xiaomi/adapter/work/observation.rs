@@ -36,6 +36,7 @@ impl DeviceWork {
                 changed
             };
             if changed {
+                self.reset_shared_fan_power(id);
                 if function
                     .air_conditioner()
                     .is_some_and(|ac| ac.mcn04().is_some())

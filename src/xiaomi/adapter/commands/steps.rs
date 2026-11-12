@@ -63,7 +63,11 @@ impl StepTarget {
 pub(super) trait StepRequest: Sized + 'static {
     type Step: Copy + 'static;
 
-    fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError>;
+    async fn steps(
+        &self,
+        context: &Context,
+        sink: &LogicalSink,
+    ) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError>;
     /// Check operation ownership, including cancellation after a step was sent.
     fn current_result(&self) -> Result<(), CommandError>;
     /// Check whether this step may be sent now, without changing receipt settlement.
@@ -96,7 +100,7 @@ pub(super) async fn send<R: StepRequest>(
     gate: Rc<DeviceWriteGate>,
     info: Operation,
 ) -> Result<(), AdapterError> {
-    let planned = request.steps();
+    let planned = request.steps(&context, &sink).await;
     let binding = planned
         .as_ref()
         .ok()
@@ -190,7 +194,9 @@ pub(super) async fn send<R: StepRequest>(
             match attempt {
                 BatchAttempt::Withdrawn => {
                     if frame_current.as_ref().is_some_and(|current| !current()) {
-                        let planned = pending.borrow().as_ref().unwrap().steps();
+                        let request = pending.borrow_mut().take().unwrap();
+                        let planned = request.steps(&context, &sink).await;
+                        pending.borrow_mut().replace(request);
                         match planned {
                             Ok(planned) => steps = planned,
                             Err(error) => {
@@ -238,7 +244,13 @@ pub(super) async fn send<R: StepRequest>(
             }
         }
     }
-    let result = pending.borrow_mut().take().unwrap().accept();
+    let request = pending.borrow_mut().take().unwrap();
+    let result = if alive(&work, &sink) {
+        request.accept()
+    } else {
+        request.reject(CommandError::Cancelled);
+        Err(CommandError::Cancelled)
+    };
     operation.0.schedule_feedback(&context, &work, &sink);
     operation.0.finish(result);
     Ok(())

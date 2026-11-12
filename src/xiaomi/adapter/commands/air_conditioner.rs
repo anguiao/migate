@@ -27,7 +27,11 @@ struct AirConditionerSequence {
 impl StepRequest for AirConditionerSequence {
     type Step = AirConditionerStep;
 
-    fn steps(&self) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
+    async fn steps(
+        &self,
+        _: &Context,
+        _: &LogicalSink,
+    ) -> Result<VecDeque<(Self::Step, StepTarget)>, CommandError> {
         Ok(self
             .request
             .plan()?

@@ -3,6 +3,8 @@ use crate::device::{FanCommand, HeaterCommand, HeaterMode, TemperatureSourceStat
 use crate::xiaomi::capability::PropertyBinding;
 use serde_json::json;
 
+mod fan_power;
+
 const DID: &str = "one";
 const BLOW: &str = "fan:3:2";
 const VENTILATION: &str = "fan:3:4";
@@ -536,13 +538,19 @@ fn an_uncertain_low_action_is_verified_read_only_and_never_replayed() {
 #[test]
 fn a_rejected_action_without_an_accepted_step_does_not_start_related_reads() {
     let (rig, listener, cloud) = rig();
+    let key = (DID.to_owned(), BLOW_POWER.siid, BLOW_POWER.piid);
+    rig.cloud
+        .lock()
+        .unwrap()
+        .raw_values
+        .insert(key.clone(), json!(false));
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             let blow = function(&c, BLOW);
             eventually(|| {
                 blow.snapshot()
                     .fan()
-                    .is_some_and(|fan| fan.speed.value == Some(2))
+                    .is_some_and(|fan| fan.power.value == Some(false))
             })
             .await;
             quiesce(&c).await;
@@ -552,13 +560,11 @@ fn a_rejected_action_without_an_accepted_step_does_not_start_related_reads() {
             let (release, gate) = flume::bounded(1);
             c.cloud.lock().unwrap().rpc_gate = Some(gate);
             c.cloud.lock().unwrap().action_code = -704;
-            assert!(
-                blow.begin_fan(FanCommand::Speed(1))
-                    .unwrap()
-                    .accepted()
-                    .await
-                    .is_err()
-            );
+            let low = blow.begin_fan(FanCommand::Speed(1)).unwrap();
+            let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
+            let failure = low.accepted().await.unwrap_err();
+            assert_eq!(on.accepted().await.unwrap_err(), failure);
+            assert!(c.cloud.lock().unwrap().numeric_writes.is_empty());
             async_io::Timer::after(Duration::from_millis(100)).await;
             assert!(
                 !has_shared_demand(&c),
@@ -566,6 +572,35 @@ fn a_rejected_action_without_an_accepted_step_does_not_start_related_reads() {
             );
             c.cloud.lock().unwrap().rpc_gate = None;
             drop(release);
+
+            // A fresh read of the same off value ends the failed start.
+            let power_reads = || {
+                c.cloud
+                    .lock()
+                    .unwrap()
+                    .property_reads
+                    .iter()
+                    .filter(|item| *item == &key)
+                    .count()
+            };
+            let before = power_reads();
+            let device = work(&c);
+            device.request_dirty_read(BLOW, BLOW_POWER);
+            c.clock
+                .automatic
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            eventually(|| {
+                power_reads() > before && !device.refresh.borrow().contains(BLOW, BLOW_POWER)
+            })
+            .await;
+            assert_eq!(blow.snapshot().fan().unwrap().power.value, Some(false));
+            blow.execute(crate::device::Command::On).await.unwrap();
+            let writes = &c.cloud.lock().unwrap().numeric_writes;
+            assert_eq!(writes.len(), 1);
+            assert_eq!(
+                writes[0].0,
+                [json!({"did":DID,"siid":3,"piid":2,"value":true})]
+            );
         })
         .await;
     }));
@@ -1440,14 +1475,16 @@ fn an_uncertain_action_refreshes_even_when_notifications_are_ready() {
         future::or(cloud.run(&listener), async {
             c.announce();
             let control = &c;
-            c.peer(standard_peer(), |_peer| async move {
+            let hub = standard_peer();
+            hub.value(DID, BLOW_POWER, json!(false));
+            c.peer(hub, |_peer| async move {
                 let blow = function(control, BLOW);
                 eventually(|| {
                     work(control).function_observer(BLOW).is_some()
                         && blow
                             .snapshot()
                             .fan()
-                            .is_some_and(|fan| fan.power.value == Some(true))
+                            .is_some_and(|fan| fan.power.value == Some(false))
                         && !control.cloud.lock().unwrap().rpc_reads.is_empty()
                 })
                 .await;
@@ -1458,13 +1495,11 @@ fn an_uncertain_action_refreshes_even_when_notifications_are_ready() {
                 control.cloud.lock().unwrap().rpc_gate = Some(gate);
                 control.cloud.lock().unwrap().action_status = 400;
 
-                assert!(
-                    blow.begin_fan(FanCommand::Speed(1))
-                        .unwrap()
-                        .accepted()
-                        .await
-                        .is_err()
-                );
+                let low = blow.begin_fan(FanCommand::Speed(1)).unwrap();
+                let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
+                let failure = low.accepted().await.unwrap_err();
+                assert_eq!(on.accepted().await.unwrap_err(), failure);
+                assert!(control.cloud.lock().unwrap().numeric_writes.is_empty());
                 async_io::Timer::after(Duration::from_millis(100)).await;
                 assert!(
                     has_shared_demand(control),

@@ -1,6 +1,6 @@
 use super::*;
 use crate::{
-    device::{FanCommand, TemperatureSourceState},
+    device::{Command, CommandError, FanCommand, TemperatureSourceState},
     storage::LanRecord,
     xiaomi::{
         adapter::model::{LanState, PathKind},
@@ -184,6 +184,106 @@ fn v13_direct_low_speed_sends_only_set_bh_mode_without_a_high_speed_write() {
             c.cloud.lock().unwrap().action_requests.is_empty(),
             "a selected direct legacy command must not also invoke the cloud action"
         );
+    }));
+}
+
+#[test]
+fn plain_on_preserves_low_speed_before_and_after_power_feedback() {
+    let (rig, direct) = setup();
+    rig.source
+        .context
+        .lan_timeout
+        .set(Duration::from_millis(500));
+    let (rig, listener, cloud) = with_cloud_rig(rig);
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let hub = standard_peer();
+            for binding in [BLOW_POWER, VENTILATION_POWER] {
+                hub.value(DID, binding, json!(false));
+            }
+            c.announce();
+            let control = &c;
+            c.peer(hub, |hub| async move {
+                eventually(|| {
+                    control.context.direct_candidate(DID).is_ok()
+                        && work(control).shared_feedback().source == Some(PathKind::Direct)
+                        && [BLOW, VENTILATION].iter().all(|id| {
+                            work(control).function_observer(id).is_some()
+                                && function(control, id).snapshot().fan().unwrap().power.value
+                                    == Some(false)
+                        })
+                })
+                .await;
+                hub.state.borrow_mut().hold_reads = true;
+                for (id, binding, mode) in [
+                    (BLOW, BLOW_POWER, "coolwind"),
+                    (VENTILATION, VENTILATION_POWER, "venting"),
+                ] {
+                    let fan = function(control, id);
+                    let before = hub_writes(&hub).len();
+                    let low_before = direct_methods(&direct, "set_bh_mode").len();
+                    fan.begin_fan(FanCommand::Speed(1))
+                        .unwrap()
+                        .accepted()
+                        .await
+                        .unwrap();
+                    fan.execute(Command::On).await.unwrap();
+                    assert_eq!(fan.snapshot().fan().unwrap().power.value, Some(false));
+                    assert_eq!(hub_writes(&hub).len(), before);
+                    assert_eq!(
+                        direct_methods(&direct, "set_bh_mode")[low_before]["params"],
+                        json!([mode, 1])
+                    );
+
+                    // Some controllers finish the same gesture with another explicit 50%.
+                    fan.begin_fan(FanCommand::Speed(1))
+                        .unwrap()
+                        .accepted()
+                        .await
+                        .unwrap();
+                    assert_eq!(direct_methods(&direct, "set_bh_mode").len(), low_before + 2);
+                    hub.notify_value(DID, binding, json!(true), false);
+                    eventually(|| fan.snapshot().fan().unwrap().power.value == Some(true)).await;
+                    fan.execute(Command::On).await.unwrap();
+                    assert_eq!(hub_writes(&hub).len(), before);
+                    fan.begin_fan(FanCommand::Speed(2))
+                        .unwrap()
+                        .accepted()
+                        .await
+                        .unwrap();
+                    hub.notify_value(DID, binding, json!(false), false);
+                    eventually(|| fan.snapshot().fan().unwrap().power.value == Some(false)).await;
+                    fan.execute(Command::On).await.unwrap();
+                    fan.execute(Command::Off).await.unwrap();
+                    fan.execute(Command::On).await.unwrap();
+                    assert_eq!(
+                        hub_writes(&hub)[before..],
+                        [
+                            (3, binding.piid, json!(true)),
+                            (3, binding.piid, json!(true)),
+                            (3, binding.piid, json!(false)),
+                            (3, binding.piid, json!(true)),
+                        ]
+                    );
+                }
+                let before = hub_writes(&hub).len();
+                direct.drop_write.store(true, Ordering::Relaxed);
+                let blow = function(control, BLOW);
+                let low = blow.begin_fan(FanCommand::Speed(1)).unwrap();
+                let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
+                assert_eq!(low.accepted().await, Err(CommandError::Timeout));
+                assert_eq!(on.accepted().await, Err(CommandError::Timeout));
+                assert_eq!(hub_writes(&hub).len(), before);
+                blow.execute(Command::Off).await.unwrap();
+                blow.execute(Command::On).await.unwrap();
+                assert_eq!(
+                    hub_writes(&hub)[before..],
+                    [(3, 2, json!(false)), (3, 2, json!(true))]
+                );
+            })
+            .await;
+        })
+        .await;
     }));
 }
 

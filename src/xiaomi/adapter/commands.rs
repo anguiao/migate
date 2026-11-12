@@ -25,6 +25,7 @@ mod properties;
 mod records;
 mod refresh;
 mod steps;
+pub(super) use fan::SharedFanPower;
 pub(super) use gates::{DeviceWriteGate, DeviceWriteGates};
 pub(super) use records::{CommandOperation, Commands};
 

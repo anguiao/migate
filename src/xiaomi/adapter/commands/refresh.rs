@@ -50,6 +50,23 @@ impl CommandOperation {
             return;
         }
         if let Some(scope) = scope {
+            use crate::device::{FanCommand, HeaterCommand, HeaterMode};
+            use crate::xiaomi::adapter::model::CommandTarget;
+            match target {
+                CommandTarget::Heater(
+                    HeaterCommand::Power(true) | HeaterCommand::Mode(HeaterMode::Heat),
+                ) => {
+                    work.invalidate_interlocked_blow();
+                }
+                CommandTarget::Fan(FanCommand::Power(false) | FanCommand::Speed(0))
+                    if uncertain =>
+                {
+                    work.shared_fan_power(&self.channel)
+                        .borrow_mut()
+                        .require_read();
+                }
+                _ => {}
+            }
             work.refresh_related_inputs(scope);
             return;
         }

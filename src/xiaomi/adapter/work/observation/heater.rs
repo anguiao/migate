@@ -18,6 +18,11 @@ impl DeviceWork {
             physical.observe_cached_heater(value, observation.source_time, observation.received_at);
             self.resolve_initial(id, binding);
         } else {
+            if matches!(value, crate::device::HeaterValue::Power(true))
+                && physical.snapshot().heater().unwrap().power.value != Some(true)
+            {
+                self.invalidate_interlocked_blow();
+            }
             self.observations.observed(self, id, binding, origin);
             if matches!(origin, Origin::Notification) {
                 self.refresh.borrow_mut().satisfy_baseline(id, binding);

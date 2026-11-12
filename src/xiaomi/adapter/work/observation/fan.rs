@@ -32,6 +32,13 @@ impl DeviceWork {
                 );
             }
             FanObservation::Value(value) => {
+                if !matches!(origin, Origin::Cache)
+                    && function.fan().unwrap().shared_speed().is_some()
+                    && let crate::device::FanValue::Power(running) = &value
+                {
+                    self.shared_fan_power(id).borrow_mut().observe(*running);
+                    self.refresh_changed.notify(usize::MAX);
+                }
                 let function = self.physical().function(id).unwrap();
                 if matches!(origin, Origin::Cache) {
                     function.observe_cached_fan(

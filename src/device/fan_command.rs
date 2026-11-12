@@ -37,6 +37,21 @@ impl StepCommand for FanCommand {
     fn interrupts(self, previous: Self) -> bool {
         self.is_off() && previous.is_speed()
     }
+
+    fn follow(
+        self,
+        previous: &Arc<StepEntry<Self>>,
+        power_on: bool,
+    ) -> Option<Arc<StepEntry<Self>>> {
+        if self != Self::Power(true) || power_on {
+            return None;
+        }
+        match previous.command {
+            Self::Speed(1) => Some(previous.clone()),
+            Self::Power(true) => previous.preceding.clone(),
+            _ => None,
+        }
+    }
 }
 
 pub(super) type FanCoordinator = StepCoordinator<FanCommand>;
@@ -186,6 +201,9 @@ pub struct FanRequest {
     entry: Arc<StepEntry<FanCommand>>,
 }
 impl FanRequest {
+    pub(crate) fn unsent_low_failure(&self) -> Option<CommandError> {
+        self.entry.preceding.as_ref()?.unsent_failure()
+    }
     pub(crate) fn queued_at(&self) -> Instant {
         self.entry.queued_at()
     }
@@ -214,6 +232,11 @@ impl FanRequest {
             || self.function.snapshot_locked(&state),
             "fan request has no settled write",
         )
+    }
+    pub(crate) fn accept_unchanged(self) -> Result<FunctionSnapshot, CommandError> {
+        let state = self.function.0.state.lock().unwrap();
+        self.entry
+            .accept_unchanged(|| self.function.snapshot_locked(&state))
     }
     pub(crate) fn reject(self, error: CommandError) {
         let _state = self.function.0.state.lock().unwrap();
