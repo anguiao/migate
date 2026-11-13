@@ -52,6 +52,23 @@ impl Context {
             }
             return;
         }
+        if !cached_report
+            && let Some(work) = &work
+            && let Some(function) = work.native.device().functions().iter().find(|function| {
+                function.relay_mode().is_some() && function.power() == Some(binding)
+            })
+            && let Some(value) = value.as_bool()
+            && self.source_valid_for(did, function.id(), source)
+            && work
+                .function_observer(function.id())
+                .is_some_and(|active| active.same(source))
+        {
+            if work.observe_relay_power_notification(function.id(), value, source.kind()) {
+                self.update_routing("relay power observed");
+                self.status_changed.notify(usize::MAX);
+            }
+            return;
+        }
         if let Some(work) = &work
             && let Some((id, power, trigger)) =
                 work.native

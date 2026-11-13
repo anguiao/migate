@@ -281,7 +281,7 @@ impl Entry {
                 ..
             } => Endpoint::new_with_clients(
                 self.endpoint,
-                devices!(DEV_TYPE_BRIDGED_NODE, DEV_TYPE_ON_OFF_LIGHT_SWITCH),
+                devices!(DEV_TYPE_ON_OFF_LIGHT_SWITCH, DEV_TYPE_BRIDGED_NODE),
                 RELAY_CLUSTERS,
                 &[on_off::FULL_CLUSTER.id],
             ),
@@ -290,7 +290,7 @@ impl Entry {
                 ..
             } => Endpoint::new(
                 self.endpoint,
-                devices!(DEV_TYPE_BRIDGED_NODE, DEV_TYPE_ON_OFF_LIGHT),
+                devices!(DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_BRIDGED_NODE),
                 RELAY_LIGHT_CLUSTERS,
             ),
             Role::Parent { battery, .. } => {

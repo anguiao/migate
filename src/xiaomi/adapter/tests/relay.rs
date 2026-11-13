@@ -666,6 +666,11 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
                 .admitted
                 .clone()
                 .unwrap();
+            assert_eq!(work.observation_source("relay:4"), Some(PathKind::Cloud));
+            assert_eq!(
+                work.property_source("relay:4", binding(4, 1)),
+                Some(PathKind::Cloud)
+            );
             let old_source = work.function_observer("relay:4").unwrap();
             c.context
                 .live
@@ -861,6 +866,8 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                         .unwrap();
                     model.check_relay_type(other.endpoint, false);
                     model.check_relay_type(mapped.endpoint, true);
+                    assert_eq!(model.device_types(other.endpoint).await, [0x0103, 0x0013]);
+                    assert_eq!(model.device_types(mapped.endpoint).await, [0x0100, 0x0013]);
                     assert_eq!(
                         model.configuration_version(mapped.endpoint).await,
                         original.configuration_version + 1
@@ -928,4 +935,182 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn relay_power_read_reports_its_real_source_in_terminal_status() {
+    let rig = rig();
+    let status = Rc::new(crate::terminal::AuthStatus::new(
+        rig.source.context.status.borrow().auth.clone(),
+        "/bin/migate".into(),
+        "/data".into(),
+    ));
+    let report = status.clone();
+    block_on(rig.run_with_status(
+        move |next| report.update_adapter(next),
+        move |c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            for siid in [2, 3, 4] {
+                peer.value("one", binding(siid, 1), json!(false));
+                peer.value("one", binding(siid, 2), json!(0));
+            }
+            let control = &c;
+            c.peer(peer, |_| async move {
+                until(|| {
+                    let live = control.context.live.borrow();
+                    let work = live.devices["one"].admitted.as_ref().unwrap();
+                    let relay = work.physical().function("relay:3").unwrap();
+                    relay.snapshot().power() == Some(Power::Off)
+                        && work.function_observer("relay:3").is_some()
+                        && work.property_source("relay:3", binding(3, 2)) == Some(PathKind::Local)
+                })
+                .await;
+                async_io::Timer::after(Duration::from_millis(40)).await;
+                let terminal = crate::terminal::bridge::Context::committed(
+                    control.publication.clone(),
+                    &status,
+                );
+                let details = terminal
+                    .handle_line("status one", 0)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let relay = details
+                    .split("  relay:3 (")
+                    .nth(1)
+                    .unwrap()
+                    .split("  relay:4 (")
+                    .next()
+                    .unwrap();
+                assert!(
+                    relay.contains("Power: property 3.1; observation source hub"),
+                    "{relay}"
+                );
+                assert!(
+                    relay.contains("notification source hub; observation source hub"),
+                    "{relay}"
+                );
+            })
+            .await;
+        },
+    ));
+}
+
+#[test]
+fn relay_power_live_notification_records_source_without_accepting_retained_or_invalid_as_fresh() {
+    let rig = rig();
+    let status = Rc::new(crate::terminal::AuthStatus::new(
+        rig.source.context.status.borrow().auth.clone(),
+        "/bin/migate".into(),
+        "/data".into(),
+    ));
+    let report = status.clone();
+    block_on(rig.run_with_status(
+        move |next| report.update_adapter(next),
+        move |c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            for siid in [2, 3, 4] {
+                peer.value("one", binding(siid, 1), json!(false));
+                peer.value("one", binding(siid, 2), json!(0));
+            }
+            peer.state
+                .borrow_mut()
+                .read_timeout
+                .insert(("one".into(), 2, 1));
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                let work = control.context.live.borrow().devices["one"]
+                    .admitted
+                    .clone()
+                    .unwrap();
+                let relay = work.physical().function("relay:2").unwrap();
+                until(|| {
+                    relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)
+                        && work.function_observer("relay:2").is_some()
+                })
+                .await;
+                assert_eq!(relay.snapshot().power(), Some(Power::Unknown));
+                assert_eq!(work.observation_source("relay:2"), None);
+                assert_eq!(work.property_source("relay:2", binding(2, 1)), None);
+                let source = work.function_observer("relay:2").unwrap();
+                control.context.property_value_event(
+                    &source,
+                    "one",
+                    binding(2, 1),
+                    &json!(true),
+                    None,
+                    true,
+                );
+                assert_eq!(relay.snapshot().power(), Some(Power::On));
+                assert_eq!(work.property_source("relay:2", binding(2, 1)), None);
+                control.context.property_value_event(
+                    &source,
+                    "one",
+                    binding(2, 1),
+                    &json!("bad"),
+                    None,
+                    false,
+                );
+                assert_eq!(work.observation_source("relay:2"), None);
+                let stale = work.observations.read_stamp("relay:2", binding(2, 1));
+                peer.notify_value("one", binding(2, 1), json!(false), false);
+                until(|| relay.snapshot().power() == Some(Power::Off)).await;
+                work.observe_read_at(
+                    "relay:2",
+                    binding(2, 1),
+                    &stale,
+                    &json!(true),
+                    Observation {
+                        source: PathKind::Cloud,
+                        source_time: None,
+                        received_at: 0,
+                    },
+                )
+                .unwrap();
+                assert_eq!(relay.snapshot().power(), Some(Power::Off));
+                assert_eq!(
+                    work.property_source("relay:2", binding(2, 1)),
+                    Some(PathKind::Local)
+                );
+                async_io::Timer::after(Duration::from_millis(40)).await;
+                let terminal = crate::terminal::bridge::Context::committed(
+                    control.publication.clone(),
+                    &status,
+                );
+                let details = terminal
+                    .handle_line("status one", 0)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let section = details
+                    .split("  relay:2 (")
+                    .nth(1)
+                    .unwrap()
+                    .split("  relay:3 (")
+                    .next()
+                    .unwrap();
+                assert!(
+                    section.contains("Power: property 2.1; observation source hub"),
+                    "{section}"
+                );
+                assert!(
+                    section.contains("notification source hub; observation source hub"),
+                    "{section}"
+                );
+                control.context.property_value_event(
+                    &source,
+                    "one",
+                    binding(2, 1),
+                    &json!(true),
+                    None,
+                    true,
+                );
+                assert_eq!(relay.snapshot().power(), Some(Power::Off));
+                assert_eq!(work.observation_source("relay:2"), Some(PathKind::Local));
+            })
+            .await;
+        },
+    ));
 }

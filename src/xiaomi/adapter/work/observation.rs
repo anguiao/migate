@@ -12,6 +12,32 @@ mod heater;
 mod shared;
 
 impl DeviceWork {
+    fn record_relay_power_source(&self, id: &str, source: PathKind) {
+        self.property_sources.borrow_mut().insert(
+            super::super::observations::key(id, self.binding(id)),
+            source,
+        );
+        self.observation_sources
+            .borrow_mut()
+            .insert(id.to_owned(), source);
+    }
+
+    pub(in crate::xiaomi::adapter) fn observe_relay_power_notification(
+        &self,
+        id: &str,
+        value: bool,
+        source: PathKind,
+    ) -> bool {
+        if !self
+            .observations
+            .notify(self, id, value, Origin::Notification)
+        {
+            return false;
+        }
+        self.record_relay_power_source(id, source);
+        true
+    }
+
     pub(in crate::xiaomi::adapter) fn observe_relay_mode(
         &self,
         function: &ParsedFunction,
@@ -358,7 +384,11 @@ impl DeviceWork {
                     .ok_or(crate::xiaomi::capability::CapabilityError::InvalidValue(
                         "boolean",
                     ))?;
-            self.observations.observe_read(self, id, stamp, value);
+            if self.observations.observe_read(self, id, stamp, value)
+                && function.relay_mode().is_some()
+            {
+                self.record_relay_power_source(id, observation.source);
+            }
         }
         Ok(())
     }

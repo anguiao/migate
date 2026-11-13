@@ -113,11 +113,20 @@ impl Observations {
             refresh: counts.refresh,
         }
     }
-    pub(super) fn observe_read(&self, work: &DeviceWork, id: &str, stamp: &ReadStamp, value: bool) {
+    pub(super) fn observe_read(
+        &self,
+        work: &DeviceWork,
+        id: &str,
+        stamp: &ReadStamp,
+        value: bool,
+    ) -> bool {
         let binding = work.binding(id);
         if self.read_is_current(work, id, binding, stamp) {
             self.observed(work, id, binding, Origin::Read);
             work.physical().function(id).unwrap().observe(value);
+            true
+        } else {
+            false
         }
     }
     pub(super) fn read_is_current(
@@ -143,13 +152,14 @@ impl Observations {
             && counts.observed == stamp.observed
             && counts.refresh == stamp.refresh
     }
-    pub(super) fn notify(&self, work: &DeviceWork, id: &str, value: bool, origin: Origin) {
+    pub(super) fn notify(&self, work: &DeviceWork, id: &str, value: bool, origin: Origin) -> bool {
         let binding = work.binding(id);
         if work.life.is_closed() || !self.permits(id, binding, origin) {
-            return;
+            return false;
         }
         self.observed(work, id, binding, origin);
         work.physical().function(id).unwrap().observe(value);
+        true
     }
     pub(super) fn write_stamp(
         &self,

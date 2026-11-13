@@ -194,6 +194,7 @@ impl PublishedRelayModel {
                 .iter()
                 .map(|kind| kind.dtype)
                 .collect::<Vec<_>>();
+            assert_eq!(types, [if light { 0x0100 } else { 0x0103 }, 0x0013]);
             assert!(types.contains(&0x0013));
             assert_eq!(types.contains(&0x0100), light);
             assert_eq!(types.contains(&0x0103), !light);
@@ -264,6 +265,25 @@ impl PublishedRelayModel {
             .unwrap()
             .iter()
             .map(|value| value.unwrap().u16().unwrap())
+            .collect()
+    }
+
+    pub(crate) async fn device_types(&self, endpoint: u16) -> Vec<u16> {
+        let bytes = self.read(endpoint, 0x1d, 0).await.unwrap();
+        report_value(&bytes)
+            .array()
+            .unwrap()
+            .iter()
+            .map(|value| {
+                value
+                    .unwrap()
+                    .structure()
+                    .unwrap()
+                    .find_ctx(0)
+                    .unwrap()
+                    .u16()
+                    .unwrap()
+            })
             .collect()
     }
 
