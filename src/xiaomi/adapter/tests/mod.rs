@@ -32,6 +32,7 @@ mod panel_catalog;
 mod property_refresh;
 mod refresh_scheduling;
 mod relations;
+mod relay;
 mod repair;
 mod repair_planning;
 mod repair_restart;

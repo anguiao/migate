@@ -17,6 +17,42 @@ impl Context {
             .get(did)
             .and_then(|slot| slot.admitted.clone());
         if let Some(work) = &work
+            && let Some(function) = work.native.device().functions().iter().find(|function| {
+                function
+                    .relay_mode()
+                    .is_some_and(|(mode, _)| mode == binding)
+            })
+        {
+            let id = function.id();
+            let active = work.function_observer(id);
+            let desired = self.notification_source(did, id);
+            let selected = active.as_ref().is_some_and(|active| active.same(source))
+                || desired.as_ref().is_some_and(|desired| desired.same(source))
+                || active.is_none() && desired.is_none();
+            if function.relay_mode().unwrap().1
+                && selected
+                && self.source_valid_for(did, id, source)
+                && work.source_binding_ready(source, binding)
+            {
+                let _ = work.observe_relay_mode(
+                    function,
+                    binding,
+                    value,
+                    Observation {
+                        source: source.kind(),
+                        source_time: update_time,
+                        received_at: self.clock.unix_now(),
+                    },
+                    if cached_report {
+                        Origin::Cache
+                    } else {
+                        Origin::Notification
+                    },
+                );
+            }
+            return;
+        }
+        if let Some(work) = &work
             && let Some((id, power, trigger)) =
                 work.native
                     .device()

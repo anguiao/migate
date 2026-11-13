@@ -220,7 +220,7 @@ impl XiaomiAdapter {
             registry,
             store,
             tasks: TaskSet::default(),
-            configuration_changed: Event::new(),
+            configuration_changed: Rc::new(Event::new()),
             #[cfg(test)]
             snapshot_observer: RefCell::new(None),
             changed: Event::new(),
@@ -255,6 +255,7 @@ impl XiaomiAdapter {
                 sink.clone(),
                 context.refresh_changed.clone(),
                 context.initial_reads_changed.clone(),
+                context.configuration_changed.clone(),
                 light_write,
             ));
             context.registry.insert(sink.physical.clone());

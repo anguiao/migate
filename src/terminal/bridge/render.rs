@@ -509,7 +509,8 @@ pub(super) fn render(
                         lines.push(format!("    queued curtain commands: {pending}."));
                     }
                 }
-                crate::device::FunctionState::Outlet { power } => {
+                crate::device::FunctionState::Outlet { power }
+                | crate::device::FunctionState::Relay { power, .. } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));
                 }
                 crate::device::FunctionState::Light { power, lighting } => {

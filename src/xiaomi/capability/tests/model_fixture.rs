@@ -8,6 +8,7 @@ pub(crate) fn native_for(description: &PhysicalDeviceDescription) -> SourceFixtu
     let mut services = std::collections::BTreeMap::<u32, Value>::new();
     for function in description.functions() {
         let (siid, name, kind, properties) = match function.kind {
+            FunctionKind::Relay => unreachable!("relay tests use real MIoT descriptions"),
             FunctionKind::Outlet => {
                 let siid = match function.id.as_str() {
                     "outlet_1" | "outlet:3" => 3,

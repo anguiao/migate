@@ -253,6 +253,7 @@ pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescript
             .all(|(left, right)| {
                 left.id() == right.id()
                     && left.power() == right.power()
+                    && left.relay_mode() == right.relay_mode()
                     && left.lighting() == right.lighting()
                     && left.curtain() == right.curtain()
                     && left.fan() == right.fan()

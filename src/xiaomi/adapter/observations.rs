@@ -195,7 +195,17 @@ impl Observations {
                 || counts.source != stamp.source
                 || counts.observed == stamp.observed);
         counts.observed += 1;
-        if unchanged {
+        if unchanged
+            && work
+                .native
+                .device()
+                .functions()
+                .iter()
+                .find(|function| function.id() == id)
+                .unwrap()
+                .relay_mode()
+                .is_none()
+        {
             sink.physical.function(id).unwrap().observe(target);
         }
         request.accept().map(|_| ())

@@ -151,6 +151,13 @@ impl ParsedDevice {
                     "function source identity",
                 ));
             }
+            if let Some((mode, _)) = function.relay_mode()
+                && mode.siid != function.power().unwrap().siid
+            {
+                return Err(CapabilityError::InvalidDescription(
+                    "relay binding ownership",
+                ));
+            }
             if let Some(lighting) = function.lighting() {
                 let service = function.power().unwrap().siid;
                 if lighting

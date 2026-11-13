@@ -159,6 +159,7 @@ impl AppSource {
                     sink,
                     adapter.context.refresh_changed.clone(),
                     adapter.context.initial_reads_changed.clone(),
+                    adapter.context.configuration_changed.clone(),
                     light_write,
                 ));
                 let candidate = crate::xiaomi::capability::SourceDescription {

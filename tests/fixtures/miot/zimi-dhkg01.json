@@ -1,0 +1,220 @@
+{
+  "description": "One Key Switch",
+  "services": [
+    {
+      "comment": "设备信息",
+      "description": "",
+      "iid": 1,
+      "properties": [
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "设备制造商",
+          "description": "Device Manufacturer",
+          "format": "string",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:manufacturer:00000001:zimi-dhkg01:1:0000C808"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "设备型号",
+          "description": "Device Model",
+          "format": "string",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:model:00000002:zimi-dhkg01:1:0000C808"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "设备序列号",
+          "description": "Device Serial Number",
+          "format": "string",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:property:serial-number:00000003:zimi-dhkg01:1:0000C808"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "当前固件版本",
+          "description": "Current Firmware Version",
+          "format": "string",
+          "iid": 4,
+          "type": "urn:miot-spec-v2:property:firmware-revision:00000005:zimi-dhkg01:1:0000C808"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:device-information:00007801:zimi-dhkg01:1:0000C808"
+    },
+    {
+      "comment": "开关",
+      "description": "Switch",
+      "iid": 2,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "按键",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:zimi-dhkg01:1:0000C808"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:zimi-dhkg01:1",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线模式",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:zimi-dhkg01:1:0000C808"
+    },
+    {
+      "comment": "开关传感器",
+      "description": "Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:zimi-dhkg01:1"
+        }
+      ],
+      "iid": 8,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:zimi-dhkg01:1"
+    },
+    {
+      "comment": "指示灯",
+      "description": "Indicator Light",
+      "iid": 10,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:zimi-dhkg01:2"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:indicator-light:00007803:zimi-dhkg01:2"
+    },
+    {
+      "comment": "toggle",
+      "description": "toggle",
+      "iid": 5,
+      "properties": [
+        {
+          "access": [
+            "write"
+          ],
+          "comment": "toggle",
+          "description": "toggle",
+          "format": "uint8",
+          "iid": 1,
+          "type": "urn:zimi-spec:property:toggle:00000001:zimi-dhkg01:1",
+          "unit": "none",
+          "value-list": [
+            {
+              "comment": "On",
+              "description": "On",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:zimi-spec:service:toggle:00007803:zimi-dhkg01:1"
+    },
+    {
+      "comment": "功耗改变",
+      "description": "power-change",
+      "iid": 7,
+      "properties": [
+        {
+          "access": [
+            "write"
+          ],
+          "comment": "scan 窗口值",
+          "description": "change-value",
+          "format": "uint8",
+          "iid": 1,
+          "type": "urn:zimi-spec:property:change-value:00000001:zimi-dhkg01:1",
+          "unit": "none",
+          "value-list": [
+            {
+              "comment": "15",
+              "description": "15",
+              "value": 0
+            },
+            {
+              "comment": "20",
+              "description": "20",
+              "value": 1
+            },
+            {
+              "comment": "25",
+              "description": "25",
+              "value": 2
+            }
+          ]
+        }
+      ],
+      "type": "urn:zimi-spec:service:power-change:00007804:zimi-dhkg01:1"
+    },
+    {
+      "comment": "设备版本号",
+      "description": "device-version",
+      "iid": 9,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "设备版本号",
+          "description": "version",
+          "format": "uint32",
+          "iid": 1,
+          "type": "urn:zimi-spec:property:version:00000001:zimi-dhkg01:1",
+          "unit": "none",
+          "value-range": [
+            0,
+            1000,
+            1
+          ]
+        }
+      ],
+      "type": "urn:zimi-spec:service:device-version:00007805:zimi-dhkg01:1"
+    }
+  ],
+  "type": "urn:miot-spec-v2:device:switch:0000A003:zimi-dhkg01:2:0000C808"
+}

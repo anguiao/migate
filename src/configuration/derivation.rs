@@ -12,9 +12,10 @@ impl DerivedConfiguration {
             .functions()
             .iter()
             .filter(|function| {
-                !self
-                    .memberships
-                    .contains_key(&FunctionKey::new(key.clone(), &function.id))
+                function.kind != crate::device::FunctionKind::Relay
+                    && !self
+                        .memberships
+                        .contains_key(&FunctionKey::new(key.clone(), &function.id))
             })
             .collect()
     }
@@ -154,7 +155,9 @@ fn derive_picture<'a>(
                 publishable.contains(&device.key.id)
             } else {
                 device.native.device().functions().iter().any(|function| {
-                    !memberships.contains_key(&FunctionKey::new(device.key.clone(), function.id()))
+                    function.kind() != crate::device::FunctionKind::Relay
+                        && !memberships
+                            .contains_key(&FunctionKey::new(device.key.clone(), function.id()))
                 })
             }
         })

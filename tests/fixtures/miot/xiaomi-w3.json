@@ -1,0 +1,627 @@
+{
+  "description": "xiaomi switch w3",
+  "services": [
+    {
+      "comment": "设备信息",
+      "description": "Device Information",
+      "iid": 1,
+      "properties": [
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "企业标志",
+          "description": "Device Manufacturer",
+          "format": "string",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:manufacturer:00000001:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "产品模型",
+          "description": "Device Model",
+          "format": "string",
+          "gatt-access": [],
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:model:00000002:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "设备ID",
+          "description": "Device Serial Number",
+          "format": "string",
+          "gatt-access": [],
+          "iid": 3,
+          "type": "urn:miot-spec-v2:property:serial-number:00000003:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "固件版本号",
+          "description": "Current Firmware Version",
+          "format": "string",
+          "gatt-access": [],
+          "iid": 4,
+          "type": "urn:miot-spec-v2:property:firmware-revision:00000005:xiaomi-w3:1:0000C810"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:device-information:00007801:xiaomi-w3:1:0000C810"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:xiaomi-w3:1:0000C810"
+        }
+      ],
+      "comment": "开关左键",
+      "description": "Left Switch Service",
+      "iid": 2,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "gatt-access": [],
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-w3:1:0000C810",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "功能异常",
+          "description": "Device Fault",
+          "format": "uint8",
+          "gatt-access": [
+            "read",
+            "notify"
+          ],
+          "iid": 3,
+          "source": 4,
+          "type": "urn:miot-spec-v2:property:fault:00000009:xiaomi-w3:1:0000C810",
+          "value-list": [
+            {
+              "comment": "无故障",
+              "description": "No Faults",
+              "value": 0
+            },
+            {
+              "comment": "开关温度过高，已关闭。",
+              "description": "Over Temperature",
+              "value": 1
+            },
+            {
+              "comment": "过载",
+              "description": "Overload",
+              "value": 2
+            },
+            {
+              "comment": "负载电流低，仅无线功能可用，部分功能异常，需提升负载功率。",
+              "description": "UnderVol",
+              "value": 3
+            }
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "防闪烁模式",
+          "description": "Anti Flicker",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 4,
+          "type": "urn:miot-spec-v2:property:anti-flicker:00000202:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "接线方式",
+          "description": "Wiring Method",
+          "format": "uint8",
+          "gatt-access": [
+            "read",
+            "notify"
+          ],
+          "iid": 6,
+          "source": 4,
+          "type": "urn:miot-spec-v2:property:wiring-method:000002EA:xiaomi-w3:1",
+          "value-list": [
+            {
+              "comment": "No Neutral",
+              "description": "No Neutral",
+              "value": 0
+            },
+            {
+              "comment": "Neutral Wire",
+              "description": "Neutral Wire",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "温度",
+          "description": "Temperature",
+          "format": "int32",
+          "gatt-access": [
+            "read",
+            "notify"
+          ],
+          "iid": 7,
+          "source": 4,
+          "type": "urn:miot-spec-v2:property:temperature:00000020:xiaomi-w3:1",
+          "unit": "celsius",
+          "value-range": [
+            -30,
+            100,
+            1
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:xiaomi-w3:1:0000C810"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:xiaomi-w3:1:0000C810"
+        }
+      ],
+      "comment": "开关中键",
+      "description": "Middle Switch Service",
+      "iid": 3,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "gatt-access": [],
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-w3:1:0000C810",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:xiaomi-w3:1:0000C810"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:xiaomi-w3:1:0000C810"
+        }
+      ],
+      "comment": "开关右键",
+      "description": "Right Switch Service",
+      "iid": 4,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "gatt-access": [],
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-w3:1:0000C810",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:xiaomi-w3:1:0000C810"
+    },
+    {
+      "comment": "左键",
+      "description": "Left Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:xiaomi-w3:1:0000C810"
+        },
+        {
+          "arguments": [],
+          "comment": "双击",
+          "description": "Double Click",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:event:double-click:00005008:xiaomi-w3:1"
+        },
+        {
+          "arguments": [],
+          "comment": "长按",
+          "description": "Long Press",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:event:long-press:00005009:xiaomi-w3:1"
+        },
+        {
+          "arguments": [],
+          "comment": "设备被重置",
+          "description": "Device Be Reset",
+          "iid": 4,
+          "type": "urn:miot-spec-v2:event:device-be-reset:0000503C:xiaomi-w3:1"
+        }
+      ],
+      "iid": 5,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "gatt-access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "iid": 1,
+          "source": 4,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-w3:1",
+          "value-list": [
+            {
+              "comment": "极速单击模式",
+              "description": "Quick Single Click",
+              "value": 0
+            },
+            {
+              "comment": "多功能模式",
+              "description": "Multiple Click",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:xiaomi-w3:1:0000C810"
+    },
+    {
+      "comment": "中键",
+      "description": "Middle Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:xiaomi-w3:1:0000C810"
+        },
+        {
+          "arguments": [],
+          "comment": "双击",
+          "description": "Double Click",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:event:double-click:00005008:xiaomi-w3:1"
+        },
+        {
+          "arguments": [],
+          "comment": "长按",
+          "description": "Long Press",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:event:long-press:00005009:xiaomi-w3:1"
+        }
+      ],
+      "iid": 6,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "gatt-access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "iid": 1,
+          "source": 4,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-w3:1",
+          "value-list": [
+            {
+              "comment": "极速单击模式",
+              "description": "Quick Single Click",
+              "value": 0
+            },
+            {
+              "comment": "多功能模式",
+              "description": "Multiple Click",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:xiaomi-w3:1:0000C810"
+    },
+    {
+      "comment": "右键",
+      "description": "Right Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:xiaomi-w3:1:0000C810"
+        },
+        {
+          "arguments": [],
+          "comment": "双击",
+          "description": "Double Click",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:event:double-click:00005008:xiaomi-w3:1"
+        },
+        {
+          "arguments": [],
+          "comment": "长按",
+          "description": "Long Press",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:event:long-press:00005009:xiaomi-w3:1"
+        }
+      ],
+      "iid": 7,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "gatt-access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "iid": 1,
+          "source": 4,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-w3:1",
+          "value-list": [
+            {
+              "comment": "极速单击模式",
+              "description": "Quick Single Click",
+              "value": 0
+            },
+            {
+              "comment": "多功能模式",
+              "description": "Multiple Click",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:xiaomi-w3:1:0000C810"
+    },
+    {
+      "comment": "全部开关指示灯状态",
+      "description": "All Switch Indicator",
+      "iid": 9,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:1:0000C810"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:indicator-light:00007803:xiaomi-w3:1:0000C810"
+    },
+    {
+      "comment": "左键指示灯状态",
+      "description": "Left Switch Indicator",
+      "iid": 11,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "source": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:2"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:indicator-light:00007803:xiaomi-w3:2"
+    },
+    {
+      "comment": "中键指示灯状态",
+      "description": "Middle Switch Indicator",
+      "iid": 12,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "source": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:2"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:indicator-light:00007803:xiaomi-w3:2"
+    },
+    {
+      "comment": "右键指示灯状态",
+      "description": "Right Switch Indicator",
+      "iid": 13,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "source": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-w3:2"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:indicator-light:00007803:xiaomi-w3:2"
+    },
+    {
+      "comment": "特色功能",
+      "description": "switch-set",
+      "iid": 10,
+      "properties": [
+        {
+          "access": [
+            "notify"
+          ],
+          "comment": "内部电压",
+          "description": "vol",
+          "format": "uint16",
+          "gatt-access": [],
+          "iid": 5,
+          "source": 1,
+          "type": "urn:xiaomi-spec:property:vol:00000005:xiaomi-w3:1",
+          "unit": "mV",
+          "value-range": [
+            0,
+            32000,
+            1
+          ]
+        }
+      ],
+      "type": "urn:xiaomi-spec:service:switch-set:00007801:xiaomi-w3:1"
+    }
+  ],
+  "type": "urn:miot-spec-v2:device:switch:0000A003:xiaomi-w3:2:0000C810"
+}

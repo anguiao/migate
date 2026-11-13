@@ -6,6 +6,7 @@ mod fan;
 mod heater;
 mod labels;
 pub(crate) mod model_fixture;
+mod relay;
 
 use super::{CapabilityError, PropertyBinding};
 use crate::device::{DeviceKey, FunctionKind};

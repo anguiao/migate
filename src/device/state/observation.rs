@@ -402,12 +402,31 @@ impl Function {
     pub fn observe(&self, power: bool) {
         if !matches!(
             self.description().kind,
-            crate::device::FunctionKind::Outlet | crate::device::FunctionKind::Light(_)
+            crate::device::FunctionKind::Outlet
+                | crate::device::FunctionKind::Relay
+                | crate::device::FunctionKind::Light(_)
         ) {
             return;
         }
         let mut state = self.0.state.lock().unwrap();
         self.update_power(&mut state, power);
+    }
+    pub(crate) fn observe_relay_mode(&self, mode: super::super::RelayMode) -> bool {
+        if self.description().kind != super::super::FunctionKind::Relay {
+            return false;
+        }
+        let mut state = self.0.state.lock().unwrap();
+        let super::RuntimeValue::Control(control) = &mut state.value else {
+            unreachable!()
+        };
+        if control.relay_mode != Some(mode) {
+            control.relay_mode = Some(mode);
+            state.revision = state.revision.wrapping_add(1);
+            self.0.changed.notify(usize::MAX);
+            true
+        } else {
+            false
+        }
     }
     pub(in crate::device) fn update_power(&self, state: &mut RuntimeState, power: bool) {
         let power = power.into();

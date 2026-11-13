@@ -9,6 +9,7 @@ mod model;
 mod native;
 mod outlet;
 mod patch;
+mod relay;
 mod repair;
 mod sensor;
 mod source;
@@ -33,10 +34,12 @@ pub(crate) use repair::{RepairPlan, compose_group_light};
 pub(crate) use source::{RawDescription, SourceDescription};
 
 pub(crate) fn is_load_panel_type(value: &str) -> bool {
-    description::Urn::parse(value).is_ok_and(|urn| {
-        urn.standard("device", "switch", 0x0000a003)
-            || urn.standard("device", "control-panel", 0x0000a099)
-    })
+    description::Urn::parse(value).is_ok_and(|urn| is_load_panel_urn(&urn))
+}
+
+fn is_load_panel_urn(urn: &description::Urn<'_>) -> bool {
+    urn.standard("device", "switch", 0x0000a003)
+        || urn.standard("device", "control-panel", 0x0000a099)
 }
 pub use state_sensor::{
     EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,
@@ -59,6 +62,7 @@ pub fn parse_device_for_model(
     let mut patches = Vec::new();
     let (mut functions, refresh_trigger) =
         outlet::candidates(model, &description, &mut diagnostics, &mut patches);
+    functions.extend(relay::candidates(&description, &mut diagnostics));
     for service in &description.services {
         let diagnostic = |kind: &str, error: CapabilityError| RecognitionDiagnostic {
             target: format!("{kind}:{}", service.iid),
@@ -228,6 +232,10 @@ fn is_core(urn: &description::Urn<'_>, function: &ParsedFunction) -> bool {
         FunctionKind::Heater { .. } => urn.standard("device", "bath-heater", 0xa028),
         FunctionKind::Curtain => urn.standard("device", "curtain", 0xa00c),
         FunctionKind::Outlet => urn.standard("device", "outlet", 0xa002),
+        FunctionKind::Relay => {
+            urn.standard("device", "switch", 0xa003)
+                || urn.standard("device", "control-panel", 0xa099)
+        }
         FunctionKind::Temperature(_) | FunctionKind::Humidity(_) => {
             urn.standard("device", "temperature-humidity-sensor", 0xa00a)
         }

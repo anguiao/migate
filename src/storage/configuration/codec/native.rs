@@ -37,6 +37,13 @@ pub(super) struct WireNative {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum WireFunction {
+    Relay {
+        id: String,
+        label: String,
+        power: WireBinding,
+        mode: WireBinding,
+        notify: bool,
+    },
     Outlet {
         id: String,
         label: String,

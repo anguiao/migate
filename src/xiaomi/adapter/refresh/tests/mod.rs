@@ -185,6 +185,7 @@ fn motion_work() -> Rc<DeviceWork> {
         Rc::new(super::super::state::LogicalSink::new(physical)),
         Rc::new(event_listener::Event::new()),
         Rc::new(event_listener::Event::new()),
+        Rc::new(event_listener::Event::new()),
         None,
     ))
 }

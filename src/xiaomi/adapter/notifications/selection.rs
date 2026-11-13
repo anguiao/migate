@@ -220,6 +220,30 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
             keep_local |= matches!(active, NotificationSource::Local(_));
             keep_cloud |= matches!(active, NotificationSource::Cloud(_));
         }
+        if let Some((binding, true)) = work
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .and_then(crate::xiaomi::capability::ParsedFunction::relay_mode)
+        {
+            if let Ok(handle) = context.local_candidate(&did, true) {
+                let source = NotificationSource::Local(handle);
+                keep_local |= context.source_valid_for(&did, &id, &source)
+                    && work.source_binding_ready(&source, binding);
+            }
+            if let Some(handle) = context
+                .notifications
+                .borrow()
+                .as_ref()
+                .map(|session| session.handle.clone())
+            {
+                let source = NotificationSource::Cloud(handle);
+                keep_cloud |= context.source_valid_for(&did, &id, &source)
+                    && work.source_binding_ready(&source, binding);
+            }
+        }
     }
     if !keep_local && work.local_preparation_active() {
         work.retire_local_notifications();

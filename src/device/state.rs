@@ -25,6 +25,7 @@ struct MeasurementRuntime {
 }
 struct ControlRuntime {
     power: Power,
+    relay_mode: Option<super::RelayMode>,
     lighting: Option<super::LightSnapshot>,
     commands: CommandCoordinator,
 }
@@ -104,6 +105,7 @@ impl RuntimeState {
         Self {
             value: RuntimeValue::Control(Box::new(ControlRuntime {
                 power: Power::Unknown,
+                relay_mode: None,
                 lighting,
                 commands: CommandCoordinator::new(),
             })),
@@ -701,6 +703,10 @@ impl Function {
                     power: control.power,
                 }
             }
+            (super::FunctionKind::Relay, RuntimeValue::Control(control)) => FunctionState::Relay {
+                power: control.power,
+                mode: control.relay_mode,
+            },
             (super::FunctionKind::Light(_), RuntimeValue::Control(control))
                 if control.lighting.is_some() =>
             {

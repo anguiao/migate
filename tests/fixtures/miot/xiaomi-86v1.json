@@ -1,0 +1,784 @@
+{
+  "description": "Control Panel",
+  "services": [
+    {
+      "comment": "设备信息",
+      "description": "Device Information",
+      "iid": 1,
+      "properties": [
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Device Manufacturer",
+          "format": "string",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:manufacturer:00000001:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Device Model",
+          "format": "string",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:model:00000002:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "comment": "设备ID",
+          "description": "Device ID",
+          "format": "string",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:property:serial-number:00000003:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Current Firmware Version",
+          "format": "string",
+          "iid": 4,
+          "type": "urn:miot-spec-v2:property:firmware-revision:00000005:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "SN码",
+          "description": "Serial Number",
+          "format": "string",
+          "iid": 5,
+          "type": "urn:miot-spec-v2:property:serial-no:000000FF:xiaomi-86v1:1"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:device-information:00007801:xiaomi-86v1:1"
+    },
+    {
+      "comment": "扬声器",
+      "description": "Speaker",
+      "iid": 2,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "音量",
+          "description": "Volume",
+          "format": "uint8",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:volume:00000013:xiaomi-86v1:1",
+          "unit": "percentage",
+          "value-range": [
+            0,
+            100,
+            1
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:speaker:0000781C:xiaomi-86v1:1"
+    },
+    {
+      "comment": "播放控制",
+      "description": "Play Control",
+      "iid": 3,
+      "type": "urn:miot-spec-v2:service:play-control:0000781D:xiaomi-86v1:1"
+    },
+    {
+      "comment": "麦克风",
+      "description": "Microphone",
+      "iid": 4,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "禁麦",
+          "description": "Mute",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:mute:00000040:xiaomi-86v1:1"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:microphone:00007826:xiaomi-86v1:1"
+    },
+    {
+      "actions": [
+        {
+          "comment": "唤醒",
+          "description": "Wake Up",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:wake-up:0000283F:xiaomi-86v1:1"
+        },
+        {
+          "comment": "播放文本",
+          "description": "Play Text",
+          "iid": 3,
+          "in": [
+            1
+          ],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:play-text:00002841:xiaomi-86v1:1"
+        },
+        {
+          "comment": "执行文本指令",
+          "description": "Execute Text Directive",
+          "iid": 4,
+          "in": [
+            1,
+            2
+          ],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:execute-text-directive:00002842:xiaomi-86v1:1"
+        }
+      ],
+      "comment": "智能音箱",
+      "description": "Intelligent Speaker",
+      "iid": 5,
+      "properties": [
+        {
+          "access": [],
+          "comment": "文本内容",
+          "description": "Text Content",
+          "format": "string",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:text-content:000000FA:xiaomi-86v1:1"
+        },
+        {
+          "access": [],
+          "comment": "指令静默执行（false为静默执行）",
+          "description": "Silent Execution",
+          "format": "bool",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:silent-execution:000000FB:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "睡眠模式",
+          "description": "Sleep Mode",
+          "format": "bool",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:property:sleep-mode:00000028:xiaomi-86v1:1"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:intelligent-speaker:0000789B:xiaomi-86v1:1"
+    },
+    {
+      "actions": [
+        {
+          "comment": "停止闹钟",
+          "description": "Stop Alarm",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:stop-alarm:00002843:xiaomi-86v1:1"
+        }
+      ],
+      "comment": "闹钟",
+      "description": "Clock",
+      "iid": 6,
+      "type": "urn:miot-spec-v2:service:clock:0000789A:xiaomi-86v1:1"
+    },
+    {
+      "comment": "勿扰",
+      "description": "No Disturb",
+      "iid": 7,
+      "type": "urn:miot-spec-v2:service:no-disturb:000078BC:xiaomi-86v1:1"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:xiaomi-86v1:1"
+        }
+      ],
+      "comment": "左键",
+      "description": "Left Switch Service",
+      "iid": 10,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-86v1:1",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:xiaomi-86v1:1"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:xiaomi-86v1:1"
+        }
+      ],
+      "comment": "中键",
+      "description": "Middle Switch Service",
+      "iid": 11,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-86v1:1",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:xiaomi-86v1:1"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:xiaomi-86v1:1"
+        }
+      ],
+      "comment": "右键",
+      "description": "Right Switch Service",
+      "iid": 12,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:xiaomi-86v1:1",
+          "value-list": [
+            {
+              "comment": "有线和无线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:xiaomi-86v1:1"
+    },
+    {
+      "comment": "左键开关传感器",
+      "description": "Left Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:xiaomi-86v1:1"
+        }
+      ],
+      "iid": 13,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:xiaomi-86v1:1"
+    },
+    {
+      "comment": "中键开关传感器",
+      "description": "Middle Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:xiaomi-86v1:1"
+        }
+      ],
+      "iid": 14,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:xiaomi-86v1:1"
+    },
+    {
+      "comment": "右键开关传感器",
+      "description": "Right Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:xiaomi-86v1:1"
+        }
+      ],
+      "iid": 15,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:xiaomi-86v1:1"
+    },
+    {
+      "comment": "显示屏",
+      "description": "Screen",
+      "iid": 16,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "亮度",
+          "description": "Brightness",
+          "format": "uint8",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:brightness:0000000D:xiaomi-86v1:1",
+          "unit": "percentage",
+          "value-range": [
+            1,
+            100,
+            1
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "屏幕状态",
+          "description": "Display State",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:display-state:00000131:xiaomi-86v1:1",
+          "value-list": [
+            {
+              "comment": "息屏",
+              "description": "Rest",
+              "value": 0
+            },
+            {
+              "comment": "亮屏",
+              "description": "Display",
+              "value": 1
+            }
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "true为开启自动息屏",
+          "description": "Auto Screen Off",
+          "format": "bool",
+          "gatt-access": [],
+          "iid": 3,
+          "type": "urn:miot-spec-v2:property:auto-screen-off:0000018C:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "自动屏幕亮度",
+          "description": "Auto Screen Brightness",
+          "format": "bool",
+          "iid": 4,
+          "type": "urn:miot-spec-v2:property:auto-screen-brightness:000001CD:xiaomi-86v1:1"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:screen:00007806:xiaomi-86v1:1"
+    },
+    {
+      "comment": "线上/测试环境切换",
+      "description": "mibrain",
+      "iid": 8,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "mibrain环境切换；0:product/1:preview/2:preview4test",
+          "description": "",
+          "format": "uint8",
+          "iid": 1,
+          "type": "urn:xiaomi-spec:property:mibrain-level:00000001:xiaomi-86v1:1",
+          "value-range": [
+            0,
+            2,
+            1
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "mico服务器环境切换；0:product/1:preview",
+          "description": "",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:xiaomi-spec:property:mico-level:00000002:xiaomi-86v1:1",
+          "value-range": [
+            0,
+            1,
+            1
+          ]
+        }
+      ],
+      "type": "urn:xiaomi-spec:service:mibrain:00007801:xiaomi-86v1:1"
+    },
+    {
+      "actions": [
+        {
+          "comment": "进入主页",
+          "description": "homepage",
+          "iid": 3,
+          "in": [],
+          "out": [],
+          "type": "urn:xiaomi-spec:action:homepage:00002803:xiaomi-86v1:1"
+        },
+        {
+          "comment": "息屏",
+          "description": "rest",
+          "iid": 5,
+          "in": [],
+          "out": [],
+          "type": "urn:xiaomi-spec:action:rest:00002805:xiaomi-86v1:1"
+        },
+        {
+          "comment": "亮屏",
+          "description": "light",
+          "iid": 6,
+          "in": [],
+          "out": [],
+          "type": "urn:xiaomi-spec:action:light:00002801:xiaomi-86v1:1"
+        }
+      ],
+      "comment": "中控屏服务",
+      "description": "panel-service",
+      "iid": 17,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "屏幕触摸音效",
+          "description": "",
+          "format": "bool",
+          "iid": 4,
+          "type": "urn:xiaomi-spec:property:touch-sound:00000004:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "屏幕主题;0时间;1天气;2环境;3表盘",
+          "description": "theme",
+          "format": "uint8",
+          "gatt-access": [],
+          "iid": 6,
+          "type": "urn:xiaomi-spec:property:theme:00000006:xiaomi-86v1:1",
+          "value-range": [
+            0,
+            255,
+            1
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "显示按键名称；true为显示",
+          "description": "",
+          "format": "bool",
+          "iid": 9,
+          "type": "urn:xiaomi-spec:property:key-name-display:00000009:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "通知面板重新获取天气接口",
+          "description": "",
+          "format": "string",
+          "iid": 10,
+          "type": "urn:xiaomi-spec:property:weather-refresh:00000005:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "面板房间发生变化",
+          "description": "room-refresh",
+          "format": "string",
+          "gatt-access": [],
+          "iid": 11,
+          "type": "urn:xiaomi-spec:property:room-refresh:00000007:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "息屏时间",
+          "description": "",
+          "format": "uint16",
+          "iid": 12,
+          "type": "urn:xiaomi-spec:property:screen-off-time:0000000a:xiaomi-86v1:1",
+          "unit": "seconds",
+          "value-list": [
+            {
+              "comment": "15",
+              "description": "15",
+              "value": 15
+            },
+            {
+              "comment": "30",
+              "description": "30",
+              "value": 30
+            },
+            {
+              "comment": "60",
+              "description": "60",
+              "value": 60
+            },
+            {
+              "comment": "120",
+              "description": "120",
+              "value": 120
+            },
+            {
+              "comment": "300",
+              "description": "300",
+              "value": 300
+            },
+            {
+              "comment": "600",
+              "description": "600",
+              "value": 600
+            }
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "按键名称刷新",
+          "description": "",
+          "format": "string",
+          "iid": 13,
+          "type": "urn:xiaomi-spec:property:key-name-refresh:00000008:xiaomi-86v1:1"
+        },
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "ui支持控制的品类",
+          "description": "ui-support",
+          "format": "uint16",
+          "gatt-access": [],
+          "iid": 14,
+          "type": "urn:xiaomi-spec:property:ui-support:00000001:xiaomi-86v1:1",
+          "value-range": [
+            1,
+            65535,
+            1
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "同意敏感弹窗；默认为false，true为同意过",
+          "description": "",
+          "format": "bool",
+          "iid": 15,
+          "type": "urn:xiaomi-spec:property:agree-privacy:00000002:xiaomi-86v1:1"
+        },
+        {
+          "access": [],
+          "comment": "时钟主题的壁纸；默认为0协奏曲；1结晶2琉璃3月球4几何5纯黑",
+          "description": "wallpaper",
+          "format": "uint8",
+          "gatt-access": [],
+          "iid": 16,
+          "type": "urn:xiaomi-spec:property:wallpaper:00000003:xiaomi-86v1:1",
+          "value-range": [
+            0,
+            5,
+            1
+          ]
+        },
+        {
+          "access": [
+            "read",
+            "notify"
+          ],
+          "comment": "面板可以支持的壁纸、主题版本（搭配appconfig）",
+          "description": "themesupport",
+          "format": "uint16",
+          "gatt-access": [],
+          "iid": 17,
+          "type": "urn:xiaomi-spec:property:themesupport:0000000b:xiaomi-86v1:1",
+          "value-range": [
+            1,
+            65535,
+            1
+          ]
+        }
+      ],
+      "type": "urn:xiaomi-spec:service:panel-service:00007802:xiaomi-86v1:1"
+    },
+    {
+      "comment": "设备端preview环境切换",
+      "description": "preview-test",
+      "iid": 18,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "notify",
+            "write"
+          ],
+          "comment": "环境切换",
+          "description": "test",
+          "format": "uint8",
+          "gatt-access": [],
+          "iid": 1,
+          "type": "urn:xiaomi-spec:property:test:00000001:xiaomi-86v1:1",
+          "value-list": [
+            {
+              "comment": "Online",
+              "description": "Online",
+              "value": 0
+            },
+            {
+              "comment": "Preview",
+              "description": "Preview",
+              "value": 1
+            },
+            {
+              "comment": "Staging",
+              "description": "Staging",
+              "value": 2
+            }
+          ]
+        }
+      ],
+      "type": "urn:xiaomi-spec:service:preview-test:00007803:xiaomi-86v1:1"
+    }
+  ],
+  "type": "urn:miot-spec-v2:device:control-panel:0000A099:xiaomi-86v1:1"
+}

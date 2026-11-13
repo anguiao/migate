@@ -13,6 +13,11 @@ pub struct ParsedFunction {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FunctionBindings {
+    Relay {
+        power: PropertyBinding,
+        mode: PropertyBinding,
+        notify: bool,
+    },
     Outlet {
         power: PropertyBinding,
     },
@@ -55,6 +60,29 @@ enum FunctionBindings {
     },
 }
 impl ParsedFunction {
+    pub(crate) fn relay(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        power: PropertyBinding,
+        mode: PropertyBinding,
+        notify: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            bindings: FunctionBindings::Relay {
+                power,
+                mode,
+                notify,
+            },
+        }
+    }
+    pub(crate) fn relay_mode(&self) -> Option<(PropertyBinding, bool)> {
+        match self.bindings {
+            FunctionBindings::Relay { mode, notify, .. } => Some((mode, notify)),
+            _ => None,
+        }
+    }
     pub(crate) fn air_conditioner_control(
         label: impl Into<String>,
         air_conditioner: AirConditionerBindings,
@@ -237,6 +265,7 @@ impl ParsedFunction {
     /// Stable source identity from the owning service or observed property.
     pub(crate) fn source_id(&self) -> String {
         match &self.bindings {
+            FunctionBindings::Relay { power, .. } => format!("relay:{}", power.siid),
             FunctionBindings::Outlet { power } => format!("outlet:{}", power.siid),
             FunctionBindings::Light { power, .. } => format!("light:{}", power.siid),
             FunctionBindings::Fan { fan } => match fan.shared_speed() {
@@ -273,9 +302,9 @@ impl ParsedFunction {
     }
     pub fn power(&self) -> Option<PropertyBinding> {
         match &self.bindings {
-            FunctionBindings::Outlet { power } | FunctionBindings::Light { power, .. } => {
-                Some(*power)
-            }
+            FunctionBindings::Relay { power, .. }
+            | FunctionBindings::Outlet { power }
+            | FunctionBindings::Light { power, .. } => Some(*power),
             FunctionBindings::Fan { fan } => Some(fan.power()),
             FunctionBindings::AirConditioner { air_conditioner } => Some(air_conditioner.power()),
             FunctionBindings::Heater { heater } => Some(heater.power()),
@@ -291,7 +320,8 @@ impl ParsedFunction {
     }
     pub fn lighting(&self) -> Option<&LightBindings> {
         match &self.bindings {
-            FunctionBindings::Outlet { .. }
+            FunctionBindings::Relay { .. }
+            | FunctionBindings::Outlet { .. }
             | FunctionBindings::Fan { .. }
             | FunctionBindings::AirConditioner { .. }
             | FunctionBindings::Heater { .. }
@@ -312,7 +342,8 @@ impl ParsedFunction {
             | FunctionBindings::Humidity { measurement }
             | FunctionBindings::CarbonDioxide { measurement }
             | FunctionBindings::Illuminance { measurement } => Some(measurement),
-            FunctionBindings::Outlet { .. }
+            FunctionBindings::Relay { .. }
+            | FunctionBindings::Outlet { .. }
             | FunctionBindings::Light { .. }
             | FunctionBindings::Fan { .. }
             | FunctionBindings::AirConditioner { .. }
@@ -328,6 +359,7 @@ impl ParsedFunction {
             FunctionBindings::Contact { .. } => FunctionKind::Contact,
             FunctionBindings::Motion { .. } => FunctionKind::Motion,
             FunctionBindings::Occupancy { .. } => FunctionKind::Occupancy,
+            FunctionBindings::Relay { .. } => FunctionKind::Relay,
             FunctionBindings::Outlet { .. } => FunctionKind::Outlet,
             FunctionBindings::Curtain { .. } => FunctionKind::Curtain,
             FunctionBindings::Fan { fan } => FunctionKind::Fan {
@@ -366,6 +398,9 @@ impl ParsedFunction {
     }
     /// Every native binding this function really reads or writes.
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {
+        if let Some((mode, _)) = self.relay_mode() {
+            return vec![self.power().unwrap(), mode];
+        }
         if let Some(air_conditioner) = self.air_conditioner() {
             return air_conditioner.bindings();
         }
@@ -405,6 +440,14 @@ impl ParsedFunction {
         } else {
             self.bindings()
         }
+    }
+
+    pub(crate) fn notification_bindings(&self) -> Vec<PropertyBinding> {
+        let mut bindings = self.observation_bindings();
+        if let Some((mode, false)) = self.relay_mode() {
+            bindings.retain(|binding| *binding != mode);
+        }
+        bindings
     }
 }
 

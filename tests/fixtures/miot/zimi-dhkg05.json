@@ -1,0 +1,296 @@
+{
+  "description": "Three Key Switch",
+  "services": [
+    {
+      "description": "",
+      "iid": 1,
+      "properties": [
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Device Manufacturer",
+          "format": "string",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:manufacturer:00000001:zimi-dhkg05:1:0000C810"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Device Model",
+          "format": "string",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:model:00000002:zimi-dhkg05:1:0000C810"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Device Serial Number",
+          "format": "string",
+          "iid": 3,
+          "type": "urn:miot-spec-v2:property:serial-number:00000003:zimi-dhkg05:1:0000C810"
+        },
+        {
+          "access": [
+            "read"
+          ],
+          "description": "Current Firmware Version",
+          "format": "string",
+          "iid": 4,
+          "type": "urn:miot-spec-v2:property:firmware-revision:00000005:zimi-dhkg05:1:0000C810"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:device-information:00007801:zimi-dhkg05:1:0000C810"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:zimi-dhkg05:1"
+        }
+      ],
+      "comment": "左键",
+      "description": "Left Switch Service",
+      "iid": 2,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "左键",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:zimi-dhkg05:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:zimi-dhkg05:1",
+          "value-list": [
+            {
+              "comment": "有线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:zimi-dhkg05:1:0000C810"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:zimi-dhkg05:1"
+        }
+      ],
+      "comment": "中键",
+      "description": "Middle Switch Service",
+      "iid": 3,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "中键",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:zimi-dhkg05:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:zimi-dhkg05:1",
+          "value-list": [
+            {
+              "comment": "有线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:zimi-dhkg05:1:0000C810"
+    },
+    {
+      "actions": [
+        {
+          "comment": "开关状态切换",
+          "description": "Toggle",
+          "iid": 1,
+          "in": [],
+          "out": [],
+          "type": "urn:miot-spec-v2:action:toggle:00002811:zimi-dhkg05:1"
+        }
+      ],
+      "comment": "右键",
+      "description": "Right Switch Service",
+      "iid": 4,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "右键",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:zimi-dhkg05:1:0000C810"
+        },
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "模式",
+          "description": "Mode",
+          "format": "uint8",
+          "iid": 2,
+          "type": "urn:miot-spec-v2:property:mode:00000008:zimi-dhkg05:1",
+          "value-list": [
+            {
+              "comment": "有线开关",
+              "description": "Wired And Wireless",
+              "value": 0
+            },
+            {
+              "comment": "无线开关",
+              "description": "Wireless",
+              "value": 1
+            }
+          ]
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:switch:0000780C:zimi-dhkg05:1:0000C810"
+    },
+    {
+      "comment": "左键开关传感器",
+      "description": "Left Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "左键单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:zimi-dhkg05:1"
+        }
+      ],
+      "iid": 5,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:zimi-dhkg05:1"
+    },
+    {
+      "comment": "中键开关传感器",
+      "description": "Middle Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "中键单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:zimi-dhkg05:1"
+        }
+      ],
+      "iid": 6,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:zimi-dhkg05:1"
+    },
+    {
+      "comment": "右键开关传感器",
+      "description": "Right Switch Sensor",
+      "events": [
+        {
+          "arguments": [],
+          "comment": "右键单击",
+          "description": "Click",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:event:click:00005007:zimi-dhkg05:1"
+        }
+      ],
+      "iid": 7,
+      "type": "urn:miot-spec-v2:service:switch-sensor:00007828:zimi-dhkg05:1"
+    },
+    {
+      "comment": "指示灯",
+      "description": "Indicator Light",
+      "iid": 10,
+      "properties": [
+        {
+          "access": [
+            "read",
+            "write",
+            "notify"
+          ],
+          "comment": "开关",
+          "description": "Switch Status",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:miot-spec-v2:property:on:00000006:zimi-dhkg05:1"
+        }
+      ],
+      "type": "urn:miot-spec-v2:service:indicator-light:00007803:zimi-dhkg05:1"
+    },
+    {
+      "comment": "防闪烁模式",
+      "description": "power-manage",
+      "iid": 9,
+      "properties": [
+        {
+          "access": [
+            "write",
+            "read",
+            "notify"
+          ],
+          "comment": "防闪烁",
+          "description": "anti-flk",
+          "format": "bool",
+          "iid": 1,
+          "type": "urn:zimi-spec:property:anti-flk:00000001:zimi-dhkg05:1"
+        }
+      ],
+      "type": "urn:zimi-spec:service:power-manage:00007801:zimi-dhkg05:1"
+    }
+  ],
+  "type": "urn:miot-spec-v2:device:switch:0000A003:zimi-dhkg05:1:0000C810"
+}

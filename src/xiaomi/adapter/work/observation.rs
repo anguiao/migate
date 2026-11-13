@@ -12,6 +12,44 @@ mod heater;
 mod shared;
 
 impl DeviceWork {
+    pub(in crate::xiaomi::adapter) fn observe_relay_mode(
+        &self,
+        function: &ParsedFunction,
+        binding: PropertyBinding,
+        value: &serde_json::Value,
+        observation: Observation,
+        origin: Origin,
+    ) -> Result<(), crate::xiaomi::capability::CapabilityError> {
+        use crate::device::RelayMode;
+        use crate::xiaomi::capability::CapabilityError;
+        let mode = match value.as_u64() {
+            Some(0) => RelayMode::Wired,
+            Some(1) => RelayMode::Wireless,
+            _ => return Err(CapabilityError::InvalidValue("relay mode")),
+        };
+        if self.life.is_closed() || matches!(origin, Origin::Cache) {
+            return Ok(());
+        }
+        let id = function.id();
+        self.observations.observed(self, id, binding, origin);
+        if matches!(origin, Origin::Notification) {
+            self.refresh.borrow_mut().satisfy_baseline(id, binding);
+        }
+        self.property_sources.borrow_mut().insert(
+            super::super::observations::key(id, binding),
+            observation.source,
+        );
+        if self
+            .physical()
+            .function(id)
+            .unwrap()
+            .observe_relay_mode(mode)
+        {
+            self.configuration_changed.notify(usize::MAX);
+        }
+        Ok(())
+    }
+
     pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
         for function in self.native.device().functions().iter().filter(|function| {
             function.state().is_some()
@@ -19,6 +57,7 @@ impl DeviceWork {
                 || function.fan().is_some()
                 || function.air_conditioner().is_some()
                 || function.heater().is_some()
+                || function.relay_mode().is_some()
         }) {
             let id = function.id();
             let path = context.read_path_for(&self.key.id, id);
@@ -264,6 +303,12 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
+        if function
+            .relay_mode()
+            .is_some_and(|(mode, _)| mode == binding)
+        {
+            return self.observe_relay_mode(function, binding, value, observation, Origin::Read);
+        }
         if self.is_standard_mode_binding(id, binding) {
             let _ = self.observe_standard_mode(function, binding, value, observation, Origin::Read);
             return Ok(());

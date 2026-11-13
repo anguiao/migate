@@ -204,6 +204,7 @@ fn native_and_logical_replacements_need_their_own_initial_observations() {
         Rc::new(super::super::state::LogicalSink::new(physical)),
         rig.source.context.refresh_changed.clone(),
         rig.source.context.initial_reads_changed.clone(),
+        rig.source.context.configuration_changed.clone(),
         None,
     ));
     old.retire();

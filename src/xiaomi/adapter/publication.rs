@@ -60,6 +60,8 @@ impl SourceHandle {
         self.0.initial_reads_changed.listen()
     }
 
+    /// Register before collecting source facts; confirmed relay mode changes
+    /// also wake consumers even when the native description is unchanged.
     pub(crate) fn listen(&self) -> event_listener::EventListener {
         self.0.configuration_changed.listen()
     }
@@ -287,6 +289,7 @@ impl SourceHandle {
                         sink.clone(),
                         self.0.refresh_changed.clone(),
                         self.0.initial_reads_changed.clone(),
+                        self.0.configuration_changed.clone(),
                         light_write,
                     ));
                     installed.push(PreparedSource {

@@ -54,6 +54,7 @@ pub enum Capability {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FunctionKind {
     Outlet,
+    Relay,
     Light(LightProfile),
     Curtain,
     Fan {
@@ -75,11 +76,19 @@ pub enum FunctionKind {
     Motion,
     Occupancy,
 }
+
+/// The last confirmed operating mode of a physical load relay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RelayMode {
+    Wired,
+    Wireless,
+}
 impl FunctionKind {
     pub fn is_control(self) -> bool {
         matches!(
             self,
             Self::Outlet
+                | Self::Relay
                 | Self::Light(_)
                 | Self::Curtain
                 | Self::Fan { .. }
@@ -100,6 +109,7 @@ impl FunctionKind {
         match self {
             Self::Light(profile) => Some(profile),
             Self::Outlet
+            | Self::Relay
             | Self::Curtain
             | Self::Fan { .. }
             | Self::AirConditioner { .. }
@@ -132,7 +142,7 @@ impl FunctionKind {
             Self::Contact => vec![Capability::Contact],
             Self::Motion => vec![Capability::Motion],
             Self::Occupancy => vec![Capability::Occupancy],
-            Self::Outlet => vec![Capability::OnOff],
+            Self::Outlet | Self::Relay => vec![Capability::OnOff],
             Self::Curtain => vec![Capability::Curtain],
             Self::Fan { .. } => vec![Capability::OnOff, Capability::Fan],
             Self::AirConditioner { .. } => vec![Capability::OnOff, Capability::AirConditioner],
@@ -476,6 +486,10 @@ pub enum FunctionState {
     Outlet {
         power: Power,
     },
+    Relay {
+        power: Power,
+        mode: Option<RelayMode>,
+    },
     Light {
         power: Power,
         lighting: LightSnapshot,
@@ -515,6 +529,12 @@ pub enum FunctionState {
     },
 }
 impl FunctionSnapshot {
+    pub fn relay_mode(&self) -> Option<RelayMode> {
+        match self.state {
+            FunctionState::Relay { mode, .. } => mode,
+            _ => None,
+        }
+    }
     /// Return the measurement or built-in thermostat temperature source state.
     pub fn temperature_source(&self) -> Option<TemperatureSourceState> {
         self.temperature_source
@@ -552,7 +572,9 @@ impl FunctionSnapshot {
     }
     pub fn power(&self) -> Option<Power> {
         match &self.state {
-            FunctionState::Outlet { power } | FunctionState::Light { power, .. } => Some(*power),
+            FunctionState::Outlet { power }
+            | FunctionState::Relay { power, .. }
+            | FunctionState::Light { power, .. } => Some(*power),
             FunctionState::Fan { fan } => {
                 Some(fan.power.value.map(Power::from).unwrap_or(Power::Unknown))
             }
@@ -584,6 +606,7 @@ impl FunctionSnapshot {
         match &self.state {
             FunctionState::Light { lighting, .. } => Some(*lighting),
             FunctionState::Outlet { .. }
+            | FunctionState::Relay { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Fan { .. }
             | FunctionState::AirConditioner { .. }
@@ -604,6 +627,7 @@ impl FunctionSnapshot {
             | FunctionState::CarbonDioxide { measurement }
             | FunctionState::Illuminance { measurement } => Some(*measurement),
             FunctionState::Outlet { .. }
+            | FunctionState::Relay { .. }
             | FunctionState::Light { .. }
             | FunctionState::Curtain { .. }
             | FunctionState::Fan { .. }

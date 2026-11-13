@@ -13,6 +13,9 @@ impl DeviceWork {
             .iter()
             .find(|function| function.id() == id)
             .unwrap();
+        if function.relay_mode().is_some() {
+            return function.notification_bindings();
+        }
         if function.lighting().is_some() {
             let mut bindings = function.observation_bindings();
             bindings.extend(self.native.device().refresh_trigger());
@@ -365,7 +368,33 @@ impl DeviceWork {
         id: &str,
         source: &NotificationSource,
     ) -> bool {
-        let bindings = self.channel_subscriptions(id);
+        let mut bindings = self.channel_subscriptions(id);
+        if let Some((mode, _)) = self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == id)
+            .and_then(ParsedFunction::relay_mode)
+        {
+            bindings.retain(|binding| *binding != SubscriptionBinding::Property(mode));
+        }
+        self.bindings_ready(source, &bindings)
+    }
+
+    pub(in crate::xiaomi::adapter) fn source_binding_ready(
+        &self,
+        source: &NotificationSource,
+        binding: PropertyBinding,
+    ) -> bool {
+        self.bindings_ready(source, &[SubscriptionBinding::Property(binding)])
+    }
+
+    fn bindings_ready(
+        &self,
+        source: &NotificationSource,
+        bindings: &[SubscriptionBinding],
+    ) -> bool {
         match source {
             NotificationSource::Local(handle) => {
                 let local = self.local.borrow();
@@ -374,7 +403,7 @@ impl DeviceWork {
                         .connection
                         .as_ref()
                         .is_some_and(|current| current.same_connection(handle))
-                    && local.prepare.ready(&bindings)
+                    && local.prepare.ready(bindings)
             }
             NotificationSource::Cloud(handle) => {
                 let cloud = self.cloud.borrow();
@@ -383,7 +412,7 @@ impl DeviceWork {
                         .connection
                         .as_ref()
                         .is_some_and(|current| current.same_connection(handle))
-                    && cloud.prepare.ready(&bindings)
+                    && cloud.prepare.ready(bindings)
             }
         }
     }

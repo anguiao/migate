@@ -24,6 +24,7 @@ pub(super) enum FunctionHandlerKind {
 impl FunctionHandler {
     pub(super) fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
         let kind = match function.description().kind {
+            FunctionKind::Relay => unreachable!("physical relays are not yet published"),
             FunctionKind::Contact => FunctionHandlerKind::Contact(states::ContactHandler::new(
                 function,
                 endpoint,

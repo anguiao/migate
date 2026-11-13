@@ -271,7 +271,7 @@ pub(super) struct Context {
     pub(super) registry: DeviceRegistry,
     pub(super) store: Store,
     pub(super) tasks: TaskSet,
-    pub(super) configuration_changed: Event,
+    pub(super) configuration_changed: Rc<Event>,
     #[cfg(test)]
     pub(super) snapshot_observer: RefCell<Option<Box<dyn FnMut()>>>,
     pub(super) changed: Event,

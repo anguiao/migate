@@ -39,6 +39,14 @@ pub(super) fn validate_native(
     model: &str,
     urn: &Urn<'_>,
 ) -> Result<(), &'static str> {
+    if device
+        .functions()
+        .iter()
+        .any(|function| function.relay_mode().is_some())
+        && !super::is_load_panel_urn(urn)
+    {
+        return Err("relay device type is invalid");
+    }
     bhf::validate_bindings(device, model, urn)?;
     cp7pd::validate_trigger(device, model, urn)?;
     if let Some(metadata) = device.recognition() {

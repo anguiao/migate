@@ -2,6 +2,15 @@ use super::*;
 
 impl WireFunction {
     pub(super) fn from_parsed(function: &ParsedFunction) -> Self {
+        if let Some((mode, notify)) = function.relay_mode() {
+            return Self::Relay {
+                id: function.id().into(),
+                label: function.label().into(),
+                power: function.power().unwrap().into(),
+                mode: mode.into(),
+                notify,
+            };
+        }
         if let Some(ac) = function.air_conditioner() {
             let grid = ac.temperature().grid();
             return Self::AirConditioner {
@@ -216,6 +225,29 @@ impl WireFunction {
         source: &RawDescription,
     ) -> Result<ParsedFunction, &'static str> {
         match self {
+            Self::Relay {
+                id,
+                label,
+                power,
+                mode,
+                notify,
+            } => {
+                let power = power.into();
+                let mode = mode.into();
+                let recognized = source
+                    .recognize(false)
+                    .map_err(|_| "Stored relay source is invalid")?
+                    .native
+                    .ok_or("Stored relay source is invalid")?;
+                if !recognized.device().functions().iter().any(|function| {
+                    function.id() == id
+                        && function.power() == Some(power)
+                        && function.relay_mode() == Some((mode, notify))
+                }) {
+                    return Err("Stored relay binding is invalid");
+                }
+                Ok(ParsedFunction::relay(id, label, power, mode, notify))
+            }
             Self::AirConditioner {
                 id,
                 label,

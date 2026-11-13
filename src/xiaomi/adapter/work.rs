@@ -100,6 +100,7 @@ pub(super) struct DeviceWork {
     battery_read_problem: RefCell<Option<String>>,
     retry_requested: Cell<bool>,
     changed: Event,
+    configuration_changed: Rc<Event>,
 }
 impl DeviceWork {
     pub(super) fn new(
@@ -107,6 +108,7 @@ impl DeviceWork {
         sink: Rc<LogicalSink>,
         refresh_changed: Rc<Event>,
         initial_reads_changed: Rc<Event>,
+        configuration_changed: Rc<Event>,
         light_write: Option<Rc<DeviceWriteGate>>,
     ) -> Self {
         for function in native.device().functions() {
@@ -151,6 +153,7 @@ impl DeviceWork {
             battery_read_problem: RefCell::new(None),
             retry_requested: Cell::new(false),
             changed: Event::new(),
+            configuration_changed,
         }
     }
     pub(super) fn fan_mode_observation(&self, id: &str) -> NativeModeObservation {
@@ -230,6 +233,23 @@ impl DeviceWork {
     /// Swap the logical delivery target and return the retired one.
     pub(super) fn replace_sink(&self, sink: Rc<LogicalSink>) -> Rc<LogicalSink> {
         self.shared_fan_power.borrow_mut().clear();
+        let previous = self.physical();
+        for native in self
+            .native
+            .device()
+            .functions()
+            .iter()
+            .filter(|function| function.relay_mode().is_some())
+        {
+            let previous = previous.function(native.id()).unwrap().snapshot();
+            let next = sink.physical.function(native.id()).unwrap();
+            if let Some(power) = previous.power().and_then(crate::device::Power::value) {
+                next.observe(power);
+            }
+            if let Some(mode) = previous.relay_mode() {
+                next.observe_relay_mode(mode);
+            }
+        }
         for function in self.native.device().functions() {
             if function
                 .air_conditioner()
@@ -288,7 +308,7 @@ impl DeviceWork {
             .device()
             .functions()
             .iter()
-            .flat_map(ParsedFunction::observation_bindings)
+            .flat_map(ParsedFunction::notification_bindings)
             .collect::<Vec<_>>();
         values.extend(
             self.native
