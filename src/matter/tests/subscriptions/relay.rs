@@ -56,6 +56,11 @@ fn relay_subscriptions_report_only_the_changed_physical_channel() {
                     entry.identity.relay = Some(PublishedRelay {
                         scope: scope.clone(),
                         function_id: format!("relay:{siid}"),
+                        device_type: if siid == 4 {
+                            crate::configuration::RelayType::Light
+                        } else {
+                            crate::configuration::RelayType::Switch
+                        },
                     });
                     entry
                 })

@@ -96,6 +96,13 @@ const RELAY_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     binding::CLUSTER,
     OnOffHandler::<false>::CLUSTER
 );
+const RELAY_LIGHT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::DescHandler::CLUSTER,
+    BridgedHandler::CLUSTER,
+    groups::GroupsHandler::CLUSTER,
+    lighting::IDENTIFY,
+    OnOffHandler::<false>::CLUSTER
+);
 const POWER_SOURCE: DeviceType = DeviceType {
     dtype: 0x0011,
     drev: 1,
@@ -177,10 +184,13 @@ pub(super) struct Entry {
 }
 pub(super) enum Role {
     Relay {
+        device_type: crate::configuration::RelayType,
         function: OnOffHandler,
         bridged: BridgedHandler,
         bindings: Rc<BindingRegistry>,
         binding: Dataver,
+        groups: Dataver,
+        identify: identify::IdentifyHandler,
     },
     Parent {
         children: Vec<u16>,
@@ -217,12 +227,24 @@ impl Role {
 macro_rules! dispatch {
     ($entry:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match &$entry.role {
-            Role::Relay { function, bridged, bindings, binding } => AsyncHandler::$method(
-                &EmptyHandler
+            Role::Relay { function, bridged, bindings, binding, groups, identify, device_type } => {
+                let binding_match: fn(u16, u32) -> bool = if *device_type == crate::configuration::RelayType::Switch {
+                    |_, cluster| cluster == 0x1e
+                } else { |_, _| false };
+                let groups_match: fn(u16, u32) -> bool = if *device_type == crate::configuration::RelayType::Light {
+                    |_, cluster| cluster == 4
+                } else { |_, _| false };
+                let identify_match: fn(u16, u32) -> bool = if *device_type == crate::configuration::RelayType::Light {
+                    |_, cluster| cluster == 3
+                } else { |_, _| false };
+                AsyncHandler::$method(&EmptyHandler
                     .chain(|_, cluster| cluster == 0x39, Async(bridged::HandlerAdaptor(bridged)))
-                    .chain(|_, cluster| cluster == 0x1e, Async(BindingHandler::new(Dataver::new(binding.get()), $entry.endpoint, bindings).adapt()))
+                    .chain(binding_match, Async(BindingHandler::new(Dataver::new(binding.get()), $entry.endpoint, bindings).adapt()))
+                    .chain(groups_match, Async(groups::GroupsHandler::new_with_identify(Dataver::new(groups.get()), identify).adapt()))
+                    .chain(identify_match, Async(identify::HandlerAdaptor(identify)))
                     .chain(|_, cluster| cluster == 6, on_off::HandlerAsyncAdaptor(function)), $($arg),*
-            ).await,
+                ).await
+            },
             Role::Parent { bridged, battery, .. } => match battery {
                 Some(battery) => AsyncHandler::$method(
                     &EmptyHandler
@@ -254,11 +276,22 @@ impl Entry {
     }
     pub(super) fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
         match &self.role {
-            Role::Relay { .. } => Endpoint::new_with_clients(
+            Role::Relay {
+                device_type: crate::configuration::RelayType::Switch,
+                ..
+            } => Endpoint::new_with_clients(
                 self.endpoint,
                 devices!(DEV_TYPE_BRIDGED_NODE, DEV_TYPE_ON_OFF_LIGHT_SWITCH),
                 RELAY_CLUSTERS,
                 &[on_off::FULL_CLUSTER.id],
+            ),
+            Role::Relay {
+                device_type: crate::configuration::RelayType::Light,
+                ..
+            } => Endpoint::new(
+                self.endpoint,
+                devices!(DEV_TYPE_BRIDGED_NODE, DEV_TYPE_ON_OFF_LIGHT),
+                RELAY_LIGHT_CLUSTERS,
             ),
             Role::Parent { battery, .. } => {
                 if battery.is_some() {
@@ -391,7 +424,11 @@ impl Entry {
             function.bump(cluster);
         }
         if let Role::Relay {
-            function, binding, ..
+            function,
+            binding,
+            groups,
+            identify,
+            ..
         } = &self.role
         {
             if cluster.is_none_or(|id| id == 6) {
@@ -399,6 +436,12 @@ impl Entry {
             }
             if cluster.is_none_or(|id| id == 0x1e) {
                 binding.changed();
+            }
+            if cluster.is_none_or(|id| id == 4) {
+                groups.changed();
+            }
+            if cluster.is_none_or(|id| id == 3) {
+                identify.dataver_changed();
             }
         }
         if let Some(handler) = self.role.bridged()

@@ -149,6 +149,7 @@ pub(crate) struct PublishedIdentity {
 pub(crate) struct PublishedRelay {
     pub(crate) scope: crate::configuration::Scope,
     pub(crate) function_id: String,
+    pub(crate) device_type: crate::configuration::RelayType,
 }
 
 /// One published physical device frozen with its current publication identity.
@@ -189,6 +190,7 @@ pub(super) fn handler_from(
                 endpoint,
                 descriptor: Dataver::new(versions.descriptor),
                 role: Role::Relay {
+                    device_type: relay.device_type,
                     function: OnOffHandler::relay(
                         function,
                         endpoint,
@@ -204,6 +206,8 @@ pub(super) fn handler_from(
                     ),
                     bindings: bindings.clone(),
                     binding: Dataver::new(versions.binding),
+                    groups: Dataver::new(versions.groups),
+                    identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
                 },
             }));
             continue;

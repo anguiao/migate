@@ -607,3 +607,77 @@ fn outlet_read_started_before_the_write_does_not_satisfy_feedback() {
         .await;
     }));
 }
+
+#[test]
+fn cp7pd_matter_channels_and_master_trigger_preserve_the_outlet_layout() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            block_on(Rig::new(true, &["multi"]).run(|c| async move {
+                c.announce();
+                let peer = Rc::new(Peer::default());
+                let control = &c;
+                c.peer(peer, |peer| async move {
+                    initialized(control, &peer, &["multi"]).await;
+                    let entries = control.publication.frozen();
+                    assert_eq!(entries.len(), 1);
+                    let entry = &entries[0];
+                    assert!(entry.identity.relay.is_none());
+                    let ids = ["outlet:3", "outlet:4", "outlet:9"];
+                    let endpoints = ids.map(|id| {
+                        entry
+                            .identity
+                            .functions
+                            .iter()
+                            .find(|item| item.id == id)
+                            .unwrap()
+                            .endpoint
+                    });
+                    let model = crate::matter::tests::support::PublishedRelayModel::new(
+                        &control.publication,
+                        &control.store,
+                    );
+                    model.check_outlet_topology(entry.identity.endpoint, &endpoints);
+                    assert_eq!(model.parts(entry.identity.endpoint).await, endpoints);
+                    for (index, endpoint) in endpoints.iter().enumerate() {
+                        model.invoke(*endpoint, 1).await.unwrap();
+                        assert_eq!(peer.count("rpcReq", "multi", [3, 4, 9][index]), 1);
+                        assert!(model.power(*endpoint).await.unwrap());
+                    }
+                    let before = [3, 4, 9].map(|siid| peer.count("get", "multi", siid));
+                    for (siid, value) in [(3, false), (4, true), (9, false)] {
+                        peer.value(
+                            "multi",
+                            crate::xiaomi::capability::PropertyBinding { siid, piid: 1 },
+                            json!(value),
+                        );
+                    }
+                    peer.notify("multi", 2, true);
+                    until(|| {
+                        [3, 4, 9]
+                            .iter()
+                            .enumerate()
+                            .all(|(index, siid)| peer.count("get", "multi", *siid) > before[index])
+                    })
+                    .await;
+                    until(|| {
+                        ids.iter().zip([false, true, false]).all(|(id, value)| {
+                            function(&control.context.registry, "multi", id)
+                                .snapshot()
+                                .power()
+                                == Some(if value { Power::On } else { Power::Off })
+                        })
+                    })
+                    .await;
+                    for (endpoint, expected) in endpoints.into_iter().zip([false, true, false]) {
+                        assert_eq!(model.power(endpoint).await.unwrap(), expected);
+                    }
+                    assert_eq!(peer.count("rpcReq", "multi", 2), 0);
+                })
+                .await;
+            }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

@@ -90,3 +90,123 @@ fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads()
         .join()
         .unwrap();
 }
+
+#[test]
+fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_retry() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let fixture = SourceFixture::new(
+            "panel",
+            "zimi.switch.dhkg01",
+            serde_json::from_str(include_str!(
+                "../../../tests/fixtures/miot/zimi-dhkg01.json"
+            ))
+            .unwrap(),
+        );
+        let mut configuration = fixtures::planned(&store, vec![fixture]);
+        configuration.relay_channels[0].mode = Some(RelayMode::Wireless);
+        fixtures::save(&store, &configuration);
+        let source = AppSource::new(&store, None);
+        source.confirm_all();
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let status = super::status(&store);
+        let terminal = crate::terminal::bridge::Context::committed(app.clone(), &status);
+        let query = |command: &'static str| async {
+            terminal.handle_line(command, 0).await.unwrap().unwrap()
+        };
+        let database = rusqlite::Connection::open(store.path()).unwrap();
+        database.execute_batch("CREATE TRIGGER fail_mapping BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        assert!(
+            query("map-type panel relay:2 switch")
+                .await
+                .contains("already mapped")
+        );
+        assert!(
+            query("map-type panel relay:2 light")
+                .await
+                .contains("Mapping failed")
+        );
+        assert_eq!(app.current().configuration, configuration);
+        assert_eq!(store.devices().load_configuration().unwrap(), configuration);
+        assert!(!app.pending());
+        assert!(app.plan().unwrap().is_none());
+        source.forbid("panel");
+        assert!(
+            query("map-type panel relay:2 switch")
+                .await
+                .contains("no current access")
+        );
+        assert!(
+            query("status panel")
+                .await
+                .contains("hidden (current access unavailable)")
+        );
+        source.allow("panel");
+        assert!(
+            query("map-type missing relay:2 switch")
+                .await
+                .contains("current home")
+        );
+        assert!(
+            query("map-type panel relay:99 switch")
+                .await
+                .contains("Function does not exist")
+        );
+        assert!(
+            query("map-type panel relay:2 dimmer")
+                .await
+                .contains("Unknown mapping type")
+        );
+        database.execute_batch("DROP TRIGGER fail_mapping").unwrap();
+        assert!(
+            query("map-type panel relay:2 light")
+                .await
+                .contains("mapped to light")
+        );
+        let after = app.current().configuration.clone();
+        assert_eq!(
+            after.relay_channels[0].device_type,
+            crate::configuration::RelayType::Light
+        );
+        assert_eq!(
+            after.relay_channels[0].configuration_version,
+            configuration.relay_channels[0].configuration_version
+        );
+        assert_eq!(after.root_version, configuration.root_version);
+        assert!(!app.pending());
+        assert!(app.plan().unwrap().is_none());
+        let list = query("list").await;
+        assert!(
+            list.contains("mode unknown (saved wireless); mapping light"),
+            "{list}"
+        );
+        assert!(
+            list.contains("hidden (saved wireless mode; awaiting current reading)"),
+            "{list}"
+        );
+        let reopened = Store::open(directory.path()).unwrap();
+        assert_eq!(reopened.devices().load_configuration().unwrap(), after);
+        assert!(
+            query("map-type panel relay:2 light")
+                .await
+                .contains("already mapped")
+        );
+        source
+            .physical
+            .as_ref()
+            .unwrap()
+            .function("relay:2")
+            .unwrap()
+            .observe_relay_mode(RelayMode::Wired);
+        let plan = app.plan().unwrap().unwrap();
+        assert!(plan.rebuild);
+        app.apply(app.prepare(plan)).unwrap();
+        let model = PublishedRelayModel::new(&app, &store);
+        model.check_relay_type(after.relay_channels[0].endpoint, true);
+        assert_eq!(
+            model.unique_id(after.relay_channels[0].endpoint).await,
+            after.relay_channels[0].unique_id
+        );
+    });
+}

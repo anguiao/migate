@@ -2,7 +2,7 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，Linux 部署暂缓。首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持的插座、灯光、米家原生灯组、窗帘、风扇、空调、浴霸、环境测量与状态功能。通用能力按实际服务和属性分别识别，不需要型号白名单；同一设备可有多个控制功能、多个同类功能实例，以及测量、门窗或运动等组合。人体存在只接入整机状态，`xiaomi.sensor_occupy.p1` 不展开分区。功能组合使用合成描述验证，实际型号的功能仍按设备描述判定。
+当前在 macOS / Apple Silicon 本机前台运行，Linux 部署暂缓。首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持的插座、墙壁开关负载回路、灯光、米家原生灯组、窗帘、风扇、空调、浴霸、环境测量与状态功能。通用能力按实际服务和属性分别识别，不需要型号白名单；同一设备可有多个控制功能、多个同类功能实例，以及测量、门窗或运动等组合。人体存在只接入整机状态，`xiaomi.sensor_occupy.p1` 不展开分区。功能组合使用合成描述验证，实际型号的功能仍按设备描述判定。
 
 功能识别与通信接口分层：初始 IP 局域网直连支持 `dmaker.fan.p5c` 的标准 MIoT 属性、`lumi.acpartner.mcn02` 通过共用旧 miIO 转换器和内置映射进行的读写，以及 `yeelink.bhf_light.v13` 在同一连接上的标准 MIoT 属性、`set_bh_mode` 低挡命令和 `get_prop` 共享反馈读组。其他型号能否识别为某种功能，不代表已支持该型号的直连协议；BLE 和代理子设备沿用既有中枢或云端路径，不通过 IP 直连。直连沿用同一设备及既有功能、身份、名称、端点和配对，不增加电功率功能。
 
@@ -24,7 +24,7 @@ MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，�
 
 运行时米家目录中的型号或实例 URN 变化后，MiGate 获取匹配的完整描述并重新识别；新版描述按兼容扩展处理，假设已有功能、属性及其标识保持稳定。描述获取失败或无效、配置保存失败时保留上次完整的配置、绑定、策略、组关系和订阅，显示原因并继续重试。已确认的设备移除与访问撤销仍生效，不会因缓存恢复；同一型号与 URN 下的静默修改不会主动检查，固件号变化本身也不触发获取。
 
-每个可发布物理设备使用一个父端点和各可见功能的独立子端点，单功能设备也采用相同布局；有效电量由父端点共享。新增功能只分配新端点，已有功能的身份和端点保持不变。插座映射为 On/Off Plug-in Unit（`0x010A`，revision 3），窗帘映射为 Window Covering（`0x0202`，revision 6），风扇映射为 Fan（`0x002B`，revision 4），空调在同一子端点依次声明 Thermostat（`0x0301`，revision 6）和 Fan（`0x002B`，revision 4），提供温控和风速控制，自动风的当前风速数字采用显示占位（详见已知限制）；灯光按能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），彩灯提供 CT + XY + HS（色相／饱和度）。仅制热暖风映射为 Thermostat（`0x0301`，revision 6，仅 Off/Heat）；两路浴霸风扇分别为 Fan（`0x002B`，revision 4，SpeedMax 2）。测量和状态分别映射为 Temperature Sensor（`0x0302`）、Humidity Sensor（`0x0307`）、Air Quality Sensor（`0x002C`，提供 ppm 浓度，空气质量等级保持 Unknown）、Light Sensor（`0x0106`）、Contact Sensor（`0x0015`）或 Occupancy Sensor（`0x0107`）；共享电量使用 Power Source（`0x0011`）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的具体入口与显示受客户端限制，不声称已通过 Matter 认证。
+墙壁开关的每条直控回路独立发布，可映射为普通开关或仅通断的灯；其他可发布物理设备使用一个父端点和各可见功能的独立子端点，单功能设备也采用相同布局；有效电量由父端点共享。新增功能只分配新端点，已有功能的身份和端点保持不变。插座映射为 On/Off Plug-in Unit（`0x010A`，revision 3），窗帘映射为 Window Covering（`0x0202`，revision 6），风扇映射为 Fan（`0x002B`，revision 4），空调在同一子端点依次声明 Thermostat（`0x0301`，revision 6）和 Fan（`0x002B`，revision 4），提供温控和风速控制，自动风的当前风速数字采用显示占位（详见已知限制）；灯光按能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），彩灯提供 CT + XY + HS（色相／饱和度）。仅制热暖风映射为 Thermostat（`0x0301`，revision 6，仅 Off/Heat）；两路浴霸风扇分别为 Fan（`0x002B`，revision 4，SpeedMax 2）。测量和状态分别映射为 Temperature Sensor（`0x0302`）、Humidity Sensor（`0x0307`）、Air Quality Sensor（`0x002C`，提供 ppm 浓度，空气质量等级保持 Unknown）、Light Sensor（`0x0106`）、Contact Sensor（`0x0015`）或 Occupancy Sensor（`0x0107`）；共享电量使用 Power Source（`0x0011`）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的具体入口与显示受客户端限制，不声称已通过 Matter 认证。
 
 ```sh
 cargo run --locked -- auth login

@@ -509,9 +509,114 @@ pub(super) fn render(
                         lines.push(format!("    queued curtain commands: {pending}."));
                     }
                 }
-                crate::device::FunctionState::Outlet { power }
-                | crate::device::FunctionState::Relay { power, .. } => {
+                crate::device::FunctionState::Outlet { power } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));
+                }
+                crate::device::FunctionState::Relay { power, mode } => {
+                    let channel =
+                        view.current
+                            .configuration
+                            .relay_channels
+                            .iter()
+                            .find(|channel| {
+                                view.current.configuration.scope.as_ref() == Some(&channel.scope)
+                                    && channel.key == *function.function_key()
+                            });
+                    if let Some(channel) = channel {
+                        let mode_text = match mode {
+                            Some(crate::device::RelayMode::Wired) => "wired".to_owned(),
+                            Some(crate::device::RelayMode::Wireless) => "wireless".to_owned(),
+                            None => match channel.mode {
+                                Some(crate::device::RelayMode::Wired) => {
+                                    "unknown (saved wired)".to_owned()
+                                }
+                                Some(crate::device::RelayMode::Wireless) => {
+                                    "unknown (saved wireless)".to_owned()
+                                }
+                                None => "unknown".to_owned(),
+                            },
+                        };
+                        let published = view
+                            .current
+                            .derived
+                            .published_relays
+                            .contains(function.function_key());
+                        let visibility = if !view.configurable_devices.contains(key) {
+                            if published {
+                                "published (current access unavailable; update pending)"
+                            } else {
+                                "hidden (current access unavailable)"
+                            }
+                        } else {
+                            match (published, mode, channel.mode) {
+                                (true, Some(crate::device::RelayMode::Wireless), _) => {
+                                    "published (wireless observed; update pending)"
+                                }
+                                (true, None, _) => {
+                                    "published (saved mode; awaiting current reading)"
+                                }
+                                (true, _, _) => "published",
+                                (false, Some(crate::device::RelayMode::Wireless), _) => {
+                                    "hidden (wireless mode)"
+                                }
+                                (false, Some(crate::device::RelayMode::Wired), _) => {
+                                    "hidden (publication pending)"
+                                }
+                                (false, None, Some(crate::device::RelayMode::Wireless)) => {
+                                    "hidden (saved wireless mode; awaiting current reading)"
+                                }
+                                (false, None, _) => "hidden (awaiting mode reading)",
+                            }
+                        };
+                        lines.push(format!("  {id} ({}): {}; mode {mode_text}; mapping {}; Matter {visibility}; endpoint {}.",
+                            channel.label, power_text(power), channel.device_type.as_str(), channel.endpoint));
+                        if !show_commands {
+                            lines.push(format!(
+                                "    Matter identity: unique ID {}; configuration version {}.",
+                                channel.unique_id, channel.configuration_version
+                            ));
+                            let native = view
+                                .current
+                                .entries
+                                .iter()
+                                .find(|entry| entry.physical.key() == key)
+                                .and_then(|entry| {
+                                    entry
+                                        .native
+                                        .device()
+                                        .functions()
+                                        .iter()
+                                        .find(|native| native.id() == id)
+                                })
+                                .expect("a serving relay has native bindings");
+                            let on = native.power().unwrap();
+                            let (mode_binding, notify) = native.relay_mode().unwrap();
+                            lines.push(format!(
+                                "    Bindings: on {}.{} (read/write/notify); mode {}.{} (read{}).",
+                                on.siid,
+                                on.piid,
+                                mode_binding.siid,
+                                mode_binding.piid,
+                                if notify { "/notify" } else { "" }
+                            ));
+                            lines.push(format!(
+                                "    Synchronization: {}.",
+                                status.function_sync(&key.id, id)
+                            ));
+                            let properties = status.function_properties(&key.id, id);
+                            for name in ["Power", "Mode"] {
+                                let diagnostic = crate::terminal::status::property_diagnostics(
+                                    properties.iter().find(|property| property.name == name),
+                                );
+                                lines.push(format!("    {name}: {diagnostic}."));
+                            }
+                        }
+                    } else {
+                        lines.push(format!(
+                            "  {id} ({label}): {}; awaiting relay configuration.",
+                            power_text(power)
+                        ));
+                    }
                 }
                 crate::device::FunctionState::Light { power, lighting } => {
                     lines.push(format!("  {id} ({label}): {}", power_text(power)));

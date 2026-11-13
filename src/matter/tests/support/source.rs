@@ -142,6 +142,10 @@ pub(crate) struct PublishedRelayModel {
     store: Store,
 }
 
+pub(crate) fn persisted_root_version(store: &Store) -> u32 {
+    super::super::load_basic_info(&mut StoreAdapter::new(store.matter())).configuration_version
+}
+
 impl PublishedRelayModel {
     pub(crate) fn new(app: &Rc<App>, store: &Store) -> Self {
         Self {
@@ -182,6 +186,51 @@ impl PublishedRelayModel {
         });
     }
 
+    pub(crate) fn check_relay_type(&self, id: u16, light: bool) {
+        self.handler.access(|node| {
+            let endpoint = node.endpoint(id).unwrap();
+            let types = endpoint
+                .device_types
+                .iter()
+                .map(|kind| kind.dtype)
+                .collect::<Vec<_>>();
+            assert!(types.contains(&0x0013));
+            assert_eq!(types.contains(&0x0100), light);
+            assert_eq!(types.contains(&0x0103), !light);
+            assert!(endpoint.cluster(6).is_some());
+            assert_eq!(endpoint.cluster(0x1e).is_some(), !light);
+            assert_eq!(endpoint.client_clusters.contains(&6), !light);
+            assert!(endpoint.cluster(8).is_none());
+            assert!(endpoint.cluster(0x300).is_none());
+        });
+    }
+
+    pub(crate) fn check_outlet_topology(&self, parent: u16, children: &[u16]) {
+        self.handler.access(|node| {
+            assert_eq!(
+                node.endpoints.iter().filter(|entry| entry.id > 1).count(),
+                children.len() + 1
+            );
+            assert!(
+                node.endpoint(parent)
+                    .unwrap()
+                    .device_types
+                    .iter()
+                    .any(|kind| kind.dtype == 0x0013)
+            );
+            for id in children {
+                let endpoint = node.endpoint(*id).unwrap();
+                assert!(
+                    endpoint
+                        .device_types
+                        .iter()
+                        .any(|kind| kind.dtype == 0x010a)
+                );
+                assert!(endpoint.cluster(6).is_some());
+            }
+        });
+    }
+
     async fn read(
         &self,
         endpoint: u16,
@@ -206,6 +255,28 @@ impl PublishedRelayModel {
     pub(crate) async fn power(&self, endpoint: u16) -> Result<bool, rs_matter::error::Error> {
         let bytes = self.read(endpoint, 6, 0).await?;
         report_value(&bytes).bool()
+    }
+
+    pub(crate) async fn parts(&self, endpoint: u16) -> Vec<u16> {
+        let bytes = self.read(endpoint, 0x1d, 3).await.unwrap();
+        report_value(&bytes)
+            .array()
+            .unwrap()
+            .iter()
+            .map(|value| value.unwrap().u16().unwrap())
+            .collect()
+    }
+
+    pub(crate) async fn configuration_version(&self, endpoint: u16) -> u32 {
+        let bytes = self
+            .read(
+                endpoint,
+                0x39,
+                BridgedAttribute::ConfigurationVersion as u32,
+            )
+            .await
+            .unwrap();
+        report_value(&bytes).u32().unwrap()
     }
 
     pub(crate) async fn label(&self, endpoint: u16) -> String {

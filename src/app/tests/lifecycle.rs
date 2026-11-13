@@ -460,3 +460,82 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn terminal_mapping_restarts_the_running_matter_instance_once() {
+    std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        block_on(async {
+            use crate::{device::RelayMode, matter::tests::support::PublishedRelayModel, storage::tests::fixtures, xiaomi::capability::tests::source::SourceFixture};
+            use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            use std::os::unix::net::UnixStream;
+            let directory = tempfile::tempdir().unwrap();
+            let store = Store::open(directory.path()).unwrap();
+            let fixture = SourceFixture::new("panel", "zimi.switch.dhkg01", serde_json::from_str(include_str!("../../../tests/fixtures/miot/zimi-dhkg01.json")).unwrap());
+            let mut configuration = fixtures::planned(&store, vec![fixture]);
+            configuration.relay_channels[0].mode = Some(RelayMode::Wired);
+            fixtures::save(&store, &configuration);
+            let identity = store.load_identity().unwrap();
+            let status = status(&store);
+            let source = AppSource::new(&store, None);
+            source.confirm_all();
+            source.read_power(false);
+            let app = Rc::new(crate::app::App::open(source.handle.clone(), store.clone()).unwrap());
+            let endpoint = configuration.relay_channels[0].endpoint;
+            let (input, mut sender) = {
+                let (a, b) = UnixStream::pair().unwrap();
+                (BufReader::new(async_io::Async::new(a).unwrap()), async_io::Async::new(b).unwrap())
+            };
+            let (output, mut replies) = {
+                let (a, b) = UnixStream::pair().unwrap();
+                (async_io::Async::new(a).unwrap(), BufReader::new(async_io::Async::new(b).unwrap()))
+            };
+            let starts = Cell::new(0);
+            let started = event_listener::Event::new();
+            let done = event_listener::Event::new();
+            let stopping = done.listen();
+            let bridge = super::super::run_lifecycle(
+                BridgeOptions { store: &store, identity: &identity, status: &status, port: 0 },
+                async { Ok((app.clone(), std::time::Duration::ZERO)) },
+                async move { let _source = source; future::pending().await },
+                input, output,
+                async { stopping.await; Ok(()) },
+                |_| { starts.set(starts.get() + 1); started.notify(usize::MAX); Ok(()) },
+            );
+            let controller = async {
+                loop { let listener = started.listen(); if starts.get() >= 1 { break; } listener.await; }
+                let before = PublishedRelayModel::new(&app, &store);
+                before.check_relay_type(endpoint, false);
+                let original_id = before.unique_id(endpoint).await;
+                let database = rusqlite::Connection::open(store.path()).unwrap();
+                database.execute_batch("CREATE TRIGGER fail_mapping BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+                sender.write_all(b"map-type panel relay:2 light\n").await.unwrap();
+                let mut response = String::new();
+                replies.read_line(&mut response).await.unwrap();
+                assert!(response.contains("Mapping failed"), "{response}");
+                database.execute_batch("DROP TRIGGER fail_mapping").unwrap();
+                async_io::Timer::after(std::time::Duration::from_millis(1100)).await;
+                assert_eq!(starts.get(), 1);
+                PublishedRelayModel::new(&app, &store).check_relay_type(endpoint, false);
+                response.clear();
+                sender.write_all(b"map-type panel relay:2 light\n").await.unwrap();
+                replies.read_line(&mut response).await.unwrap();
+                assert!(response.contains("mapped to light"), "{response}");
+                loop { let listener = started.listen(); if starts.get() >= 2 { break; } listener.await; }
+                let after = PublishedRelayModel::new(&app, &store);
+                after.check_relay_type(endpoint, true);
+                assert_eq!(after.unique_id(endpoint).await, original_id);
+                assert_eq!(crate::matter::tests::support::persisted_root_version(&store), configuration.root_version + 1);
+                assert!(!app.pending());
+                response.clear();
+                sender.write_all(b"map-type panel relay:2 light\n").await.unwrap();
+                replies.read_line(&mut response).await.unwrap();
+                assert!(response.contains("already mapped"), "{response}");
+                async_io::Timer::after(std::time::Duration::from_millis(100)).await;
+                assert_eq!(starts.get(), 2);
+                done.notify(usize::MAX);
+            };
+            let (result, ()) = future::zip(bridge, controller).await;
+            result.unwrap();
+        })
+    }).unwrap().join().unwrap();
+}

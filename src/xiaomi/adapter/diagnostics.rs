@@ -189,7 +189,13 @@ impl Context {
                         } else {
                             Vec::new()
                         },
-                        properties: if let Some(ac) = function.air_conditioner() {
+                        properties: if let Some((mode, _)) = function.relay_mode() {
+                            property_statuses(
+                                &work,
+                                function.id(),
+                                [("Power", function.power().unwrap()), ("Mode", mode)],
+                            )
+                        } else if let Some(ac) = function.air_conditioner() {
                             let state = ac.mcn04().map(|patch| patch.state);
                             let mut bindings = vec![
                                 ("Power", Some(state.unwrap_or(ac.power()))),

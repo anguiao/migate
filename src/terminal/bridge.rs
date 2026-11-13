@@ -12,7 +12,7 @@ use crate::{
     device::{Command, DeviceKey, FunctionKey, FunctionKind, HeaterCommand, HeaterMode},
     storage::StorageError,
 };
-pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
+pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, map-type DID FUNCTION switch|light, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
 fn invalid(view: &View, status: &AuthStatus, now: i64, reason: &str) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
@@ -187,6 +187,19 @@ impl Context<'_> {
     ) -> Result<Option<String>, StorageError> {
         let words = line.split_whitespace().collect::<Vec<_>>();
         match words.as_slice() {
+            ["map-type", did, id, kind] => {
+                let device_type = match *kind {
+                    "switch" => crate::configuration::RelayType::Switch,
+                    "light" => crate::configuration::RelayType::Light,
+                    _ => return Ok(Some("Unknown mapping type; use switch or light.".into())),
+                };
+                let key = FunctionKey::new(DeviceKey::new("xiaomi", *did), *id);
+                Ok(Some(match self.app.map_relay_type(&key, device_type) {
+                    Ok(true) => format!("{did}/{id}: mapped to {kind}."),
+                    Ok(false) => format!("{did}/{id}: already mapped to {kind}."),
+                    Err(error) => format!("Mapping failed: {error}"),
+                }))
+            }
             ["bind-sensor", target_did, target_id, sensor_did, sensor_id] => {
                 let target = FunctionKey::new(DeviceKey::new("xiaomi", *target_did), *target_id);
                 let source = FunctionKey::new(DeviceKey::new("xiaomi", *sensor_did), *sensor_id);

@@ -16,7 +16,8 @@ use sensor_binding::activate_temperature_bindings;
 
 use crate::{
     configuration::{
-        self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, Scope, validate_label,
+        self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, RelayType, Scope,
+        validate_label,
     },
     device::{DeviceKey, DeviceRegistry, FunctionKey, PhysicalDevice, RelayMode},
     matter::{self, LabelWriter},
@@ -68,6 +69,8 @@ pub(crate) struct App {
     store: Store,
     current: RefCell<Rc<EffectiveConfiguration>>,
     committed: event_listener::Event,
+    rebuild_requested: event_listener::Event,
+    rebuild_pending: Cell<bool>,
     failure: RefCell<Option<String>>,
     pending: Cell<bool>,
 }
@@ -92,6 +95,8 @@ impl App {
                 published,
             })),
             committed: event_listener::Event::new(),
+            rebuild_requested: event_listener::Event::new(),
+            rebuild_pending: Cell::new(false),
             failure: RefCell::new(None),
             pending: Cell::new(false),
         })
@@ -113,6 +118,19 @@ impl App {
         self.source.accessible_descriptions()
     }
 
+    pub(crate) fn configurable_devices(&self) -> BTreeSet<DeviceKey> {
+        let current = self.current();
+        current
+            .entries
+            .iter()
+            .filter(|entry| {
+                self.source
+                    .binding_accessible(&current.configuration.scope, entry.physical.key())
+            })
+            .map(|entry| entry.physical.key().clone())
+            .collect()
+    }
+
     /// Record a non-fatal prepare/save failure for the terminal; the committed
     /// configuration and runner stay untouched.
     pub(crate) fn fail(&self, reason: String) {
@@ -120,8 +138,10 @@ impl App {
         self.pending.set(true);
     }
 
-    pub(crate) fn listen(&self) -> event_listener::EventListener {
-        self.source.listen()
+    pub(crate) fn listen(&self) -> impl std::future::Future<Output = ()> {
+        let source = self.source.listen();
+        let requested = self.rebuild_requested.listen();
+        async move { futures_lite::future::or(source, requested).await }
     }
 
     pub(crate) fn stop_actions(&self) {
@@ -197,6 +217,7 @@ impl App {
                         relay: Some(matter::PublishedRelay {
                             scope: channel.scope.clone(),
                             function_id: key.id.clone(),
+                            device_type: channel.device_type,
                         }),
                     },
                 });
@@ -232,7 +253,7 @@ impl App {
                 );
             }
         }
-        let plan = match configuration::plan(
+        let mut plan = match configuration::plan(
             PlanInput {
                 current: &current.configuration,
                 current_derived: &committed_derived,
@@ -258,6 +279,10 @@ impl App {
                 ));
             }
         };
+        if self.rebuild_pending.get() {
+            plan.changed = true;
+            plan.rebuild = true;
+        }
         if !plan.changed {
             self.pending.set(false);
             self.failure.borrow_mut().take();
@@ -300,6 +325,7 @@ impl App {
         self.committed.notify(usize::MAX);
         self.failure.borrow_mut().take();
         self.pending.set(false);
+        self.rebuild_pending.set(false);
         log::info!("Bridge configuration committed at root version {root_version}");
         Ok(())
     }
@@ -340,6 +366,78 @@ impl App {
         });
         self.committed.notify(usize::MAX);
         Ok(())
+    }
+
+    /// Save a mapping only after validating its current source authority.
+    /// A visible change wakes the lifecycle to replace the Matter instance.
+    pub(crate) fn map_relay_type(
+        &self,
+        key: &FunctionKey,
+        device_type: RelayType,
+    ) -> Result<bool, String> {
+        let current = self.current();
+        if !self
+            .source
+            .binding_accessible(&current.configuration.scope, &key.device)
+        {
+            return Err("Device is not in the current home or has no current access.".into());
+        }
+        let function = current
+            .entries
+            .iter()
+            .find(|entry| entry.physical.key() == &key.device)
+            .and_then(|entry| entry.physical.function(&key.id))
+            .ok_or("Function does not exist.")?;
+        if function.description().kind != crate::device::FunctionKind::Relay {
+            return Err("Function is not a relay.".into());
+        }
+        let scope = current
+            .configuration
+            .scope
+            .as_ref()
+            .expect("accessible device has a scope");
+        let mut configuration = current.configuration.clone();
+        let channel = configuration
+            .relay_channels
+            .iter_mut()
+            .find(|channel| &channel.scope == scope && &channel.key == key)
+            .ok_or("Relay is not recognized in the current home.")?;
+        if channel.device_type == device_type {
+            return Ok(false);
+        }
+        let visible = current.derived.published_relays.contains(key);
+        if visible {
+            channel.configuration_version = channel
+                .configuration_version
+                .checked_add(1)
+                .ok_or("Relay configuration version is exhausted.")?;
+            configuration.root_version = configuration
+                .root_version
+                .checked_add(1)
+                .ok_or("Root configuration version is exhausted.")?;
+        }
+        channel.device_type = device_type;
+        self.store
+            .devices()
+            .commit_configuration_with_reset(
+                &configuration,
+                &[],
+                visible.then(matter::subscription_keys),
+            )
+            .map_err(|error| error.to_string())?;
+        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
+            configuration,
+            derived: current.derived.clone(),
+            entries: current.entries.clone(),
+            published: current.published.clone(),
+        });
+        self.committed.notify(usize::MAX);
+        if visible {
+            self.rebuild_pending.set(true);
+            self.pending.set(true);
+            self.rebuild_requested.notify(usize::MAX);
+        }
+        Ok(true)
     }
 }
 

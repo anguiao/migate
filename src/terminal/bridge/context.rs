@@ -24,6 +24,7 @@ impl<'a> Context<'a> {
             pending: self.app.pending(),
             failure: self.app.failure(),
             accessible_descriptions: self.app.accessible_descriptions(),
+            configurable_devices: self.app.configurable_devices(),
         }
     }
 }
@@ -34,6 +35,7 @@ pub(super) struct View {
     pub(super) pending: bool,
     pub(super) failure: Option<String>,
     pub(super) accessible_descriptions: std::collections::BTreeSet<DeviceKey>,
+    pub(super) configurable_devices: std::collections::BTreeSet<DeviceKey>,
 }
 
 impl View {

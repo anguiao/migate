@@ -104,6 +104,15 @@ pub(crate) enum RelayType {
     Light,
 }
 
+impl RelayType {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Switch => "switch",
+            Self::Light => "light",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommittedConfiguration {
     pub scope: Option<Scope>,

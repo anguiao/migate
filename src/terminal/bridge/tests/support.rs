@@ -85,6 +85,11 @@ fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageE
         .map(|source| source.key.clone())
         .collect();
     let derived = configuration.derive();
+    let configurable_devices = registry
+        .list()
+        .iter()
+        .map(|device| device.key().clone())
+        .collect();
     let entries = registry
         .list()
         .into_iter()
@@ -108,6 +113,7 @@ fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageE
         pending: false,
         failure: None,
         accessible_descriptions,
+        configurable_devices,
     })
 }
 
