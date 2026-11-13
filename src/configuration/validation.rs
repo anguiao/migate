@@ -16,6 +16,7 @@ impl CommittedConfiguration {
         } else if self.devices.iter().any(|device| device.native.is_some())
             || !self.descriptions.is_empty()
             || !self.groups.is_empty()
+            || !self.split_devices.is_empty()
             || !self.temperature_bindings.is_empty()
         {
             return Err("Committed configuration has facts without a home scope");
@@ -167,6 +168,25 @@ impl CommittedConfiguration {
                 if !members.insert(member.as_str()) {
                     return Err("Committed group relation member is duplicated");
                 }
+            }
+        }
+        let mut splits = BTreeSet::new();
+        let mut channels = BTreeSet::new();
+        for split in &self.split_devices {
+            validate_text(&split.did)?;
+            validate_text(&split.parent_did)?;
+            if let Some(name) = &split.name {
+                validate_text(name)?;
+                if name.trim().is_empty() {
+                    return Err("Committed split device name is invalid");
+                }
+            }
+            if split.did == split.parent_did
+                || split.siid == 0
+                || !splits.insert(split.did.as_str())
+                || !channels.insert((split.parent_did.as_str(), split.siid))
+            {
+                return Err("Committed split device relation is invalid");
             }
         }
         Ok(())

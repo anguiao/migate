@@ -102,10 +102,20 @@ impl XiaomiAdapter {
             // with persisted revocations already applied.
             let mut recovery = stored.clone();
             recovery.groups = restored_relations.clone();
+            recovery.descriptions.retain(|source| {
+                !stored
+                    .split_devices
+                    .iter()
+                    .any(|split| split.did == source.key.id)
+            });
             for device in &mut recovery.devices {
                 if revocations
                     .iter()
                     .any(|revocation| revocation.key == device.key)
+                    || stored
+                        .split_devices
+                        .iter()
+                        .any(|split| split.did == device.key.id)
                 {
                     device.native = None;
                 }
@@ -158,6 +168,11 @@ impl XiaomiAdapter {
             commands: Rc::new(super::commands::Commands::default()),
             write_gates: super::commands::DeviceWriteGates::default(),
             relations: RefCell::new(relations),
+            split_devices: RefCell::new(if scope.is_some() {
+                stored.split_devices.clone()
+            } else {
+                Vec::new()
+            }),
             notifications: RefCell::new(None),
             #[cfg(test)]
             mqtt_retry_deadline: Cell::new(None),

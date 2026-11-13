@@ -140,6 +140,7 @@ fn facts(scope: Scope, devices: Vec<TestSource>, relations: Vec<GroupRelation>) 
             })
             .collect(),
         relations,
+        split_devices: Vec::new(),
     }
 }
 
@@ -265,6 +266,7 @@ fn group_member_resolution_preserves_other_controls_and_rejects_ambiguity() {
     };
     let configuration = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 1,
         descriptions: vec![composite.raw.clone(), group.raw.clone()],
@@ -319,6 +321,7 @@ fn native_rgb_stays_native_without_member_description() {
     let native = SourceFixture::new("group", "devcea.light.ls2307", instance);
     let configuration = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 1,
         descriptions: vec![native.raw.clone()],
@@ -408,6 +411,7 @@ fn identical_facts_reuse_without_change() {
     let native = outlet_native("outlet", 2);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -434,6 +438,7 @@ fn hidden_member_republishes_with_a_version_bump() {
     let member_native = ct_light_native("member", 2700, 6500);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![group_native.raw.clone(), member_native.raw.clone()],
@@ -477,6 +482,7 @@ fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
     let metadata_only = SourceFixture::new("outlet", "vendor.plug", instance);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![before.raw.clone()],
@@ -513,6 +519,7 @@ fn native_control_change_replaces_and_rebuilds_without_a_version_bump() {
     let after = outlet_native_with_piid("outlet", 2, 7);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![before.raw.clone()],
@@ -544,6 +551,7 @@ fn removed_device_unpublishes_and_bumps_its_version() {
     let native = outlet_native("outlet", 2);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -572,6 +580,7 @@ fn scope_change_alone_does_not_bump_root_or_device_versions() {
     let native = outlet_native("outlet", 2);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -599,6 +608,7 @@ fn scope_change_alone_does_not_bump_root_or_device_versions() {
 fn endpoint_exhaustion_is_explicit() {
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 1,
         descriptions: Vec::new(),
@@ -628,6 +638,7 @@ fn version_overflow_is_explicit() {
     device.configuration_version = u32::MAX;
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: Vec::new(),
@@ -646,6 +657,7 @@ fn empty_saved_label_survives_plan_and_validation() {
     previous.label = String::new();
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -677,6 +689,7 @@ fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
     let native = outlet_native("outlet", 2);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -730,6 +743,7 @@ fn stale_revoked_member_cannot_affect_candidate_group_profile_or_shape() {
     };
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![group_native.raw.clone(), member_native.raw.clone()],
@@ -817,6 +831,7 @@ fn member_reordering_is_canonical_and_does_not_rebuild() {
     };
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![
@@ -857,6 +872,7 @@ fn fresh_revocation_clear_replaces_the_native_instance() {
     let native = outlet_native("outlet", 2);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -898,6 +914,7 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
     let native = outlet_native("outlet", 2);
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![native.raw.clone()],
@@ -945,6 +962,7 @@ fn hidden_member_replacement_rebuilds_without_a_version_bump() {
     };
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![group_native.raw.clone(), before.raw.clone()],
@@ -1002,6 +1020,7 @@ fn group_directory_metadata_change_does_not_rebuild() {
     renamed.error = Some("catalog note".into());
     let current = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 2,
         descriptions: vec![group_native.raw.clone(), member_native.raw.clone()],

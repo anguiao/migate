@@ -72,6 +72,9 @@ pub(in super::super) struct CloudState {
     /// Full unfiltered account-catalog records appended after the ordinary
     /// home members. Tests inject real `extra.member_list` shapes here.
     pub(in super::super) catalog_groups: Vec<Value>,
+    /// Override account-directory records without changing per-device details.
+    pub(in super::super) catalog_overrides: BTreeMap<String, Value>,
+    pub(in super::super) detail_requests: Vec<Vec<String>>,
     pub(in super::super) catalog_status: u16,
     pub(in super::super) catalog_instances: BTreeMap<String, Value>,
     /// Per-DID cloud URN overrides. Unset DIDs keep their fixture value.
@@ -594,7 +597,13 @@ impl Rig {
                     let mut list = records
                         .iter()
                         .filter(|record| state.members.contains(&record.device().key().id))
-                        .map(|record| cloud_record(&state, record))
+                        .map(|record| {
+                            state
+                                .catalog_overrides
+                                .get(&record.device().key().id)
+                                .cloned()
+                                .unwrap_or_else(|| cloud_record(&state, record))
+                        })
                         .collect::<Vec<_>>();
                     list.extend(state.catalog_groups.iter().cloned());
                     let value = json!({"code":0,"result":{"list":list,"has_more":state.catalog_partial,"next_start_did":Value::Null}});
@@ -614,6 +623,13 @@ impl Rig {
                     return response;
                 }
                 state.details += 1;
+                state.detail_requests.push(
+                    requested
+                        .unwrap()
+                        .iter()
+                        .map(|did| did.as_str().unwrap().to_owned())
+                        .collect(),
+                );
                 if state.detail_status != 200 {
                     let mut response = MockResponse::json(state.detail_status, "{}")
                         .delayed(state.detail_delay)

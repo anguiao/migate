@@ -112,7 +112,9 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.context.registry.get(&DeviceKey::new("xiaomi", "group-1")).is_some()).await;
+        until(|| c.context.registry.get(&DeviceKey::new("xiaomi", "group-1")).is_some()
+            && c.context.graph.borrow().rules.get("group-1").is_some_and(|rule|
+                rule.members.iter().any(|member| member.device.id == "one"))).await;
         let key = DeviceKey::new("xiaomi", "group-1");
         let committed = c.store.devices().load_configuration().unwrap().device(&key).cloned()
             .expect("native admission must use the complete configuration commit");
@@ -161,6 +163,51 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         assert_eq!(saved.root_version, old.root_version);
         assert_eq!(saved.groups[0].members, old.groups[0].members);
         assert_eq!(c.store.devices().load_configuration().unwrap().device(&key).cloned().unwrap().unique_id, committed.unique_id);
+    }));
+}
+
+#[test]
+fn new_group_does_not_wait_for_a_held_member_description() {
+    let rig = Rig::new(false, &["one"]);
+    let instance = super::super::support::group_instance();
+    let member_type = rig
+        .data
+        .iter()
+        .find(|record| record.device().key().id == "one")
+        .unwrap()
+        .instance_type()
+        .to_owned();
+    let (release, gate) = flume::bounded::<()>(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_groups = vec![group_record("group-record", "group-1", &["one"], false)];
+        cloud
+            .catalog_instances
+            .insert(instance["type"].as_str().unwrap().into(), instance);
+        cloud.instance_gates.insert(member_type.clone(), gate);
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.cloud
+                .lock()
+                .unwrap()
+                .instance_reads
+                .get(&member_type)
+                .copied()
+                .unwrap_or(0)
+                > 0
+        })
+        .await;
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .is_some()
+        })
+        .await;
+        assert!(c.context.live.borrow().devices["one"].loading.is_some());
+        release.send(()).unwrap();
     }));
 }
 

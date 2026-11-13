@@ -254,6 +254,7 @@ fn missing_required_fields_are_rejected() {
         "/root_version",
         "/devices",
         "/groups",
+        "/split_devices",
         "/devices/0/native",
         "/devices/0/functions",
         "/devices/0/unique_id",
@@ -271,6 +272,26 @@ fn missing_required_fields_are_rejected() {
             store.devices().load_configuration().is_err(),
             "missing {pointer} must fail"
         );
+    }
+}
+
+#[test]
+fn stored_split_records_require_valid_unique_aliases_and_channels() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    outlet_and_light(&store);
+    let valid = stored(&store);
+    for splits in [
+        json!([{"did":"a","parent_did":"panel","siid":0,"name":"Left"}]),
+        json!([{"did":"panel","parent_did":"panel","siid":2,"name":"Left"}]),
+        json!([{"did":"a","parent_did":"panel","siid":2,"name":" "}]),
+        json!([{"did":"a","parent_did":"panel","siid":2,"name":null}, {"did":"a","parent_did":"panel","siid":3,"name":null}]),
+        json!([{"did":"a","parent_did":"panel","siid":2,"name":null}, {"did":"b","parent_did":"panel","siid":2,"name":null}]),
+    ] {
+        let mut changed = valid.clone();
+        changed["split_devices"] = splits;
+        overwrite(&store, &changed);
+        assert!(store.devices().load_configuration().is_err());
     }
 }
 
@@ -441,6 +462,7 @@ fn in_memory_native_key_mismatch_is_rejected() {
     .unwrap();
     let configuration = CommittedConfiguration {
         temperature_bindings: Default::default(),
+        split_devices: Vec::new(),
         scope: Some(scope()),
         root_version: 1,
         descriptions: Vec::new(),

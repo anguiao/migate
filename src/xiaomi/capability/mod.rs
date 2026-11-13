@@ -31,6 +31,13 @@ pub use model::{
 pub(crate) use native::{NativeDescription, ReadInput, RelatedScope, SHARED_FEEDBACK_CHANNEL};
 pub(crate) use repair::{RepairPlan, compose_group_light};
 pub(crate) use source::{RawDescription, SourceDescription};
+
+pub(crate) fn is_load_panel_type(value: &str) -> bool {
+    description::Urn::parse(value).is_ok_and(|urn| {
+        urn.standard("device", "switch", 0x0000a003)
+            || urn.standard("device", "control-panel", 0x0000a099)
+    })
+}
 pub use state_sensor::{
     EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,
 };

@@ -3,6 +3,7 @@
 use crate::{
     configuration::{
         CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, Scope,
+        SplitDevice,
     },
     device::{DeviceKey, FunctionKey},
     xiaomi::capability::RawDescription,
@@ -33,6 +34,7 @@ struct WireConfiguration {
     devices: Vec<WireIdentity>,
     descriptions: Vec<WireDescription>,
     groups: Vec<WireGroup>,
+    split_devices: Vec<WireSplitDevice>,
     temperature_bindings: Vec<WireTemperatureBinding>,
 }
 
@@ -133,6 +135,15 @@ struct WireGroup {
     members: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSplitDevice {
+    did: String,
+    parent_did: String,
+    siid: u32,
+    name: Option<String>,
+}
+
 impl WireConfiguration {
     fn from_configuration(configuration: &CommittedConfiguration) -> Self {
         Self {
@@ -155,6 +166,16 @@ impl WireConfiguration {
                 .groups
                 .iter()
                 .map(WireGroup::from_relation)
+                .collect(),
+            split_devices: configuration
+                .split_devices
+                .iter()
+                .map(|split| WireSplitDevice {
+                    did: split.did.clone(),
+                    parent_did: split.parent_did.clone(),
+                    siid: split.siid,
+                    name: split.name.clone(),
+                })
                 .collect(),
             temperature_bindings: configuration
                 .temperature_bindings
@@ -206,6 +227,16 @@ impl WireConfiguration {
                 .groups
                 .into_iter()
                 .map(WireGroup::into_relation)
+                .collect(),
+            split_devices: self
+                .split_devices
+                .into_iter()
+                .map(|split| SplitDevice {
+                    did: split.did,
+                    parent_did: split.parent_did,
+                    siid: split.siid,
+                    name: split.name,
+                })
                 .collect(),
             temperature_bindings,
         };

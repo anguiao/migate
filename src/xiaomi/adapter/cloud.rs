@@ -149,12 +149,92 @@ pub(super) async fn run(
                 continue;
             }
         };
+        let scope = Scope {
+            uid: home.uid.clone(),
+            home_id: home.home_id.clone(),
+        };
+        let home_members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
+        // Classify split aliases before creating slots or requesting any
+        // device description. A failed catalog retains the last known split
+        // relations and only previously discovered physical candidates.
+        let Some(result) = future::or(
+            async {
+                context.mijia_retired(token).await;
+                None
+            },
+            async { Some(context.mijia.get_device_catalog(&token.session).await) },
+        )
+        .await
+        else {
+            context.reload_credentials();
+            context.request_sync();
+            continue;
+        };
+        if !context.current_mijia(token) || context.live.borrow().scope != expected_scope {
+            continue;
+        }
+        let mut catalog_problem = None;
+        let catalog = match result {
+            Ok(catalog) => match super::splits::selected(&catalog, &home_members) {
+                Ok(splits) => Some((catalog, splits)),
+                Err(reason) => {
+                    log::warn!(
+                        "Panel split catalog read failed; keeping confirmed relations: {reason}"
+                    );
+                    catalog_problem = Some(reason.to_owned());
+                    None
+                }
+            },
+            Err(error) => {
+                log::warn!("Device catalog read failed; keeping confirmed relations: {error}");
+                catalog_problem = Some(error.to_string());
+                if error.is_unauthorized() {
+                    context.cloud_error(token, None, &error);
+                }
+                None
+            }
+        };
+        let splits = if let Some((_, splits)) = &catalog {
+            splits.clone()
+        } else if expected_scope.as_ref() == Some(&scope) {
+            context
+                .split_devices
+                .borrow()
+                .iter()
+                .filter(|split| home_members.contains(&split.did))
+                .cloned()
+                .map(|mut split| {
+                    if !home_members.contains(&split.parent_did) {
+                        split.name = None;
+                    }
+                    split
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let aliases = splits
+            .iter()
+            .map(|split| split.did.as_str())
+            .collect::<BTreeSet<_>>();
+        let members = {
+            let live = context.live.borrow();
+            home_members
+                .iter()
+                .filter(|did| {
+                    !aliases.contains(did.as_str())
+                        && (live.devices.get(*did).is_some_and(|slot| !slot.group)
+                            || catalog.is_some())
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
         let requested = {
             let live = context.live.borrow();
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
-                    home.dids.contains(did) && (slot.admitted.is_some() || slot.candidate.is_some())
+                    members.contains(*did) && (slot.admitted.is_some() || slot.candidate.is_some())
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -197,12 +277,7 @@ pub(super) async fn run(
                 continue;
             }
         };
-        let scope = Scope {
-            uid: home.uid.clone(),
-            home_id: home.home_id.clone(),
-        };
         // The complete publication transaction persists the scope.
-        let members = home.dids.iter().cloned().collect::<BTreeSet<_>>();
         let scope_changed = context
             .live
             .borrow()
@@ -227,6 +302,7 @@ pub(super) async fn run(
         };
         context.lan_scope_invalid.set(false);
         context.live.borrow_mut().scope = Some(scope.clone());
+        *context.split_devices.borrow_mut() = splits;
         context.stage();
         for did in removed {
             context.remove(&did)?;
@@ -255,11 +331,13 @@ pub(super) async fn run(
         context.mijia_authentication(AuthenticationState::Authenticated);
         context.cloud_scope_valid.set(true);
         context.http_paused.set(false);
-        context.sync_not_before.set(None);
-        *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
+        if catalog.is_some() {
+            context.sync_not_before.set(None);
+            *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
+        }
         context.update_all_availability();
         context.update_routing("complete cloud directory and device information synchronized");
-        context.set_catalog_problem(None);
+        context.set_catalog_problem(catalog_problem);
         context.changed.notify(usize::MAX);
         if membership_changed {
             super::local::refresh_access(&context);
@@ -270,6 +348,18 @@ pub(super) async fn run(
         let token = &path;
         let catalog_members = members.clone();
         for did in members {
+            // A home member missing from a complete account catalog remains
+            // visible to group membership, but cannot be described until its
+            // directory record establishes whether it is a split alias.
+            let known = context.live.borrow().devices[&did].admitted.is_some()
+                || context.live.borrow().devices[&did].candidate.is_some();
+            if !known
+                && catalog.as_ref().is_none_or(|(catalog, _)| {
+                    !catalog.devices.iter().any(|record| record.did == did)
+                })
+            {
+                continue;
+            }
             // Group-like records are admitted only by a confirmed catalog
             // relation, never through the ordinary home description path.
             let group_like = {
@@ -447,61 +537,42 @@ pub(super) async fn run(
         // catalog; a failed read keeps the previous confirmed relations.
         // The selected scope is captured at request start so the first home
         // binding (previously `None`) cannot discard the first catalog.
-        let catalog_scope = context.live.borrow().scope.clone();
-        let catalog = future::or(
-            async {
-                context.mijia_retired(token).await;
-                None
-            },
-            async { Some(context.mijia.get_device_catalog(&token.session).await) },
-        )
-        .await;
-        if catalog.is_none() {
-            context.reload_credentials();
-            context.request_sync();
-            continue;
-        }
-        if context.current_mijia(token) && context.live.borrow().scope == catalog_scope {
-            match catalog {
-                Some(Ok(catalog)) => {
-                    let update =
-                        context
-                            .relations
-                            .borrow_mut()
-                            .apply(&catalog, &scope, &catalog_members);
-                    for did in &update.withdrawn {
-                        if !catalog_members.contains(did)
-                            && context.live.borrow().devices.contains_key(did)
-                        {
-                            context.remove(did)?;
-                        }
-                    }
-                    for (did, reason) in &update.errors {
-                        log::warn!("Native group {did} relation not confirmed: {reason}");
-                    }
-                    for group in &update.active {
-                        log::debug!(
-                            "Native group {} model {} instance {} confirmed with {} members",
-                            group.membership.group_did,
-                            group.model,
-                            group.instance_type.as_deref().unwrap_or("missing"),
-                            group.membership.members.len()
-                        );
-                    }
-                    context.sync_groups(cloud, token, &update.active)?;
+        if context.current_mijia(token)
+            && context.live.borrow().scope.as_ref() == Some(&scope)
+            && let Some((catalog, _)) = &catalog
+        {
+            let update = context
+                .relations
+                .borrow_mut()
+                .apply(catalog, &scope, &catalog_members);
+            for did in &update.withdrawn {
+                if !catalog_members.contains(did) && context.live.borrow().devices.contains_key(did)
+                {
+                    context.remove(did)?;
                 }
-                Some(Err(error)) => {
-                    log::warn!(
-                        "Native group catalog read failed; keeping confirmed relations: {error}"
-                    );
-                    if error.is_unauthorized() {
-                        context.cloud_error(token, None, &error);
-                    }
-                }
-                None => {}
             }
+            for (did, reason) in &update.errors {
+                log::warn!("Native group {did} relation not confirmed: {reason}");
+            }
+            for group in &update.active {
+                log::debug!(
+                    "Native group {} model {} instance {} confirmed with {} members",
+                    group.membership.group_did,
+                    group.model,
+                    group.instance_type.as_deref().unwrap_or("missing"),
+                    group.membership.members.len()
+                );
+            }
+            context.sync_groups(cloud, token, &update.active)?;
         }
         context.stage();
-        due = context.clock.now() + MEMBER_INTERVAL;
+        due = if catalog.is_some() {
+            context.clock.now() + MEMBER_INTERVAL
+        } else {
+            context
+                .sync_not_before
+                .get()
+                .unwrap_or_else(|| context.sync_failed())
+        };
     }
 }

@@ -235,6 +235,7 @@ pub(super) struct Context {
     pub(super) commands: Rc<super::commands::Commands>,
     pub(super) write_gates: super::commands::DeviceWriteGates,
     pub(super) relations: RefCell<super::relations::Relations>,
+    pub(super) split_devices: RefCell<Vec<crate::configuration::SplitDevice>>,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
     #[cfg(test)]
     pub(super) mqtt_retry_deadline: Cell<Option<Duration>>,

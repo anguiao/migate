@@ -13,6 +13,52 @@ fn ordinary(did: &str) -> Value {
     })
 }
 
+#[test]
+fn malformed_panel_split_invalidates_the_directory_snapshot() {
+    let urn = "urn:miot-spec-v2:device:control-panel:0000A099:xiaomi-86v1:1";
+    for split in [
+        json!({"parentId":"panel","moduleId":"10"}),
+        json!({"parentId":"panel","moduleId":0}),
+        json!({"parentId":"panel"}),
+        json!({"parentId":"","moduleId":10}),
+        json!({"parentId":"panel","moduleId":-1}),
+    ] {
+        let record = json!({"did":"alias","model":"xiaomi.controller.86v1",
+            "spec_type":urn,"isOnline":true,"extra":{"split":split}});
+        assert!(read_catalog(vec![response(catalog_page(vec![record], false, None))]).is_err());
+    }
+}
+
+#[test]
+fn split_alias_uses_parent_and_integer_module_not_a_did_suffix_or_parent_roster() {
+    let urn = "urn:miot-spec-v2:device:switch:0000A003:zimi-dhkg05:1:0000C810";
+    let parent = json!({"did":"panel","model":"zimi.switch.dhkg05",
+        "spec_type":urn,"isOnline":true,"extra":{"split":{"splitFlag":1,"subDids":["arbitrary"]}}});
+    let child = json!({"did":"arbitrary","model":"zimi.switch.dhkg05",
+        "spec_type":urn,"isOnline":true,"name":"Kitchen","extra":{"split":{"parentId":"panel","moduleId":3}}});
+    let catalog = read_catalog(vec![response(catalog_page(
+        vec![parent, child],
+        false,
+        None,
+    ))])
+    .unwrap();
+    let panel = catalog
+        .devices
+        .iter()
+        .find(|device| device.did == "panel")
+        .unwrap();
+    assert!(panel.split.is_none());
+    let alias = catalog
+        .devices
+        .iter()
+        .find(|device| device.did == "arbitrary")
+        .unwrap();
+    let split = alias.split.as_ref().unwrap();
+    assert_eq!(split.parent_did, "panel");
+    assert_eq!(split.siid, 3);
+    assert_eq!(alias.name.as_deref(), Some("Kitchen"));
+}
+
 fn group(did: &str, group_did: &str, is_physical: bool, members: &[&str]) -> Value {
     let mut member_ship = serde_json::Map::new();
     for member in members {

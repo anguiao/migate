@@ -43,6 +43,7 @@ pub(crate) fn plan<Shape: PartialEq>(
         relation.members.sort();
         relation.members.dedup();
     }
+    facts.split_devices.sort_by(|a, b| a.did.cmp(&b.did));
     let mut identities = current
         .devices
         .iter()
@@ -138,6 +139,7 @@ pub(crate) fn plan<Shape: PartialEq>(
         devices: next_devices,
         descriptions,
         groups: facts.relations,
+        split_devices: facts.split_devices,
         temperature_bindings,
     };
     let derived = configuration.derive();

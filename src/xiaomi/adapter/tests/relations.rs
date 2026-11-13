@@ -34,6 +34,7 @@ fn device(did: &str, group: CloudGroupStatus) -> CloudCatalogDevice {
         ),
         online: true,
         group,
+        split: None,
     }
 }
 

@@ -136,6 +136,7 @@ pub(super) fn next(
             })
             .collect(),
         relations: Vec::new(),
+        split_devices: Vec::new(),
     };
     let current_derived = current.derive();
     let new_identities = facts

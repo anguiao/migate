@@ -15,7 +15,7 @@ fn initializes_and_restores_independent_identities() {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            12
+            13
         );
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
@@ -243,11 +243,11 @@ fn private_permissions() {
 fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
     for (setup, expected) in [
         (
-            "PRAGMA user_version = 11; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('previous');",
+            "PRAGMA user_version = 12; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('previous');",
             "previous",
         ),
         (
-            "PRAGMA user_version = 6; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
+            "PRAGMA user_version = 14; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
             "future",
         ),
         (
@@ -335,6 +335,6 @@ fn invalid_current_schema_reports_sql_errors_without_replacing_identity() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        12
+        13
     );
 }

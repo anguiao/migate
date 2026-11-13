@@ -1,4 +1,4 @@
-//! Account-wide device directory with native light-group membership.
+//! Account-wide device directory with native group and panel split metadata.
 //!
 //! The Xiaomi device-list endpoint is not scoped to a home and may return
 //! records for any home owned by the account. This boundary therefore reads
@@ -46,6 +46,13 @@ pub struct CloudCatalogDevice {
     /// values fail the whole snapshot instead of defaulting to online.
     pub online: bool,
     pub group: CloudGroupStatus,
+    pub(crate) split: Option<CloudSplit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CloudSplit {
+    pub parent_did: String,
+    pub siid: u32,
 }
 
 /// Native group membership read status for one directory record.
@@ -100,6 +107,16 @@ struct CatalogRecord {
 struct RawExtra {
     #[serde(default, deserialize_with = "present_raw")]
     member_list: Option<Box<RawValue>>,
+    #[serde(default, deserialize_with = "present_raw")]
+    split: Option<Box<RawValue>>,
+}
+
+#[derive(Deserialize)]
+struct RawSplit {
+    #[serde(rename = "parentId", default, deserialize_with = "present_raw")]
+    parent_id: Option<Box<RawValue>>,
+    #[serde(rename = "moduleId", default, deserialize_with = "present_raw")]
+    module_id: Option<Box<RawValue>>,
 }
 
 fn present_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
@@ -121,7 +138,7 @@ struct RawMemberList {
 
 impl MijiaClient {
     /// Read every page of the account device directory, including native
-    /// group membership, without a DID filter.
+    /// group membership and panel split metadata, without a DID filter.
     ///
     /// `Ok` is a complete authoritative snapshot: request, pagination, cursor
     /// and envelope failures return `Err` instead of a partial result. The
@@ -151,6 +168,16 @@ impl MijiaClient {
                     return Err(CloudError::protocol(operation));
                 }
                 let group = read_group(record.extra.as_deref());
+                let split = if record
+                    .spec_type
+                    .as_deref()
+                    .is_some_and(crate::xiaomi::capability::is_load_panel_type)
+                {
+                    read_panel_split(record.extra.as_deref())
+                        .map_err(|()| CloudError::protocol(operation))?
+                } else {
+                    None
+                };
                 devices.push(CloudCatalogDevice {
                     did: record.did,
                     name: record.name.filter(|name| {
@@ -160,6 +187,7 @@ impl MijiaClient {
                     instance_type: record.spec_type,
                     online: record.online,
                     group,
+                    split,
                 });
             }
             cursor = pages.advance(
@@ -174,6 +202,33 @@ impl MijiaClient {
         resolve_group_identity_conflicts(&mut devices);
         devices.sort_by(|left, right| left.did.cmp(&right.did));
         Ok(CloudDeviceCatalog { devices })
+    }
+}
+
+fn read_panel_split(extra: Option<&RawValue>) -> Result<Option<CloudSplit>, ()> {
+    let Some(extra) = extra else { return Ok(None) };
+    if !is_object(extra) {
+        return Err(());
+    }
+    let extra: RawExtra = serde_json::from_str(extra.get()).map_err(|_| ())?;
+    let Some(split) = extra.split else {
+        return Ok(None);
+    };
+    if !is_object(&split) {
+        return Err(());
+    }
+    let split: RawSplit = serde_json::from_str(split.get()).map_err(|_| ())?;
+    match (split.parent_id, split.module_id) {
+        (None, None) => Ok(None),
+        (Some(parent), Some(siid)) => {
+            let parent_did: String = serde_json::from_str(parent.get()).map_err(|_| ())?;
+            let siid: u32 = serde_json::from_str(siid.get()).map_err(|_| ())?;
+            if !valid_description(&parent_did) || siid == 0 {
+                return Err(());
+            }
+            Ok(Some(CloudSplit { parent_did, siid }))
+        }
+        _ => Err(()),
     }
 }
 

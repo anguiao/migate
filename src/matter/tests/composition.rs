@@ -45,6 +45,7 @@ fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
             fresh: true,
         }],
         relations: vec![],
+        split_devices: Vec::new(),
     };
     let new_identities = if current.device(&key).is_some() {
         BTreeMap::new()

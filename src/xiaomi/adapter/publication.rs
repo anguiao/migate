@@ -203,6 +203,7 @@ impl SourceHandle {
             scope,
             devices,
             relations,
+            split_devices: self.0.split_devices.borrow().clone(),
         }
     }
 

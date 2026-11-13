@@ -41,6 +41,16 @@ pub(crate) struct GroupRelation {
     pub members: Vec<String>,
 }
 
+/// A split directory record belonging to the selected home. The parent may
+/// be outside the home; in that case the record remains an excluded alias.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SplitDevice {
+    pub did: String,
+    pub parent_did: String,
+    pub siid: u32,
+    pub name: Option<String>,
+}
+
 /// The execution-relevant rule of one effective group. Directory metadata such
 /// as the model, URN or a diagnostic error is deliberately excluded: only
 /// these values decide hiding, feedback ownership and repair attribution.
@@ -82,6 +92,7 @@ pub(crate) struct CommittedConfiguration {
     pub devices: Vec<CommittedDevice>,
     pub descriptions: Vec<RawDescription>,
     pub groups: Vec<GroupRelation>,
+    pub split_devices: Vec<SplitDevice>,
     pub temperature_bindings: BTreeMap<FunctionKey, FunctionKey>,
 }
 
@@ -123,6 +134,7 @@ pub(crate) struct SourceFacts {
     pub scope: Option<Scope>,
     pub devices: Vec<SourceDevice>,
     pub relations: Vec<GroupRelation>,
+    pub split_devices: Vec<SplitDevice>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -216,6 +228,7 @@ impl CommittedConfiguration {
             devices: Vec::new(),
             descriptions: Vec::new(),
             groups: Vec::new(),
+            split_devices: Vec::new(),
             temperature_bindings: BTreeMap::new(),
         }
     }
