@@ -90,6 +90,7 @@ struct PowerCommand {
     completion: Arc<Completion>,
     order: u64,
     queued_at: Instant,
+    relay_home: Option<(String, String)>,
 }
 struct LightFrame {
     action: Arc<Action>,
@@ -181,7 +182,13 @@ impl CommandCoordinator {
         }
     }
     /// One power submission owns FIFO placement, Off takeover and order.
-    fn submit_power(&mut self, command: Command, light: bool, completion: Arc<Completion>) {
+    fn submit_power(
+        &mut self,
+        command: Command,
+        light: bool,
+        completion: Arc<Completion>,
+        relay_home: Option<(String, String)>,
+    ) {
         if light && command == Command::Off {
             self.cancel_all(CommandError::Superseded);
             self.invalidate_light_on();
@@ -192,6 +199,7 @@ impl CommandCoordinator {
             completion,
             order,
             queued_at: Instant::now(),
+            relay_home,
         });
     }
     fn next_order(&mut self) -> u64 {

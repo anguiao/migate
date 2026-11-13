@@ -14,7 +14,7 @@ pub(super) fn candidates(
     for service in description
         .services
         .iter()
-        .filter(|service| service.urn.standard("service", "switch", 0x780c))
+        .filter(|service| is_relay_service(service))
     {
         let id = format!("relay:{}", service.iid);
         match parse(service) {
@@ -28,6 +28,10 @@ pub(super) fn candidates(
         }
     }
     functions
+}
+
+pub(super) fn is_relay_service(service: &Service<'_>) -> bool {
+    service.urn.standard("service", "switch", 0x780c)
 }
 
 fn parse(

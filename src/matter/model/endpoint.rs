@@ -90,6 +90,12 @@ const CHILD_OBCR_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
 );
 const PARENT_CLUSTERS: &[rs_matter::dm::Cluster<'static>] =
     clusters!(desc::DescHandler::CLUSTER, BridgedHandler::CLUSTER);
+const RELAY_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
+    desc::DescHandler::CLUSTER,
+    BridgedHandler::CLUSTER,
+    binding::CLUSTER,
+    OnOffHandler::<false>::CLUSTER
+);
 const POWER_SOURCE: DeviceType = DeviceType {
     dtype: 0x0011,
     drev: 1,
@@ -170,6 +176,12 @@ pub(super) struct Entry {
     pub(super) role: Role,
 }
 pub(super) enum Role {
+    Relay {
+        function: OnOffHandler,
+        bridged: BridgedHandler,
+        bindings: Rc<BindingRegistry>,
+        binding: Dataver,
+    },
     Parent {
         children: Vec<u16>,
         bridged: BridgedHandler,
@@ -185,19 +197,19 @@ impl Role {
     fn function(&self) -> Option<&FunctionHandler> {
         match self {
             Self::Child { function, .. } => Some(function),
-            Self::Parent { .. } => None,
+            Self::Parent { .. } | Self::Relay { .. } => None,
         }
     }
     fn bridged(&self) -> Option<&BridgedHandler> {
         match self {
-            Self::Parent { bridged, .. } => Some(bridged),
+            Self::Parent { bridged, .. } | Self::Relay { bridged, .. } => Some(bridged),
             Self::Child { .. } => None,
         }
     }
     fn battery(&self) -> Option<&sensors::BatteryHandler> {
         match self {
             Self::Parent { battery, .. } => battery.as_ref(),
-            Self::Child { .. } => None,
+            Self::Child { .. } | Self::Relay { .. } => None,
         }
     }
 }
@@ -205,6 +217,12 @@ impl Role {
 macro_rules! dispatch {
     ($entry:expr, $method:ident($($arg:expr),* $(,)?)) => {
         match &$entry.role {
+            Role::Relay { function, bridged, bindings, binding } => AsyncHandler::$method(
+                &EmptyHandler
+                    .chain(|_, cluster| cluster == 0x39, Async(bridged::HandlerAdaptor(bridged)))
+                    .chain(|_, cluster| cluster == 0x1e, Async(BindingHandler::new(Dataver::new(binding.get()), $entry.endpoint, bindings).adapt()))
+                    .chain(|_, cluster| cluster == 6, on_off::HandlerAsyncAdaptor(function)), $($arg),*
+            ).await,
             Role::Parent { bridged, battery, .. } => match battery {
                 Some(battery) => AsyncHandler::$method(
                     &EmptyHandler
@@ -236,6 +254,12 @@ impl Entry {
     }
     pub(super) fn metadata<'a>(&'a self, tags: &'a [SemanticTag<'a>]) -> Endpoint<'a> {
         match &self.role {
+            Role::Relay { .. } => Endpoint::new_with_clients(
+                self.endpoint,
+                devices!(DEV_TYPE_BRIDGED_NODE, DEV_TYPE_ON_OFF_LIGHT_SWITCH),
+                RELAY_CLUSTERS,
+                &[on_off::FULL_CLUSTER.id],
+            ),
             Role::Parent { battery, .. } => {
                 if battery.is_some() {
                     Endpoint::new(
@@ -366,6 +390,17 @@ impl Entry {
         if let Some(function) = self.role.function() {
             function.bump(cluster);
         }
+        if let Role::Relay {
+            function, binding, ..
+        } = &self.role
+        {
+            if cluster.is_none_or(|id| id == 6) {
+                function.dataver_changed();
+            }
+            if cluster.is_none_or(|id| id == 0x1e) {
+                binding.changed();
+            }
+        }
         if let Some(handler) = self.role.bridged()
             && cluster.is_none_or(|id| id == 0x39)
         {
@@ -392,7 +427,7 @@ impl desc::PartsMatcher for Entry {
     fn matches(&self, _our_endpoint: u16, endpoint: u16) -> bool {
         match &self.role {
             Role::Parent { children, .. } => children.contains(&endpoint),
-            Role::Child { .. } => false,
+            Role::Child { .. } | Role::Relay { .. } => false,
         }
     }
 }

@@ -25,7 +25,7 @@ impl CommittedConfiguration {
     /// Derive served descriptions, the published set and the group graph once.
     pub(crate) fn derive(&self) -> DerivedConfiguration {
         let groups = relations_by_did(&self.groups);
-        derive_picture(
+        let mut derived = derive_picture(
             self.devices.iter().filter_map(|device| {
                 device.native.as_ref().map(|native| DerivationDevice {
                     key: &device.key,
@@ -34,7 +34,26 @@ impl CommittedConfiguration {
                 })
             }),
             &groups,
-        )
+        );
+        derived.published_relays = self
+            .relay_channels
+            .iter()
+            .filter(|channel| {
+                self.scope.as_ref() == Some(&channel.scope)
+                    && channel.mode == Some(crate::device::RelayMode::Wired)
+                    && derived
+                        .served
+                        .get(&channel.key.device)
+                        .is_some_and(|served| {
+                            served.description.functions().iter().any(|function| {
+                                function.id == channel.key.id
+                                    && function.kind == crate::device::FunctionKind::Relay
+                            })
+                        })
+            })
+            .map(|channel| channel.key.clone())
+            .collect();
+        derived
     }
 }
 
@@ -172,6 +191,7 @@ fn derive_picture<'a>(
     DerivedConfiguration {
         served,
         published,
+        published_relays: BTreeSet::new(),
         groups: groups.clone(),
         memberships,
         member_issues,

@@ -16,9 +16,9 @@ use sensor_binding::activate_temperature_bindings;
 
 use crate::{
     configuration::{
-        self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, validate_label,
+        self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, Scope, validate_label,
     },
-    device::{DeviceKey, DeviceRegistry, PhysicalDevice},
+    device::{DeviceKey, DeviceRegistry, FunctionKey, PhysicalDevice, RelayMode},
     matter::{self, LabelWriter},
     storage::{Identity, StorageError, Store},
     terminal::AuthStatus,
@@ -167,10 +167,41 @@ impl App {
                         unique_id: committed.unique_id.clone(),
                         configuration_version: committed.configuration_version,
                         functions,
+                        relay: None,
                     },
                 }
             })
             .collect::<Vec<_>>();
+        for key in &current.derived.published_relays {
+            let channel = current
+                .configuration
+                .relay_channels
+                .iter()
+                .find(|channel| {
+                    current.configuration.scope.as_ref() == Some(&channel.scope)
+                        && &channel.key == key
+                })
+                .expect("a published relay keeps its identity");
+            if let Some(source) = current
+                .entries
+                .iter()
+                .find(|entry| entry.physical.key() == &key.device)
+            {
+                entries.push(matter::FrozenEntry {
+                    device: source.physical.clone(),
+                    identity: matter::PublishedIdentity {
+                        endpoint: channel.endpoint,
+                        unique_id: channel.unique_id.clone(),
+                        configuration_version: channel.configuration_version,
+                        functions: Vec::new(),
+                        relay: Some(matter::PublishedRelay {
+                            scope: channel.scope.clone(),
+                            function_id: key.id.clone(),
+                        }),
+                    },
+                });
+            }
+        }
         entries.sort_by_key(|entry| entry.identity.endpoint);
         entries
     }
@@ -315,6 +346,67 @@ impl App {
 impl LabelWriter for App {
     fn write_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError> {
         self.rename(key, label)
+    }
+
+    fn relay_label(&self, scope: &Scope, key: &FunctionKey) -> Option<String> {
+        self.current()
+            .configuration
+            .relay_channels
+            .iter()
+            .find(|channel| &channel.scope == scope && &channel.key == key)
+            .map(|channel| channel.label.clone())
+    }
+
+    fn write_relay_label(
+        &self,
+        scope: &Scope,
+        key: &FunctionKey,
+        label: &str,
+    ) -> Result<(), StorageError> {
+        validate_label(label)
+            .map_err(|error| StorageError::new(self.store.path(), "write relay label", error))?;
+        let current = self.current();
+        let mut configuration = current.configuration.clone();
+        let channel = configuration
+            .relay_channels
+            .iter_mut()
+            .find(|channel| &channel.scope == scope && &channel.key == key)
+            .ok_or_else(|| {
+                StorageError::new(
+                    self.store.path(),
+                    "write relay label",
+                    "Relay identity does not exist",
+                )
+            })?;
+        channel.label = label.to_owned();
+        self.store
+            .devices()
+            .commit_configuration(&configuration, &[])?;
+        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
+            configuration,
+            derived: current.derived.clone(),
+            entries: current.entries.clone(),
+            published: current.published.clone(),
+        });
+        self.committed.notify(usize::MAX);
+        Ok(())
+    }
+
+    fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool {
+        let current = self.current();
+        current.configuration.scope.as_ref() == Some(scope)
+            && current.derived.published_relays.contains(key)
+            && self
+                .source
+                .binding_accessible(&Some(scope.clone()), &key.device)
+            && self.source.relay_mode(key).or_else(|| {
+                current
+                    .configuration
+                    .relay_channels
+                    .iter()
+                    .find(|channel| &channel.scope == scope && &channel.key == key)
+                    .and_then(|channel| channel.mode)
+            }) == Some(RelayMode::Wired)
     }
 }
 

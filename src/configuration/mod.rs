@@ -6,7 +6,7 @@
 //! projection and never reads storage, the network, randomness or time.
 
 use crate::{
-    device::{DeviceKey, FunctionKey, PhysicalDeviceDescription},
+    device::{DeviceKey, FunctionKey, PhysicalDeviceDescription, RelayMode},
     xiaomi::capability::{NativeDescription, RawDescription, RepairPlan, SourceDescription},
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,6 +85,25 @@ pub(crate) struct CommittedDevice {
     pub native: Option<NativeDescription>,
 }
 
+/// The reserved accessory identity and the last confirmed mode of one relay.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RelayChannel {
+    pub scope: Scope,
+    pub key: FunctionKey,
+    pub endpoint: u16,
+    pub unique_id: String,
+    pub label: String,
+    pub configuration_version: u32,
+    pub mode: Option<RelayMode>,
+    pub device_type: RelayType,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RelayType {
+    Switch,
+    Light,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CommittedConfiguration {
     pub scope: Option<Scope>,
@@ -93,6 +112,7 @@ pub(crate) struct CommittedConfiguration {
     pub descriptions: Vec<RawDescription>,
     pub groups: Vec<GroupRelation>,
     pub split_devices: Vec<SplitDevice>,
+    pub relay_channels: Vec<RelayChannel>,
     pub temperature_bindings: BTreeMap<FunctionKey, FunctionKey>,
 }
 
@@ -117,6 +137,7 @@ pub(crate) struct ServedDevice {
 pub(crate) struct DerivedConfiguration {
     pub served: BTreeMap<DeviceKey, ServedDevice>,
     pub published: BTreeSet<DeviceKey>,
+    pub published_relays: BTreeSet<FunctionKey>,
     pub groups: BTreeMap<String, GroupRelation>,
     pub memberships: BTreeMap<FunctionKey, BTreeSet<String>>,
     pub member_issues: BTreeMap<String, Vec<String>>,
@@ -135,6 +156,7 @@ pub(crate) struct SourceFacts {
     pub devices: Vec<SourceDevice>,
     pub relations: Vec<GroupRelation>,
     pub split_devices: Vec<SplitDevice>,
+    pub relay_modes: BTreeMap<FunctionKey, RelayMode>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -229,6 +251,7 @@ impl CommittedConfiguration {
             descriptions: Vec::new(),
             groups: Vec::new(),
             split_devices: Vec::new(),
+            relay_channels: Vec::new(),
             temperature_bindings: BTreeMap::new(),
         }
     }

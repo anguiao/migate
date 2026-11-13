@@ -53,14 +53,14 @@ fn the_old_schema_is_rejected_without_modification() {
 }
 
 #[test]
-fn schema12_is_one_private_singleton() {
+fn schema13_is_one_private_singleton() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let db = Connection::open(store.path()).unwrap();
     let version = db
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     let rows = db
         .query_row("SELECT count(*) FROM bridge_configuration", [], |row| {
             row.get::<_, i64>(0)

@@ -2,6 +2,7 @@ mod configuration;
 mod labels;
 mod lifecycle;
 mod process;
+mod relay;
 mod sensor_binding;
 
 use crate::{

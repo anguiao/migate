@@ -6,7 +6,8 @@ use super::{
 };
 use crate::{
     RuntimeError,
-    device::DeviceKey,
+    configuration::Scope,
+    device::{DeviceKey, FunctionKey},
     storage::{Identity, StorageError, Store},
 };
 use rs_matter::{
@@ -55,6 +56,14 @@ impl Advertisement {
 /// The one application configuration entry used by Matter label writes.
 pub(crate) trait LabelWriter {
     fn write_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError>;
+    fn relay_label(&self, scope: &Scope, key: &FunctionKey) -> Option<String>;
+    fn write_relay_label(
+        &self,
+        scope: &Scope,
+        key: &FunctionKey,
+        label: &str,
+    ) -> Result<(), StorageError>;
+    fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool;
 }
 
 /// One frozen Matter instance and storage failures that outlive its run future.

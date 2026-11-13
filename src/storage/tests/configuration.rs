@@ -124,6 +124,7 @@ pub(super) fn next(
     natives: Vec<SourceFixture>,
 ) -> Plan {
     let facts = SourceFacts {
+        relay_modes: Default::default(),
         scope: Some(scope),
         devices: natives
             .into_iter()

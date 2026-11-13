@@ -36,6 +36,7 @@ fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
     let description = source.into();
     let derived = current.derive();
     let facts = SourceFacts {
+        relay_modes: Default::default(),
         scope: Some(Scope {
             uid: "account".into(),
             home_id: "home".into(),

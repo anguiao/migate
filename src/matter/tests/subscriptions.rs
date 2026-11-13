@@ -711,5 +711,6 @@ mod fan;
 mod lighting;
 mod persistence;
 mod recovery;
+mod relay;
 mod sensors;
 mod topology;

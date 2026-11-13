@@ -45,6 +45,34 @@ fn command_error(error: CentralError) -> CommandError {
         error => CommandError::SendFailed(error.to_string()),
     }
 }
+
+/// Direct terminal writes do not carry a home relay restriction. Home writes
+/// must still belong to the admitted source and its latest confirmed mode at
+/// the transport boundary, even if the committed publication is older.
+fn relay_allowed(
+    context: &Rc<Context>,
+    work: &DeviceWork,
+    id: &str,
+    request: &CommandRequest,
+) -> bool {
+    let Some((uid, home_id)) = request.relay_home() else {
+        return true;
+    };
+    let scope = crate::configuration::Scope {
+        uid: uid.to_owned(),
+        home_id: home_id.to_owned(),
+    };
+    let key = crate::device::FunctionKey::new(work.key.clone(), id);
+    super::publication::SourceHandle(context.clone()).binding_accessible(&Some(scope), &work.key)
+        && context.graph.borrow().published_relays.contains(&key)
+        && work
+            .physical()
+            .function(id)
+            .unwrap()
+            .snapshot()
+            .relay_mode()
+            != Some(crate::device::RelayMode::Wireless)
+}
 /// Return ownership only when the request was withdrawn before transmission.
 async fn send_local_write(
     context: &Rc<Context>,
@@ -73,6 +101,7 @@ async fn send_local_write(
     let guard_handle = handle.clone();
     let guard_did = did.clone();
     let guard_id = id.clone();
+    let guard_request = pending.clone();
     let result_context = context.clone();
     let result_handle = handle.clone();
     let submitted = operation.clone();
@@ -81,6 +110,10 @@ async fn send_local_write(
             if guard_work.life.is_closed()
                 || guard_sink.life.is_closed()
                 || !guard_context.current_local(&guard_handle)
+                || guard_request.borrow().as_ref().is_none_or(|request| {
+                    request.current_result().is_err()
+                        || !relay_allowed(&guard_context, &guard_work, &guard_id, request)
+                })
             {
                 SendDecision::Cancel
             } else if matches!(guard_context.control_path_for(&guard_did, &guard_id), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle))
@@ -266,6 +299,13 @@ async fn send_power(
             command.0.reject(request, error);
             break;
         }
+        if !relay_allowed(&context, &work, function_id, &request) {
+            command.0.reject(
+                request,
+                CommandError::Unavailable("relay is not currently available to Home".into()),
+            );
+            break;
+        }
         let Some(path) = context.control_path_for(&did, function_id) else {
             command.0.reject(
                 request,
@@ -303,6 +343,7 @@ async fn send_power(
                         !work.life.is_closed()
                             && !sink.life.is_closed()
                             && request.current_result().is_ok()
+                            && relay_allowed(&context, &work, function_id, &request)
                             && matches!(context.control_path_for(&did, function_id), Some(ControlPath::Direct(selected)) if selected.same(&client))
                     },
                     || {

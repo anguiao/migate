@@ -6,6 +6,25 @@ impl Function {
     /// Dropping the future withdraws a queued command. An adapter that already
     /// received it still owns its result and may update the shared snapshot.
     pub async fn execute(&self, command: Command) -> Result<FunctionSnapshot, CommandError> {
+        self.execute_power(command, None).await
+    }
+
+    /// Home relay commands retain their issuing home until the adapter sends them.
+    pub(crate) async fn execute_home_relay(
+        &self,
+        command: Command,
+        uid: &str,
+        home_id: &str,
+    ) -> Result<FunctionSnapshot, CommandError> {
+        self.execute_power(command, Some((uid.to_owned(), home_id.to_owned())))
+            .await
+    }
+
+    async fn execute_power(
+        &self,
+        command: Command,
+        relay_home: Option<(String, String)>,
+    ) -> Result<FunctionSnapshot, CommandError> {
         if matches!(
             self.description().kind,
             super::super::FunctionKind::AirConditioner { .. }
@@ -53,7 +72,7 @@ impl Function {
             state
                 .commands_mut()
                 .expect("checked command queue exists")
-                .submit_power(resolved, light, completion.clone());
+                .submit_power(resolved, light, completion.clone(), relay_home);
             resolved
         };
         if light && resolved == Command::Off {
@@ -193,6 +212,7 @@ impl CommandReceiver {
                 queued_at: pending.queued_at,
                 function: self.function.clone(),
                 flight,
+                relay_home: pending.relay_home,
             });
         }
     }
@@ -210,9 +230,15 @@ pub struct CommandRequest {
     queued_at: Instant,
     function: Function,
     flight: Arc<PowerFlight>,
+    relay_home: Option<(String, String)>,
 }
 
 impl CommandRequest {
+    pub(crate) fn relay_home(&self) -> Option<(&str, &str)> {
+        self.relay_home
+            .as_ref()
+            .map(|(uid, home_id)| (uid.as_str(), home_id.as_str()))
+    }
     pub(crate) fn queued_at(&self) -> Instant {
         self.queued_at
     }

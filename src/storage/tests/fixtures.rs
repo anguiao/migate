@@ -92,6 +92,7 @@ pub(crate) fn planned_from(
     natives: Vec<SourceFixture>,
 ) -> CommittedConfiguration {
     let facts = SourceFacts {
+        relay_modes: Default::default(),
         scope: Some(scope()),
         devices: natives
             .into_iter()

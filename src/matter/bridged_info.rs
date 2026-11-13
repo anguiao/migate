@@ -25,6 +25,7 @@ pub(super) struct BridgedHandler {
     dataver: Dataver,
     identity: String,
     configuration_version: u32,
+    relay: Option<(crate::configuration::Scope, crate::device::FunctionKey)>,
     reported: std::cell::Cell<bool>,
 }
 
@@ -36,6 +37,12 @@ impl BridgedHandler {
         renamer: Rc<dyn super::bridge::LabelWriter>,
     ) -> Self {
         let reported = std::cell::Cell::new(device.availability() == Availability::Available);
+        let relay = identity.relay.as_ref().map(|relay| {
+            (
+                relay.scope.clone(),
+                crate::device::FunctionKey::new(device.key().clone(), &relay.function_id),
+            )
+        });
         Self {
             device,
             endpoint: identity.endpoint,
@@ -43,6 +50,7 @@ impl BridgedHandler {
             dataver,
             identity: identity.unique_id.clone(),
             configuration_version: identity.configuration_version,
+            relay,
             reported,
         }
     }
@@ -100,7 +108,15 @@ impl bridged::ClusterHandler for BridgedHandler {
         _ctx: impl ReadContext,
         builder: Utf8StrBuilder<P>,
     ) -> Result<P, Error> {
-        builder.set(&self.device.label())
+        match &self.relay {
+            Some((scope, key)) => builder.set(
+                &self
+                    .renamer
+                    .relay_label(scope, key)
+                    .expect("a published relay keeps its saved label"),
+            ),
+            None => builder.set(&self.device.label()),
+        }
     }
 
     /// Frozen for this instance: exactly the committed endpoint version.
@@ -110,10 +126,29 @@ impl bridged::ClusterHandler for BridgedHandler {
 
     fn set_node_label(&self, ctx: impl WriteContext, value: Utf8Str<'_>) -> Result<(), Error> {
         validate_label(value)?;
-        if self.device.label() != value {
-            self.renamer
-                .write_label(self.device.key(), value)
-                .map_err(|_| ErrorCode::StdIoError)?;
+        let changed = match &self.relay {
+            Some((scope, key)) => {
+                if self.renamer.relay_label(scope, key).as_deref() == Some(value) {
+                    false
+                } else {
+                    self.renamer
+                        .write_relay_label(scope, key, value)
+                        .map_err(|_| ErrorCode::StdIoError)?;
+                    true
+                }
+            }
+            None => {
+                if self.device.label() == value {
+                    false
+                } else {
+                    self.renamer
+                        .write_label(self.device.key(), value)
+                        .map_err(|_| ErrorCode::StdIoError)?;
+                    true
+                }
+            }
+        };
+        if changed {
             ctx.notify_changed();
         }
         Ok(())

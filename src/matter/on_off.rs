@@ -4,6 +4,7 @@ use rs_matter::{
     error::{Error, ErrorCode},
     with,
 };
+use std::rc::Rc;
 
 /// The shared Function is the only power state and command boundary.
 pub(super) struct OnOffHandler<const DEAD_FRONT: bool = false> {
@@ -11,6 +12,10 @@ pub(super) struct OnOffHandler<const DEAD_FRONT: bool = false> {
     endpoint: u16,
     dataver: Dataver,
     reported: std::cell::Cell<Option<bool>>,
+    relay: Option<(
+        crate::configuration::Scope,
+        Rc<dyn super::bridge::LabelWriter>,
+    )>,
 }
 impl<const DEAD_FRONT: bool> OnOffHandler<DEAD_FRONT> {
     pub(super) fn new(function: Function, endpoint: u16, dataver: Dataver) -> Self {
@@ -20,14 +25,36 @@ impl<const DEAD_FRONT: bool> OnOffHandler<DEAD_FRONT> {
             endpoint,
             dataver,
             reported,
+            relay: None,
         }
+    }
+    pub(super) fn relay(
+        function: Function,
+        endpoint: u16,
+        dataver: Dataver,
+        scope: crate::configuration::Scope,
+        authority: Rc<dyn super::bridge::LabelWriter>,
+    ) -> Self {
+        let mut handler = Self::new(function, endpoint, dataver);
+        handler.relay = Some((scope, authority));
+        handler
     }
     async fn execute(&self, ctx: impl InvokeContext, command: Command) -> Result<(), Error> {
         ctx.data()
             .structure()
             .and_then(|_| ctx.data().raw_value())
             .map_err(|_| ErrorCode::InvalidCommand)?;
-        self.function.execute(command).await.map_err(|error| {
+        let result = if let Some((scope, authority)) = &self.relay {
+            if !authority.relay_accessible(scope, self.function.function_key()) {
+                return Err(ErrorCode::Failure.into());
+            }
+            self.function
+                .execute_home_relay(command, &scope.uid, &scope.home_id)
+                .await
+        } else {
+            self.function.execute(command).await
+        };
+        result.map_err(|error| {
             log::warn!(
                 "Matter {}/{} {command:?} failed: {error}",
                 self.function.function_key().device.id,

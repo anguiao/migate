@@ -15,6 +15,7 @@ use rs_matter::{
         clusters::{
             app::on_off::{self, ClusterAsyncHandler as _},
             basic_info::{BasicInfoConfig, BasicInfoSettings},
+            binding::{self, BindingHandler, Bindings},
             decl::{
                 air_quality, boolean_state,
                 bridged_device_basic_information::{self as bridged, ClusterHandler as _},
@@ -29,7 +30,7 @@ use rs_matter::{
         },
         devices::{
             DEV_TYPE_AGGREGATOR, DEV_TYPE_BRIDGED_NODE, DEV_TYPE_DIMMABLE_LIGHT,
-            DEV_TYPE_ON_OFF_LIGHT, test::TEST_DEV_DET,
+            DEV_TYPE_ON_OFF_LIGHT, DEV_TYPE_ON_OFF_LIGHT_SWITCH, test::TEST_DEV_DET,
         },
         endpoints,
         networks::SysNetifs,
@@ -65,6 +66,8 @@ pub(super) const HEATER_DEVICE_TYPES: &[DeviceType] = &[DeviceType {
 }];
 
 const AGGREGATOR_ENDPOINT: u16 = 1;
+const BINDING_CAPACITY: usize = 16;
+type BindingRegistry = Bindings<BINDING_CAPACITY>;
 const ROOT: Endpoint<'static> = root_endpoint!(eth);
 const AGGREGATOR: Endpoint<'static> = Endpoint::new(
     AGGREGATOR_ENDPOINT,
@@ -95,6 +98,7 @@ struct Versions {
     curtain: u32,
     fan: u32,
     thermostat: u32,
+    binding: u32,
 }
 impl Versions {
     /// Each new instance seeds independent random per-cluster DataVersions so
@@ -119,6 +123,7 @@ impl Versions {
             curtain: random.random(),
             fan: random.random(),
             thermostat: random.random(),
+            binding: random.random(),
         }
     }
 }
@@ -137,6 +142,13 @@ pub(crate) struct PublishedIdentity {
     pub(crate) unique_id: String,
     pub(crate) configuration_version: u32,
     pub(crate) functions: Vec<PublishedFunction>,
+    pub(crate) relay: Option<PublishedRelay>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublishedRelay {
+    pub(crate) scope: crate::configuration::Scope,
+    pub(crate) function_id: String,
 }
 
 /// One published physical device frozen with its current publication identity.
@@ -149,6 +161,7 @@ pub(crate) struct FrozenEntry {
 pub(super) struct Model {
     root: RootHandler,
     entries: Vec<Rc<Entry>>,
+    bindings: Rc<BindingRegistry>,
 }
 
 pub(super) fn handler_from(
@@ -164,8 +177,37 @@ pub(super) fn handler_from(
             Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
         );
     let mut built = Vec::new();
+    let bindings = Rc::new(BindingRegistry::new());
     for FrozenEntry { device, identity } in entries {
         let versions = Versions::new(&mut random);
+        if let Some(relay) = &identity.relay {
+            let endpoint = identity.endpoint;
+            let function = device
+                .function(&relay.function_id)
+                .expect("a published relay keeps its physical function");
+            built.push(Rc::new(Entry {
+                endpoint,
+                descriptor: Dataver::new(versions.descriptor),
+                role: Role::Relay {
+                    function: OnOffHandler::relay(
+                        function,
+                        endpoint,
+                        Dataver::new(versions.on_off),
+                        relay.scope.clone(),
+                        renamer.clone(),
+                    ),
+                    bridged: BridgedHandler::new(
+                        device,
+                        Dataver::new(versions.bridged),
+                        &identity,
+                        renamer.clone(),
+                    ),
+                    bindings: bindings.clone(),
+                    binding: Dataver::new(versions.binding),
+                },
+            }));
+            continue;
+        }
         let parent = std::iter::once((identity.endpoint, None));
         let functions = identity
             .functions
@@ -225,6 +267,7 @@ pub(super) fn handler_from(
     Model {
         root,
         entries: built,
+        bindings,
     }
 }
 impl Model {
@@ -311,8 +354,12 @@ impl AsyncHandler for Model {
         }
     }
     fn lifecycle(&self, ctx: impl HandlerContext, op: LifecycleOp) -> Result<(), Error> {
-        // Frozen clusters keep no persistent lifecycle state.
-        self.root.lifecycle(ctx, op)
+        self.root.lifecycle(&ctx, op)?;
+        Handler::lifecycle(
+            &BindingHandler::new(Dataver::new(0), 0, &self.bindings).adapt(),
+            ctx,
+            op,
+        )
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
         let mut tasks = FuturesUnordered::new();

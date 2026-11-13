@@ -73,6 +73,18 @@ impl RawDescription {
             .standard("device", "light", 0x0000a001)
     }
 
+    /// Count physical relay services before per-channel contract recognition.
+    pub(crate) fn has_multiple_relay_services(&self) -> bool {
+        Description::parse(&self.instance)
+            .expect("a source description has already been validated")
+            .services
+            .iter()
+            .filter(|service| super::relay::is_relay_service(service))
+            .take(2)
+            .count()
+            > 1
+    }
+
     pub(crate) fn heater_feedback(
         &self,
         property: super::PropertyBinding,

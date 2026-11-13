@@ -17,7 +17,7 @@ use crate::{
     configuration::{
         CommittedConfiguration, GroupRelation, OperationKind, Plan, SourceDevice, SourceFacts,
     },
-    device::{Availability, CommandReceiver, DeviceKey, PhysicalDevice},
+    device::{Availability, CommandReceiver, DeviceKey, FunctionKey, PhysicalDevice, RelayMode},
 };
 use std::{collections::BTreeMap, rc::Rc};
 
@@ -113,6 +113,21 @@ impl SourceHandle {
             })
     }
 
+    /// The current source observation supersedes a saved publication mode.
+    pub(crate) fn relay_mode(&self, key: &FunctionKey) -> Option<RelayMode> {
+        self.0
+            .live
+            .borrow()
+            .devices
+            .get(&key.device.id)?
+            .admitted
+            .as_ref()?
+            .physical()
+            .function(&key.id)?
+            .snapshot()
+            .relay_mode()
+    }
+
     pub(crate) fn committed_graph(&self) -> Rc<crate::configuration::DerivedConfiguration> {
         self.0.graph.borrow().clone()
     }
@@ -161,6 +176,18 @@ impl SourceHandle {
             .filter(|(_, slot)| !slot.recompute_failed)
             .filter_map(|(did, slot)| slot.blocked.clone().map(|problem| (did.clone(), problem)))
             .collect::<BTreeMap<_, _>>();
+        let mut relay_modes = BTreeMap::new();
+        for work in live
+            .devices
+            .values()
+            .filter_map(|slot| slot.admitted.as_ref())
+        {
+            for function in work.physical().functions() {
+                if let Some(mode) = function.snapshot().relay_mode() {
+                    relay_modes.insert(function.function_key().clone(), mode);
+                }
+            }
+        }
         drop(live);
         let mut relations: Vec<GroupRelation> = self
             .0
@@ -206,6 +233,7 @@ impl SourceHandle {
             devices,
             relations,
             split_devices: self.0.split_devices.borrow().clone(),
+            relay_modes,
         }
     }
 

@@ -76,6 +76,51 @@ impl CommittedConfiguration {
                 }
             }
         }
+        let mut channel_keys = BTreeSet::new();
+        let mut channel_endpoints = BTreeSet::new();
+        for channel in &self.relay_channels {
+            validate_text(&channel.scope.uid)?;
+            validate_text(&channel.scope.home_id)?;
+            if !channel_keys.insert((&channel.scope.uid, &channel.scope.home_id, &channel.key))
+                || !channel_endpoints.insert(channel.endpoint)
+                || !(2..=65534).contains(&channel.endpoint)
+                || channel.configuration_version == 0
+                || channel.label.len() > 32
+                || !uuid::Uuid::parse_str(&channel.unique_id)
+                    .is_ok_and(|id| id.simple().to_string() == channel.unique_id)
+                || !unique_ids.insert(channel.unique_id.clone())
+            {
+                return Err("Committed relay identity is invalid or duplicated");
+            }
+            let device = self
+                .device(&channel.key.device)
+                .ok_or("Relay device identity is missing")?;
+            let function = device
+                .functions
+                .iter()
+                .find(|function| function.id == channel.key.id)
+                .ok_or("Relay function identity is missing")?;
+            if channel.endpoint != function.endpoint {
+                if endpoints.contains_key(&channel.endpoint) {
+                    return Err("Committed relay endpoint is duplicated");
+                }
+                reserve_endpoint(&mut endpoints, channel.endpoint, &channel.key.device)?;
+            }
+            if self.scope.as_ref() == Some(&channel.scope)
+                && device.native.as_ref().is_some_and(|native| {
+                    native
+                        .device()
+                        .functions()
+                        .iter()
+                        .find(|function| function.id() == channel.key.id)
+                        .is_some_and(|function| {
+                            function.kind() != crate::device::FunctionKind::Relay
+                        })
+                })
+            {
+                return Err("Committed relay function type is invalid");
+            }
+        }
         let mut sources = BTreeSet::new();
         for source in &self.descriptions {
             if !sources.insert(source.key.clone()) {

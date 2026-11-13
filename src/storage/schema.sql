@@ -74,7 +74,7 @@ CREATE TABLE publication_revocation (
 ) STRICT;
 
 INSERT INTO bridge_configuration (id, json)
-VALUES (1, '{"scope":null,"root_version":1,"devices":[],"descriptions":[],"groups":[],"split_devices":[],"temperature_bindings":[]}');
+VALUES (1, '{"scope":null,"root_version":1,"devices":[],"descriptions":[],"groups":[],"split_devices":[],"relay_channels":[],"temperature_bindings":[]}');
 
 -- Confirmed LAN credentials are separate from the published configuration.
 CREATE TABLE xiaomi_lan (

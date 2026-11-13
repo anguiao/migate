@@ -16,6 +16,153 @@ fn rig() -> Rig {
 }
 
 #[test]
+fn wired_relays_are_published_as_independent_accessories() {
+    block_on(rig().run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        for siid in [2, 3, 4] {
+            peer.value("one", binding(siid, 1), json!(false));
+            peer.value("one", binding(siid, 2), json!(0));
+        }
+        let control = &c;
+        c.peer(peer, |_| async move {
+            until(|| {
+                [2, 3, 4].iter().all(|siid| {
+                    function(&control.context.registry, "one", &format!("relay:{siid}"))
+                        .snapshot()
+                        .relay_mode()
+                        == Some(crate::device::RelayMode::Wired)
+                })
+            })
+            .await;
+            if let Some(plan) = control.publication.plan().unwrap() {
+                let prepared = control.publication.prepare(plan);
+                control.publication.apply(prepared).unwrap();
+            }
+            assert_eq!(control.publication.frozen().len(), 3);
+        })
+        .await;
+    }));
+}
+
+#[test]
+fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
+    use crate::matter::tests::support::PublishedRelayModel;
+    std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| block_on(rig().run_result_without_publication(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        for siid in [2, 3, 4] {
+            peer.value("one", binding(siid, 1), json!(false));
+            peer.value("one", binding(siid, 2), json!(0));
+        }
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            until(|| {
+                let work = control.context.live.borrow().devices["one"].admitted.clone().unwrap();
+                [2, 3, 4].iter().all(|siid| {
+                    let id = format!("relay:{siid}");
+                    let function = work.physical().function(&id).unwrap();
+                    function.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)
+                        && function.snapshot().power() == Some(Power::Off)
+                        && work.function_observer(&id).is_some_and(|observer| {
+                            work.source_binding_ready(&observer, binding(*siid, 2))
+                                && work.source_binding_ready(&observer, binding(*siid, 1))
+                        })
+                })
+            }).await;
+            let plan = control.publication.plan().unwrap().unwrap();
+            control.publication.apply(control.publication.prepare(plan)).unwrap();
+            let entries = control.publication.frozen();
+            let mut endpoints = entries.iter().map(|entry| entry.identity.endpoint).collect::<Vec<_>>();
+            endpoints.sort();
+            assert_eq!(endpoints.len(), 3);
+            let endpoint = |id: &str| entries.iter().find(|entry| entry.identity.relay.as_ref().unwrap().function_id == id).unwrap().identity.endpoint;
+            let model = PublishedRelayModel::new(&control.publication, &control.store);
+            model.check_topology(&endpoints);
+            let ep2 = endpoint("relay:2");
+            let ep3 = endpoint("relay:3");
+            let ep4 = endpoint("relay:4");
+            assert!(!model.power(ep2).await.unwrap());
+            assert!(!model.power(ep3).await.unwrap());
+            let original_id = model.unique_id(ep3).await;
+            assert_ne!(model.unique_id(ep2).await, original_id);
+            let other_label = model.label(ep2).await;
+            model.write_label(ep3, "Middle relay").await.unwrap();
+            assert_eq!(model.label(ep3).await, "Middle relay");
+            assert_eq!(model.label(ep2).await, other_label);
+            assert!(model.write_label(ep3, &"x".repeat(33)).await.is_err());
+            model.invoke(ep3, 1).await.unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 3), 1);
+            assert_eq!(peer.count("rpcReq", "one", 2), 0);
+            assert_eq!(peer.count("rpcReq", "one", 4), 0);
+            assert!(!model.power(ep3).await.unwrap());
+            peer.notify_value("one", binding(3, 1), json!(true), false);
+            until(|| function(&control.context.registry, "one", "relay:3").snapshot().power() == Some(Power::On)).await;
+            assert!(model.power(ep3).await.unwrap());
+            assert!(!model.power(ep4).await.unwrap());
+
+            // The Home request is already queued behind an explicit terminal
+            // request when a new mode arrives, before publication can commit.
+            peer.state.borrow_mut().hold_writes = true;
+            let relay = function(&control.context.registry, "one", "relay:3");
+            let mut first = Box::pin(relay.execute(Command::On));
+            assert!(poll_once(first.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 3) == 2).await;
+            let mut queued = Box::pin(model.invoke(ep3, 0));
+            assert!(poll_once(queued.as_mut()).await.is_none());
+            let database = rusqlite::Connection::open(control.store.path()).unwrap();
+            database.execute_batch("CREATE TRIGGER fail_relay_save BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+            assert!(model.write_label(ep3, "Unsaved").await.is_err());
+            assert_eq!(model.label(ep3).await, "Middle relay");
+            peer.notify_value("one", binding(3, 2), json!(1), false);
+            until(|| function(&control.context.registry, "one", "relay:3").snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)).await;
+            let plan = control.publication.plan().unwrap().unwrap();
+            assert!(control.publication.apply(control.publication.prepare(plan)).is_err());
+            assert_eq!(control.publication.frozen().len(), 3);
+            peer.state.borrow_mut().hold_writes = false;
+            peer.release("one", 3, accepted("one", 3, 0)).await;
+            first.await.unwrap();
+            assert!(queued.await.is_err());
+            assert!(model.invoke(ep3, 0).await.is_err());
+            assert_eq!(peer.count("rpcReq", "one", 3), 2);
+            database.execute_batch("DROP TRIGGER fail_relay_save").unwrap();
+            let plan = control.publication.plan().unwrap().unwrap();
+            control.publication.apply(control.publication.prepare(plan)).unwrap();
+            assert_eq!(control.publication.frozen().len(), 2);
+            assert!(model.invoke(ep3, 0).await.is_err());
+            let status = crate::terminal::AuthStatus::new(control.context.status.borrow().auth.clone(), "/bin/migate".into(), "/data".into());
+            let terminal = crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
+            assert!(terminal.handle_line("off one relay:3", 0).await.unwrap().unwrap().contains("command accepted"));
+            assert_eq!(peer.count("rpcReq", "one", 3), 3);
+
+            for siid in [2, 4] { peer.notify_value("one", binding(siid, 2), json!(1), false); }
+            until(|| [2, 3, 4].iter().all(|siid|
+                function(&control.context.registry, "one", &format!("relay:{siid}"))
+                    .snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless))).await;
+            let plan = control.publication.plan().unwrap().unwrap();
+            control.publication.apply(control.publication.prepare(plan)).unwrap();
+            assert!(control.publication.frozen().is_empty());
+            for siid in [2, 3, 4] { peer.notify_value("one", binding(siid, 2), json!(0), false); }
+            until(|| [2, 3, 4].iter().all(|siid|
+                function(&control.context.registry, "one", &format!("relay:{siid}"))
+                    .snapshot().relay_mode() == Some(crate::device::RelayMode::Wired))).await;
+            let plan = control.publication.plan().unwrap().unwrap();
+            control.publication.apply(control.publication.prepare(plan)).unwrap();
+            let restored = control.publication.frozen();
+            assert_eq!(restored.len(), 3);
+            assert!(restored.iter().any(|entry| entry.identity.endpoint == ep3));
+            let model = PublishedRelayModel::new(&control.publication, &control.store);
+            assert_eq!(model.label(ep3).await, "Middle relay");
+            assert_eq!(model.unique_id(ep3).await, original_id);
+            assert_eq!(peer.count("rpcReq", "one", 2), 0);
+            assert_eq!(peer.count("rpcReq", "one", 3), 3);
+            assert_eq!(peer.count("rpcReq", "one", 4), 0);
+            assert_eq!(control.store.devices().load_configuration().unwrap(), control.publication.current().configuration);
+        }).await;
+    })).unwrap()).unwrap().join().unwrap();
+}
+
+#[test]
 fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
     block_on(rig().run(|c| async move {
         c.announce();

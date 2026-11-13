@@ -3,10 +3,11 @@
 
 use super::{
     CommittedConfiguration, CommittedDevice, CommittedFunction, DerivedConfiguration,
-    OperationKind, Plan, PlanError, PlanInput, PlanOperation, SourceDevice, default_device_label,
-    import_label, same_control_description,
+    OperationKind, Plan, PlanError, PlanInput, PlanOperation, RelayChannel, RelayType,
+    SourceDevice, default_device_label, import_label, same_control_description,
 };
-use crate::device::{DeviceKey, FunctionDescription};
+use crate::device::{DeviceKey, FunctionDescription, FunctionKey, FunctionKind};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Derive the final candidate once, then compare its publication through the
@@ -57,6 +58,12 @@ pub(crate) fn plan<Shape: PartialEq>(
             reserved.insert(function.endpoint);
         }
     }
+    reserved.extend(
+        current
+            .relay_channels
+            .iter()
+            .map(|channel| channel.endpoint),
+    );
     let mut allocator = Allocator::new(reserved);
     let clear_revocations = facts
         .devices
@@ -133,6 +140,86 @@ pub(crate) fn plan<Shape: PartialEq>(
     } else {
         BTreeMap::new()
     };
+    let mut relay_channels = current.relay_channels.clone();
+    for device in &next_devices {
+        let Some(native) = &device.native else {
+            continue;
+        };
+        let relays = native
+            .device()
+            .functions()
+            .iter()
+            .filter(|function| function.kind() == FunctionKind::Relay)
+            .collect::<Vec<_>>();
+        for function in &relays {
+            let key = FunctionKey::new(device.key.clone(), function.id());
+            if let Some(channel) = relay_channels
+                .iter_mut()
+                .find(|channel| channel.scope == scope && channel.key == key)
+            {
+                if let Some(mode) = facts.relay_modes.get(&key) {
+                    channel.mode = Some(*mode);
+                }
+                continue;
+            }
+            let reserved_endpoint = device
+                .functions
+                .iter()
+                .find(|item| item.id == key.id)
+                .unwrap()
+                .endpoint;
+            let endpoint = if relay_channels
+                .iter()
+                .any(|channel| channel.endpoint == reserved_endpoint)
+            {
+                allocator.allocate(&device.key)?
+            } else {
+                reserved_endpoint
+            };
+            let raw = descriptions
+                .iter()
+                .find(|raw| raw.key == device.key)
+                .unwrap();
+            let panel_label = raw
+                .name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(import_label)
+                .unwrap_or_else(|| default_device_label(&raw.model, &device.key.id));
+            let siid = function.power().unwrap().siid;
+            let label = if !raw.has_multiple_relay_services() {
+                panel_label
+            } else {
+                facts
+                    .split_devices
+                    .iter()
+                    .find(|split| split.parent_did == device.key.id && split.siid == siid)
+                    .and_then(|split| split.name.as_deref())
+                    .filter(|name| !name.trim().is_empty())
+                    .map(import_label)
+                    .unwrap_or_else(|| relay_fallback_label(&panel_label, siid))
+            };
+            let mut hash = Sha256::new();
+            for part in [&device.unique_id, &scope.uid, &scope.home_id, &key.id] {
+                hash.update((part.len() as u64).to_be_bytes());
+                hash.update(part.as_bytes());
+            }
+            let digest = hash.finalize();
+            let unique_id = uuid::Uuid::from_bytes(digest[..16].try_into().unwrap())
+                .simple()
+                .to_string();
+            relay_channels.push(RelayChannel {
+                scope: scope.clone(),
+                key: key.clone(),
+                endpoint,
+                unique_id,
+                label,
+                configuration_version: 1,
+                mode: facts.relay_modes.get(&key).copied(),
+                device_type: RelayType::Switch,
+            });
+        }
+    }
     let mut configuration = CommittedConfiguration {
         scope: Some(scope),
         root_version: current.root_version,
@@ -140,10 +227,34 @@ pub(crate) fn plan<Shape: PartialEq>(
         descriptions,
         groups: facts.relations,
         split_devices: facts.split_devices,
+        relay_channels,
         temperature_bindings,
     };
     let derived = configuration.derive();
-    let mut root_changed = current_derived.published != derived.published;
+    let mut root_changed = (current.scope != configuration.scope
+        && (!current_derived.published_relays.is_empty() || !derived.published_relays.is_empty()))
+        || current_derived.published != derived.published
+        || current_derived.published_relays != derived.published_relays;
+    for channel in &mut configuration.relay_channels {
+        if let Some(previous) = current
+            .relay_channels
+            .iter()
+            .find(|old| old.scope == channel.scope && old.key == channel.key)
+        {
+            let old_visible = current.scope.as_ref() == Some(&channel.scope)
+                && current_derived.published_relays.contains(&channel.key);
+            let new_visible = configuration.scope.as_ref() == Some(&channel.scope)
+                && derived.published_relays.contains(&channel.key);
+            if old_visible != new_visible {
+                channel.configuration_version = previous
+                    .configuration_version
+                    .checked_add(1)
+                    .ok_or_else(|| PlanError::VersionExhausted {
+                        key: channel.key.device.clone(),
+                    })?;
+            }
+        }
+    }
     for device in &mut configuration.devices {
         if current.device(&device.key).is_none() {
             continue;
@@ -202,6 +313,7 @@ pub(crate) fn plan<Shape: PartialEq>(
         .any(|operation| !matches!(operation.kind, OperationKind::Reused));
     let rebuild = current.scope != configuration.scope
         || current_derived.published != derived.published
+        || current_derived.published_relays != derived.published_relays
         || current_derived.rules != derived.rules
         || instances_changed;
     let changed = &configuration != current || !clear_revocations.is_empty();
@@ -213,6 +325,15 @@ pub(crate) fn plan<Shape: PartialEq>(
         rebuild,
         changed,
     })
+}
+
+fn relay_fallback_label(panel: &str, siid: u32) -> String {
+    let suffix = format!(" ({siid})");
+    let mut end = panel.len().min(32 - suffix.len());
+    while !panel.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &panel[..end])
 }
 
 fn device_label(device: &SourceDevice) -> String {

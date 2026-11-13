@@ -79,7 +79,9 @@ pub(crate) fn fixed_shape_with_battery<'a>(
             .map(|function| FixedFunction {
                 id: function.id.clone(),
                 kind: match function.kind {
-                    FunctionKind::Relay => unreachable!("physical relays are not yet published"),
+                    FunctionKind::Relay => {
+                        unreachable!("relay accessories have independent endpoints")
+                    }
                     FunctionKind::Outlet => FixedKind::Outlet,
                     FunctionKind::Curtain => FixedKind::Curtain,
                     FunctionKind::Fan {

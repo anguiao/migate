@@ -20,7 +20,7 @@ pub(crate) use bridge::{Bridge, LabelWriter};
 pub use pairing::PairingEvent;
 pub(crate) use storage::subscription_keys;
 
-pub(crate) use model::{FrozenEntry, PublishedFunction, PublishedIdentity};
+pub(crate) use model::{FrozenEntry, PublishedFunction, PublishedIdentity, PublishedRelay};
 pub(crate) use sensors::measurement_mapping_issue;
 pub(crate) use shape::fixed_shape_with_battery;
 

@@ -29,7 +29,7 @@ pub(in crate::matter) use context::Context;
 pub(super) use context::attr;
 pub(super) use fan::{fan_device, fan_device_levels, fan_model, observe_fan_state};
 pub(super) use reports::{read_bytes, report_dataver, report_value};
-pub(crate) use source::PublishedLightModel;
+pub(crate) use source::{PublishedLightModel, PublishedRelayModel};
 
 use super::*;
 use crate::{
@@ -116,6 +116,7 @@ pub(in crate::matter) fn entry(
                     endpoint: *endpoint,
                 })
                 .collect(),
+            relay: None,
         },
     }
 }
@@ -137,6 +138,28 @@ pub(super) struct NoLabels;
 impl LabelWriter for NoLabels {
     fn write_label(&self, _: &DeviceKey, _: &str) -> Result<(), StorageError> {
         panic!("label writes require an application fixture")
+    }
+    fn relay_label(
+        &self,
+        _: &crate::configuration::Scope,
+        _: &crate::device::FunctionKey,
+    ) -> Option<String> {
+        None
+    }
+    fn write_relay_label(
+        &self,
+        _: &crate::configuration::Scope,
+        _: &crate::device::FunctionKey,
+        _: &str,
+    ) -> Result<(), StorageError> {
+        panic!("relay label writes require an application fixture")
+    }
+    fn relay_accessible(
+        &self,
+        _: &crate::configuration::Scope,
+        _: &crate::device::FunctionKey,
+    ) -> bool {
+        false
     }
 }
 

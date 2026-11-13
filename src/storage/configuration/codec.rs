@@ -2,10 +2,10 @@
 
 use crate::{
     configuration::{
-        CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, Scope,
-        SplitDevice,
+        CommittedConfiguration, CommittedDevice, CommittedFunction, GroupRelation, RelayChannel,
+        RelayType, Scope, SplitDevice,
     },
-    device::{DeviceKey, FunctionKey},
+    device::{DeviceKey, FunctionKey, RelayMode},
     xiaomi::capability::RawDescription,
 };
 use serde::{Deserialize, Deserializer, Serialize};
@@ -35,6 +35,7 @@ struct WireConfiguration {
     descriptions: Vec<WireDescription>,
     groups: Vec<WireGroup>,
     split_devices: Vec<WireSplitDevice>,
+    relay_channels: Vec<WireRelayChannel>,
     temperature_bindings: Vec<WireTemperatureBinding>,
 }
 
@@ -144,6 +145,34 @@ struct WireSplitDevice {
     name: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRelayChannel {
+    scope: WireScope,
+    key: WireFunctionKey,
+    endpoint: u16,
+    unique_id: String,
+    label: String,
+    configuration_version: u32,
+    #[serde(default, deserialize_with = "present_option")]
+    mode: Option<Option<WireRelayMode>>,
+    device_type: WireRelayType,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireRelayMode {
+    Wired,
+    Wireless,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireRelayType {
+    Switch,
+    Light,
+}
+
 impl WireConfiguration {
     fn from_configuration(configuration: &CommittedConfiguration) -> Self {
         Self {
@@ -175,6 +204,29 @@ impl WireConfiguration {
                     parent_did: split.parent_did.clone(),
                     siid: split.siid,
                     name: split.name.clone(),
+                })
+                .collect(),
+            relay_channels: configuration
+                .relay_channels
+                .iter()
+                .map(|channel| WireRelayChannel {
+                    scope: WireScope {
+                        uid: channel.scope.uid.clone(),
+                        home_id: channel.scope.home_id.clone(),
+                    },
+                    key: WireFunctionKey::from_key(&channel.key),
+                    endpoint: channel.endpoint,
+                    unique_id: channel.unique_id.clone(),
+                    label: channel.label.clone(),
+                    configuration_version: channel.configuration_version,
+                    mode: Some(channel.mode.map(|mode| match mode {
+                        RelayMode::Wired => WireRelayMode::Wired,
+                        RelayMode::Wireless => WireRelayMode::Wireless,
+                    })),
+                    device_type: match channel.device_type {
+                        RelayType::Switch => WireRelayType::Switch,
+                        RelayType::Light => WireRelayType::Light,
+                    },
                 })
                 .collect(),
             temperature_bindings: configuration
@@ -238,6 +290,34 @@ impl WireConfiguration {
                     name: split.name,
                 })
                 .collect(),
+            relay_channels: self
+                .relay_channels
+                .into_iter()
+                .map(|channel| {
+                    Ok(RelayChannel {
+                        scope: Scope {
+                            uid: channel.scope.uid,
+                            home_id: channel.scope.home_id,
+                        },
+                        key: channel.key.into_key(),
+                        endpoint: channel.endpoint,
+                        unique_id: channel.unique_id,
+                        label: channel.label,
+                        configuration_version: channel.configuration_version,
+                        mode: channel
+                            .mode
+                            .ok_or("Stored relay mode is missing")?
+                            .map(|mode| match mode {
+                                WireRelayMode::Wired => RelayMode::Wired,
+                                WireRelayMode::Wireless => RelayMode::Wireless,
+                            }),
+                        device_type: match channel.device_type {
+                            WireRelayType::Switch => RelayType::Switch,
+                            WireRelayType::Light => RelayType::Light,
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, &'static str>>()?,
             temperature_bindings,
         };
         configuration.validate()?;
