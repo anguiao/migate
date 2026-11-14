@@ -1,5 +1,6 @@
 use crate::{
     app::App,
+    configuration::RelayType,
     device::{Availability, DeviceRequest, RelayMode},
     matter::tests::support::PublishedRelayModel,
     storage::{Store, tests::fixtures},
@@ -7,6 +8,22 @@ use crate::{
 };
 use futures_lite::future::{block_on, poll_once};
 use std::rc::Rc;
+
+fn saved_relay(store: &Store, mode: RelayMode) -> crate::configuration::CommittedConfiguration {
+    let fixture = SourceFixture::new(
+        "panel",
+        "zimi.switch.dhkg01",
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/miot/zimi-dhkg01.json"
+        ))
+        .unwrap(),
+    );
+    let mut configuration = fixtures::planned(store, vec![fixture]);
+    configuration.relay_channels[0].mode = Some(mode);
+    configuration.relay_channels[0].label = "Saved relay".into();
+    fixtures::save(store, &configuration);
+    configuration
+}
 
 #[test]
 fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads() {
@@ -16,18 +33,7 @@ fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads()
             block_on(async {
                 let directory = tempfile::tempdir().unwrap();
                 let store = Store::open(directory.path()).unwrap();
-                let fixture = SourceFixture::new(
-                    "panel",
-                    "zimi.switch.dhkg01",
-                    serde_json::from_str(include_str!(
-                        "../../../tests/fixtures/miot/zimi-dhkg01.json"
-                    ))
-                    .unwrap(),
-                );
-                let mut configuration = fixtures::planned(&store, vec![fixture]);
-                configuration.relay_channels[0].mode = Some(RelayMode::Wired);
-                configuration.relay_channels[0].label = "Saved relay".into();
-                fixtures::save(&store, &configuration);
+                let configuration = saved_relay(&store, RelayMode::Wired);
                 let endpoint = configuration.relay_channels[0].endpoint;
                 let unique_id = configuration.relay_channels[0].unique_id.clone();
                 drop(store);
@@ -96,17 +102,7 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
-        let fixture = SourceFixture::new(
-            "panel",
-            "zimi.switch.dhkg01",
-            serde_json::from_str(include_str!(
-                "../../../tests/fixtures/miot/zimi-dhkg01.json"
-            ))
-            .unwrap(),
-        );
-        let mut configuration = fixtures::planned(&store, vec![fixture]);
-        configuration.relay_channels[0].mode = Some(RelayMode::Wireless);
-        fixtures::save(&store, &configuration);
+        let configuration = saved_relay(&store, RelayMode::Wireless);
         let source = AppSource::new(&store, None);
         source.confirm_all();
         let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
@@ -209,4 +205,70 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
             after.relay_channels[0].unique_id
         );
     });
+}
+
+#[test]
+fn mapping_rebuild_clears_late_subscriptions_and_commits_new_source_facts() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let configuration = saved_relay(&store, RelayMode::Wired);
+    let key = &configuration.relay_channels[0].key;
+    let source = AppSource::new(&store, None);
+    source.confirm_all();
+    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let subscription = crate::matter::subscription_keys().start;
+    let database = rusqlite::Connection::open(store.path()).unwrap();
+
+    store
+        .matter()
+        .put(subscription, b"old subscription")
+        .unwrap();
+    assert!(app.map_relay_type(key, RelayType::Light).unwrap());
+    assert!(!store.matter().contains(subscription).unwrap());
+    let mapped = store.devices().load_configuration().unwrap();
+    assert_eq!(mapped.relay_channels[0].device_type, RelayType::Light);
+
+    // The running Matter instance can still write a subscription before it stops.
+    store
+        .matter()
+        .put(subscription, b"late subscription")
+        .unwrap();
+    database
+        .execute_batch(
+            "CREATE TRIGGER reject_rewrite BEFORE UPDATE ON bridge_configuration
+         BEGIN SELECT RAISE(ABORT, 'already committed'); END;",
+        )
+        .unwrap();
+    let plan = app.plan().unwrap().unwrap();
+    assert!(plan.rebuild);
+    app.apply(app.prepare(plan)).unwrap();
+    assert_eq!(store.devices().load_configuration().unwrap(), mapped);
+    assert!(!store.matter().contains(subscription).unwrap());
+    assert!(app.plan().unwrap().is_none());
+    database
+        .execute_batch("DROP TRIGGER reject_rewrite")
+        .unwrap();
+
+    assert!(app.map_relay_type(key, RelayType::Switch).unwrap());
+    source.directory_name(&key.device, "Renamed panel");
+    source
+        .physical
+        .as_ref()
+        .unwrap()
+        .function(&key.id)
+        .unwrap()
+        .observe_relay_mode(RelayMode::Wireless);
+    store
+        .matter()
+        .put(subscription, b"another late subscription")
+        .unwrap();
+    let plan = app.plan().unwrap().unwrap();
+    assert!(plan.changed && plan.rebuild);
+    app.apply(app.prepare(plan)).unwrap();
+    let saved = store.devices().load_configuration().unwrap();
+    assert_eq!(saved.relay_channels[0].mode, Some(RelayMode::Wireless));
+    assert_eq!(saved.relay_channels[0].device_type, RelayType::Switch);
+    assert_eq!(saved.descriptions[0].name.as_deref(), Some("Renamed panel"));
+    assert!(app.frozen().is_empty());
+    assert!(!store.matter().contains(subscription).unwrap());
 }

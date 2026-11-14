@@ -1,6 +1,6 @@
 use super::{StorageError, Store};
 use rusqlite::OptionalExtension;
-use std::path::Path;
+use std::{ops::Range, path::Path};
 
 /// Raw Matter records. Their encoding and key allocation belong to the protocol stack.
 #[derive(Clone)]
@@ -69,4 +69,20 @@ impl MatterStore {
                     .database_error(format!("delete Matter data for key {key}"), e)
             })
     }
+
+    pub(crate) fn delete_range(&self, keys: Range<u16>) -> Result<(), StorageError> {
+        delete_range(self.store.connection(), keys)
+            .map_err(|error| self.store.database_error("delete Matter data range", error))
+    }
+}
+
+pub(super) fn delete_range(
+    connection: &rusqlite::Connection,
+    keys: Range<u16>,
+) -> rusqlite::Result<()> {
+    connection.execute(
+        "DELETE FROM blobs WHERE key >= ?1 AND key < ?2",
+        [keys.start, keys.end],
+    )?;
+    Ok(())
 }

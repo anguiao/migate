@@ -61,11 +61,7 @@ impl DeviceStore {
             .unchecked_transaction()
             .map_err(|error| self.store.database_error(operation, error))?;
         if let Some(keys) = subscription_keys {
-            transaction
-                .execute(
-                    "DELETE FROM blobs WHERE key >= ?1 AND key < ?2",
-                    params![keys.start, keys.end],
-                )
+            super::matter::delete_range(&transaction, keys)
                 .map_err(|error| self.store.database_error(operation, error))?;
         }
         let changed = transaction

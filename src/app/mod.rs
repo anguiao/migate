@@ -279,11 +279,8 @@ impl App {
                 ));
             }
         };
-        if self.rebuild_pending.get() {
-            plan.changed = true;
-            plan.rebuild = true;
-        }
-        if !plan.changed {
+        plan.rebuild |= self.rebuild_pending.get();
+        if !plan.changed && !plan.rebuild {
             self.pending.set(false);
             self.failure.borrow_mut().take();
             return Ok(None);
@@ -299,34 +296,43 @@ impl App {
         Prepared { plan, resources }
     }
 
-    /// Commit the prepared configuration, install the prepared source
-    /// instances and switch the effective view. The caller guarantees that no
-    /// await happens between `prepare` and `apply`.
+    /// Install new source facts, or finish rebuilding an already committed mapping.
+    /// The caller guarantees that no await happens between `prepare` and `apply`.
     pub(crate) fn apply(&self, prepared: Prepared) -> Result<(), StorageError> {
-        let result = self.store.devices().commit_configuration_with_reset(
-            &prepared.plan.configuration,
-            &prepared.plan.clear_revocations,
-            prepared.plan.rebuild.then(matter::subscription_keys),
-        );
+        let plan = prepared.plan;
+        let result = if plan.changed {
+            self.store.devices().commit_configuration_with_reset(
+                &plan.configuration,
+                &plan.clear_revocations,
+                plan.rebuild.then(matter::subscription_keys),
+            )
+        } else {
+            // The retiring instance could persist subscriptions after map-type returned.
+            self.store
+                .matter()
+                .delete_range(matter::subscription_keys())
+        };
         if let Err(error) = result {
             *self.failure.borrow_mut() = Some(error.to_string());
             return Err(error);
         }
-        let entries = self.source.install(&prepared.plan, prepared.resources);
-        let published = published_registry(&prepared.plan.derived.published, &entries);
-        activate_temperature_bindings(&prepared.plan.configuration, &entries);
-        let root_version = prepared.plan.configuration.root_version;
-        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-            configuration: prepared.plan.configuration,
-            derived: prepared.plan.derived,
-            entries,
-            published,
-        });
-        self.committed.notify(usize::MAX);
+        if plan.changed {
+            let entries = self.source.install(&plan, prepared.resources);
+            let published = published_registry(&plan.derived.published, &entries);
+            activate_temperature_bindings(&plan.configuration, &entries);
+            let root_version = plan.configuration.root_version;
+            *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
+                configuration: plan.configuration,
+                derived: plan.derived,
+                entries,
+                published,
+            });
+            self.committed.notify(usize::MAX);
+            log::info!("Bridge configuration committed at root version {root_version}");
+        }
         self.failure.borrow_mut().take();
         self.pending.set(false);
         self.rebuild_pending.set(false);
-        log::info!("Bridge configuration committed at root version {root_version}");
         Ok(())
     }
 
