@@ -65,7 +65,7 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.publication.current().configuration.relay_channels.len() >= 3).await;
+        until(|| c.publication.frozen().len() >= 3).await;
         let current = c.publication.current();
         assert_eq!(current.configuration.split_devices.len(), 1);
         assert_eq!(current.configuration.relay_channels.len(), 3);
@@ -77,7 +77,6 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
             .unwrap();
         assert_eq!(middle.key.device.id, "panel");
         assert_eq!(middle.label, "Kitchen");
-        until(|| c.publication.frozen().len() == 3).await;
         assert!(
             c.publication
                 .frozen()
@@ -89,23 +88,61 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
             .execute(Command::On)
             .await
             .unwrap();
-        let cloud = c.cloud.lock().unwrap();
-        assert!(
-            cloud
-                .detail_requests
-                .iter()
-                .flatten()
-                .all(|did| did != "alias")
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            assert!(
+                cloud
+                    .detail_requests
+                    .iter()
+                    .flatten()
+                    .all(|did| did != "alias")
+            );
+            assert!(
+                cloud
+                    .property_reads
+                    .iter()
+                    .all(|(did, _, _)| did == "panel")
+            );
+            assert_eq!(cloud.property_writes.len(), 1);
+            let (did, siid, piid, value, _) = &cloud.property_writes[0];
+            assert_eq!((did.as_str(), *siid, *piid, *value), ("panel", 3, 1, true));
+            cloud.catalog_overrides.get_mut("alias").unwrap()["extra"]["split"]["moduleId"] =
+                json!("3");
+        }
+        c.context.request_sync();
+        until(|| {
+            c.context.status.borrow().catalog_problem.is_some()
+                || c.context.live.borrow().devices.contains_key("alias")
+        })
+        .await;
+        assert!(c.context.status.borrow().catalog_problem.is_some());
+        assert!(!c.context.live.borrow().devices.contains_key("alias"));
+        assert_eq!(
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .split_devices,
+            current.configuration.split_devices
         );
-        assert!(
-            cloud
-                .property_reads
-                .iter()
-                .all(|(did, _, _)| did == "panel")
+        assert_eq!(c.publication.frozen().len(), 3);
+        c.cloud
+            .lock()
+            .unwrap()
+            .catalog_overrides
+            .get_mut("alias")
+            .unwrap()["extra"]["split"]["moduleId"] = json!(3);
+        c.clock.advance(Duration::from_secs(3));
+        c.context.request_sync();
+        until(|| c.context.status.borrow().catalog_problem.is_none()).await;
+        assert_eq!(
+            c.store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .relay_channels,
+            current.configuration.relay_channels
         );
-        assert_eq!(cloud.property_writes.len(), 1);
-        let (did, siid, piid, value, _) = &cloud.property_writes[0];
-        assert_eq!((did.as_str(), *siid, *piid, *value), ("panel", 3, 1, true));
     }));
 }
 

@@ -73,12 +73,14 @@ fn untyped_split_needs_a_known_panel_parent_from_the_complete_catalog() {
     typed_alias["extra"]["split"]["moduleId"] = json!(2);
     let mut typed_light = ordinary("typed-light");
     typed_light["extra"] = json!({"split":{"parentId":"panel","moduleId":3}});
+    let mut light_child = split("light-child", "light");
+    light_child["extra"]["split"]["moduleId"] = json!("3");
     let catalog = read_catalog(vec![
         response(catalog_page(
             vec![
                 split("channel", "panel"),
                 split("unknown-parent", "absent"),
-                split("light-child", "light"),
+                light_child,
                 split("nested-child", "typed-alias"),
                 typed_light,
             ],

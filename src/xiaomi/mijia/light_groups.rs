@@ -119,6 +119,20 @@ struct RawSplit {
     module_id: Option<Box<RawValue>>,
 }
 
+struct SplitParent {
+    did: String,
+    siid: Option<u32>,
+}
+
+impl SplitParent {
+    fn into_panel_split(self, operation: &'static str) -> Result<CloudSplit, CloudError> {
+        Ok(CloudSplit {
+            parent_did: self.did,
+            siid: self.siid.ok_or_else(|| CloudError::protocol(operation))?,
+        })
+    }
+}
+
 fn present_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
 where
     D: Deserializer<'de>,
@@ -169,9 +183,16 @@ impl MijiaClient {
                     .spec_type
                     .as_deref()
                     .is_some_and(crate::xiaomi::capability::is_load_panel_type);
-                let split = if panel {
-                    read_panel_split(record.extra.as_deref())
-                        .map_err(|()| CloudError::protocol(operation))?
+                let split = if panel || record.spec_type.is_none() {
+                    match read_split_parent(record.extra.as_deref()) {
+                        Ok(Some(parent)) if panel => Some(parent.into_panel_split(operation)?),
+                        Ok(Some(parent)) => {
+                            untyped_splits.push((devices.len(), parent));
+                            None
+                        }
+                        Err(()) if panel => return Err(CloudError::protocol(operation)),
+                        _ => None,
+                    }
                 } else {
                     None
                 };
@@ -180,11 +201,6 @@ impl MijiaClient {
                     .is_some()
                 {
                     return Err(CloudError::protocol(operation));
-                }
-                if record.spec_type.is_none()
-                    && let Ok(Some(split)) = read_panel_split(record.extra.as_deref())
-                {
-                    untyped_splits.push((devices.len(), split));
                 }
                 let group = read_group(record.extra.as_deref());
                 devices.push(CloudCatalogDevice {
@@ -209,9 +225,9 @@ impl MijiaClient {
             }
         }
         // A split without its own type needs a panel parent, possibly on a later page.
-        for (index, split) in untyped_splits {
-            if panel_parent_by_did.get(&split.parent_did) == Some(&true) {
-                devices[index].split = Some(split);
+        for (index, parent) in untyped_splits {
+            if panel_parent_by_did.get(&parent.did) == Some(&true) {
+                devices[index].split = Some(parent.into_panel_split(operation)?);
             }
         }
         resolve_group_identity_conflicts(&mut devices);
@@ -220,7 +236,7 @@ impl MijiaClient {
     }
 }
 
-fn read_panel_split(extra: Option<&RawValue>) -> Result<Option<CloudSplit>, ()> {
+fn read_split_parent(extra: Option<&RawValue>) -> Result<Option<SplitParent>, ()> {
     let Some(extra) = extra else { return Ok(None) };
     if !is_object(extra) {
         return Err(());
@@ -235,13 +251,15 @@ fn read_panel_split(extra: Option<&RawValue>) -> Result<Option<CloudSplit>, ()> 
     let split: RawSplit = serde_json::from_str(split.get()).map_err(|_| ())?;
     match (split.parent_id, split.module_id) {
         (None, None) => Ok(None),
-        (Some(parent), Some(siid)) => {
-            let parent_did: String = serde_json::from_str(parent.get()).map_err(|_| ())?;
-            let siid: u32 = serde_json::from_str(siid.get()).map_err(|_| ())?;
-            if !valid_description(&parent_did) || siid == 0 {
+        (Some(parent), module_id) => {
+            let did: String = serde_json::from_str(parent.get()).map_err(|_| ())?;
+            if !valid_description(&did) {
                 return Err(());
             }
-            Ok(Some(CloudSplit { parent_did, siid }))
+            let siid = module_id
+                .and_then(|value| serde_json::from_str::<u32>(value.get()).ok())
+                .filter(|siid| *siid != 0);
+            Ok(Some(SplitParent { did, siid }))
         }
         _ => Err(()),
     }
