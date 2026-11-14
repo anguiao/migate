@@ -9,13 +9,14 @@
 
 use super::{
     model::AdapterError,
-    state::{Context, LogicalSink},
+    state::{Context, Live, LogicalSink},
     work::DeviceWork,
 };
 use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
-        CommittedConfiguration, GroupRelation, OperationKind, Plan, SourceDevice, SourceFacts,
+        CommittedConfiguration, GroupRelation, OperationKind, Plan, Scope, SourceDevice,
+        SourceFacts,
     },
     device::{Availability, CommandReceiver, DeviceKey, FunctionKey, PhysicalDevice, RelayMode},
 };
@@ -47,6 +48,26 @@ pub(crate) struct PreparedSource {
 pub(crate) struct PreparedSources {
     installed: Vec<PreparedSource>,
     removed: Vec<DeviceKey>,
+}
+
+impl Live {
+    fn accessible_work(&self, scope: &Scope, key: &DeviceKey) -> Option<&DeviceWork> {
+        let slot = self.devices.get(&key.id)?;
+        let work = slot.admitted.as_deref()?;
+        (self.scope.as_ref() == Some(scope)
+            && key.source == "xiaomi"
+            && slot.confirmed
+            && ((slot.cloud_access.is_some() && !slot.cloud_forbidden)
+                || slot.access.as_ref().is_some_and(|access| {
+                    access.as_ref().is_ok_and(|access| access.spec_v2_access)
+                }))
+            && slot
+                .committed
+                .as_ref()
+                .is_some_and(|source| source.raw.key == *key)
+            && !work.life.is_closed())
+        .then_some(work)
+    }
 }
 
 impl SourceHandle {
@@ -87,45 +108,25 @@ impl SourceHandle {
 
     /// Binding requires confirmed membership and unrevoked source authority,
     /// but does not require the device to be online.
-    pub(crate) fn binding_accessible(
-        &self,
-        scope: &Option<crate::configuration::Scope>,
-        key: &DeviceKey,
-    ) -> bool {
+    pub(crate) fn binding_accessible(&self, scope: &Option<Scope>, key: &DeviceKey) -> bool {
         let live = self.0.live.borrow();
-        live.scope == *scope
-            && live.scope.is_some()
-            && live.devices.get(&key.id).is_some_and(|slot| {
-                key.source == "xiaomi"
-                    && slot.confirmed
-                    && ((slot.cloud_access.is_some() && !slot.cloud_forbidden)
-                        || slot.access.as_ref().is_some_and(|access| {
-                            access.as_ref().is_ok_and(|access| access.spec_v2_access)
-                        }))
-                    && slot
-                        .committed
-                        .as_ref()
-                        .is_some_and(|source| source.raw.key == *key)
-                    && slot
-                        .admitted
-                        .as_ref()
-                        .is_some_and(|work| !work.life.is_closed())
-            })
+        scope
+            .as_ref()
+            .is_some_and(|scope| live.accessible_work(scope, key).is_some())
     }
 
-    /// The current source observation supersedes a saved publication mode.
-    pub(crate) fn relay_mode(&self, key: &FunctionKey) -> Option<RelayMode> {
-        self.0
-            .live
-            .borrow()
-            .devices
-            .get(&key.device.id)?
-            .admitted
-            .as_ref()?
-            .physical()
-            .function(&key.id)?
-            .snapshot()
-            .relay_mode()
+    /// Publication supplies the last confirmed wired mode until fresh feedback arrives.
+    pub(crate) fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool {
+        self.0.graph.borrow().published_relays.contains(key)
+            && self
+                .0
+                .live
+                .borrow()
+                .accessible_work(scope, &key.device)
+                .and_then(|work| work.physical().function(&key.id))
+                .is_some_and(|function| {
+                    function.snapshot().relay_mode() != Some(RelayMode::Wireless)
+                })
     }
 
     pub(crate) fn committed_graph(&self) -> Rc<crate::configuration::DerivedConfiguration> {

@@ -19,7 +19,7 @@ use crate::{
         self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, RelayType, Scope,
         validate_label,
     },
-    device::{DeviceKey, DeviceRegistry, FunctionKey, PhysicalDevice, RelayMode},
+    device::{DeviceKey, DeviceRegistry, FunctionKey, PhysicalDevice},
     matter::{self, LabelWriter},
     storage::{Identity, StorageError, Store},
     terminal::AuthStatus,
@@ -491,20 +491,7 @@ impl LabelWriter for App {
     }
 
     fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool {
-        let current = self.current();
-        current.configuration.scope.as_ref() == Some(scope)
-            && current.derived.published_relays.contains(key)
-            && self
-                .source
-                .binding_accessible(&Some(scope.clone()), &key.device)
-            && self.source.relay_mode(key).or_else(|| {
-                current
-                    .configuration
-                    .relay_channels
-                    .iter()
-                    .find(|channel| &channel.scope == scope && &channel.key == key)
-                    .and_then(|channel| channel.mode)
-            }) == Some(RelayMode::Wired)
+        self.source.relay_accessible(scope, key)
     }
 }
 

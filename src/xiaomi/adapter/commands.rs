@@ -63,15 +63,7 @@ fn relay_allowed(
         home_id: home_id.to_owned(),
     };
     let key = crate::device::FunctionKey::new(work.key.clone(), id);
-    super::publication::SourceHandle(context.clone()).binding_accessible(&Some(scope), &work.key)
-        && context.graph.borrow().published_relays.contains(&key)
-        && work
-            .physical()
-            .function(id)
-            .unwrap()
-            .snapshot()
-            .relay_mode()
-            != Some(crate::device::RelayMode::Wireless)
+    super::publication::SourceHandle(context.clone()).relay_accessible(&scope, &key)
 }
 /// Return ownership only when the request was withdrawn before transmission.
 async fn send_local_write(
