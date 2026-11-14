@@ -4,9 +4,10 @@
 use super::{
     CommittedConfiguration, CommittedDevice, CommittedFunction, DerivedConfiguration,
     OperationKind, Plan, PlanError, PlanInput, PlanOperation, RelayChannel, RelayType,
-    SourceDevice, default_device_label, import_label, same_control_description,
+    default_device_label, import_label, same_control_description,
 };
 use crate::device::{DeviceKey, FunctionDescription, FunctionKey, FunctionKind};
+use crate::xiaomi::capability::RawDescription;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -75,12 +76,12 @@ pub(crate) fn plan<Shape: PartialEq>(
 
     let mut descriptions = Vec::new();
     for source in facts.devices {
-        let label = device_label(&source);
-        let key = source.description.raw.key.clone();
-        descriptions.push(source.description.raw);
+        let raw = source.description.raw;
         let Some(native) = source.description.native else {
+            descriptions.push(raw);
             continue;
         };
+        let key = raw.key.clone();
         let device = match identities.remove(&key) {
             Some(previous) => {
                 let mut device = previous;
@@ -117,7 +118,7 @@ pub(crate) fn plan<Shape: PartialEq>(
                     key: key.clone(),
                     unique_id,
                     endpoint,
-                    label,
+                    label: device_label(&raw),
                     configuration_version: 1,
                     functions,
                     native: Some(native),
@@ -125,6 +126,7 @@ pub(crate) fn plan<Shape: PartialEq>(
             }
         };
         next_devices.push(device);
+        descriptions.push(raw);
     }
 
     // Identities absent from the current filtered facts lose their current
@@ -149,9 +151,9 @@ pub(crate) fn plan<Shape: PartialEq>(
             .device()
             .functions()
             .iter()
-            .filter(|function| function.kind() == FunctionKind::Relay)
-            .collect::<Vec<_>>();
-        for function in &relays {
+            .filter(|function| function.kind() == FunctionKind::Relay);
+        let mut panel = None;
+        for function in relays {
             let key = FunctionKey::new(device.key.clone(), function.id());
             if let Some(channel) = relay_channels
                 .iter_mut()
@@ -176,20 +178,15 @@ pub(crate) fn plan<Shape: PartialEq>(
             } else {
                 reserved_endpoint
             };
-            let raw = descriptions
-                .iter()
-                .find(|raw| raw.key == device.key)
-                .unwrap();
-            let panel_label = raw
-                .name
-                .as_deref()
-                .filter(|name| !name.is_empty())
-                .map(import_label)
-                .unwrap_or_else(|| default_device_label(&raw.model, &device.key.id));
+            let (panel_label, multi_key) = panel.get_or_insert_with(|| {
+                let raw = descriptions
+                    .iter()
+                    .find(|raw| raw.key == device.key)
+                    .unwrap();
+                (device_label(raw), raw.has_multiple_relay_services())
+            });
             let siid = function.power().unwrap().siid;
-            let label = if !raw.has_multiple_relay_services() {
-                panel_label
-            } else {
+            let label = if *multi_key {
                 facts
                     .split_devices
                     .iter()
@@ -197,7 +194,9 @@ pub(crate) fn plan<Shape: PartialEq>(
                     .and_then(|split| split.name.as_deref())
                     .filter(|name| !name.trim().is_empty())
                     .map(import_label)
-                    .unwrap_or_else(|| relay_fallback_label(&panel_label, siid))
+                    .unwrap_or_else(|| relay_fallback_label(panel_label, siid))
+            } else {
+                panel_label.clone()
             };
             let mut hash = Sha256::new();
             for part in [&device.unique_id, &scope.uid, &scope.home_id, &key.id] {
@@ -336,20 +335,12 @@ fn relay_fallback_label(panel: &str, siid: u32) -> String {
     format!("{}{suffix}", &panel[..end])
 }
 
-fn device_label(device: &SourceDevice) -> String {
-    device
-        .description
-        .raw
-        .name
+fn device_label(raw: &RawDescription) -> String {
+    raw.name
         .as_deref()
         .map(import_label)
         .filter(|label| !label.is_empty())
-        .unwrap_or_else(|| {
-            default_device_label(
-                &device.description.raw.model,
-                &device.description.raw.key.id,
-            )
-        })
+        .unwrap_or_else(|| default_device_label(&raw.model, &raw.key.id))
 }
 
 fn operations(
