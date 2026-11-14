@@ -36,6 +36,80 @@ fn stored_json(store: &Store) -> Value {
 }
 
 #[test]
+fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent() {
+    let rig = Rig::new(false, &["panel", "alias"]);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        for did in ["panel", "alias"] {
+            cloud.models.insert(did.into(), "zimi.switch.dhkg05".into());
+            cloud.instance_types.insert(did.into(), SWITCH.into());
+            cloud.online.insert(did.into());
+            for siid in 2..=4 {
+                cloud.raw_values.insert((did.into(), siid, 2), json!(0));
+            }
+        }
+        cloud.catalog_instances.insert(
+            SWITCH.into(),
+            serde_json::from_str(include_str!(
+                "../../../../tests/fixtures/miot/zimi-dhkg05.json"
+            ))
+            .unwrap(),
+        );
+        cloud.catalog_overrides.insert(
+            "alias".into(),
+            json!({
+                "did":"alias", "model":"zimi.switch.dhkg05", "isOnline":true, "name":"Kitchen",
+                "extra":{"split":{"parentId":"panel","moduleId":3}}
+            }),
+        );
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| c.publication.current().configuration.relay_channels.len() >= 3).await;
+        let current = c.publication.current();
+        assert_eq!(current.configuration.split_devices.len(), 1);
+        assert_eq!(current.configuration.relay_channels.len(), 3);
+        let middle = current
+            .configuration
+            .relay_channels
+            .iter()
+            .find(|channel| channel.key.id == "relay:3")
+            .unwrap();
+        assert_eq!(middle.key.device.id, "panel");
+        assert_eq!(middle.label, "Kitchen");
+        until(|| c.publication.frozen().len() == 3).await;
+        assert!(
+            c.publication
+                .frozen()
+                .iter()
+                .all(|entry| entry.device.key().id == "panel")
+        );
+        assert!(!c.context.live.borrow().devices.contains_key("alias"));
+        function(&c.context.registry, "panel", "relay:3")
+            .execute(Command::On)
+            .await
+            .unwrap();
+        let cloud = c.cloud.lock().unwrap();
+        assert!(
+            cloud
+                .detail_requests
+                .iter()
+                .flatten()
+                .all(|did| did != "alias")
+        );
+        assert!(
+            cloud
+                .property_reads
+                .iter()
+                .all(|(did, _, _)| did == "panel")
+        );
+        assert_eq!(cloud.property_writes.len(), 1);
+        let (did, siid, piid, value, _) = &cloud.property_writes[0];
+        assert_eq!((did.as_str(), *siid, *piid, *value), ("panel", 3, 1, true));
+    }));
+}
+
+#[test]
 fn complete_catalog_binds_names_and_filters_aliases_before_description_requests() {
     let rig = Rig::new(
         false,
@@ -229,10 +303,11 @@ fn another_home_cannot_contribute_panel_names_or_turn_an_alias_into_a_device() {
             "own-alias".into(),
             alias("own-alias", "panel", 10, "Own load"),
         );
-        cloud.catalog_overrides.insert(
-            "foreign-alias".into(),
-            alias("foreign-alias", "foreign-panel", 10, "Foreign load"),
-        );
+        let mut foreign_alias = alias("foreign-alias", "foreign-panel", 10, "Foreign load");
+        foreign_alias.as_object_mut().unwrap().remove("spec_type");
+        cloud
+            .catalog_overrides
+            .insert("foreign-alias".into(), foreign_alias);
         cloud
             .catalog_groups
             .push(record("foreign-panel", PANEL, "Foreign panel", None));

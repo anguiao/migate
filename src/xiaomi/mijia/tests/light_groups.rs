@@ -59,6 +59,59 @@ fn split_alias_uses_parent_and_integer_module_not_a_did_suffix_or_parent_roster(
     assert_eq!(alias.name.as_deref(), Some("Kitchen"));
 }
 
+#[test]
+fn untyped_split_needs_a_known_panel_parent_from_the_complete_catalog() {
+    let urn = "urn:miot-spec-v2:device:switch:0000A003:zimi-dhkg05:1:0000C810";
+    let split = |did: &str, parent: &str| {
+        json!({
+            "did":did,"model":"example.device","isOnline":true,
+            "extra":{"split":{"parentId":parent,"moduleId":3}}
+        })
+    };
+    let mut typed_alias = split("typed-alias", "panel");
+    typed_alias["spec_type"] = json!(urn);
+    typed_alias["extra"]["split"]["moduleId"] = json!(2);
+    let mut typed_light = ordinary("typed-light");
+    typed_light["extra"] = json!({"split":{"parentId":"panel","moduleId":3}});
+    let catalog = read_catalog(vec![
+        response(catalog_page(
+            vec![
+                split("channel", "panel"),
+                split("unknown-parent", "absent"),
+                split("light-child", "light"),
+                split("nested-child", "typed-alias"),
+                typed_light,
+            ],
+            true,
+            Some("cursor"),
+        )),
+        response(catalog_page(
+            vec![
+                json!({"did":"panel","model":"zimi.switch.dhkg05","spec_type":urn,"isOnline":true}),
+                ordinary("light"),
+                typed_alias,
+            ],
+            false,
+            None,
+        )),
+    ])
+    .unwrap();
+    let aliases = catalog
+        .devices
+        .iter()
+        .filter_map(|record| {
+            record
+                .split
+                .as_ref()
+                .map(|split| (record.did.as_str(), split.parent_did.as_str(), split.siid))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        aliases,
+        [("channel", "panel", 3), ("typed-alias", "panel", 2)]
+    );
+}
+
 fn group(did: &str, group_did: &str, is_physical: bool, members: &[&str]) -> Value {
     let mut member_ship = serde_json::Map::new();
     for member in members {

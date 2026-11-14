@@ -150,7 +150,8 @@ impl MijiaClient {
     ) -> Result<CloudDeviceCatalog, CloudError> {
         let operation = "read Xiaomi device catalog";
         let mut devices = Vec::new();
-        let mut record_dids = HashSet::new();
+        let mut panel_parent_by_did = HashMap::new();
+        let mut untyped_splits = Vec::new();
         let mut pages = Pagination::default();
         let mut cursor = None;
         loop {
@@ -164,20 +165,28 @@ impl MijiaClient {
             let response: CatalogResponse =
                 serde_json::from_str(raw.get()).map_err(|_| CloudError::protocol(operation))?;
             for record in response.list {
-                if !record_dids.insert(record.did.clone()) {
-                    return Err(CloudError::protocol(operation));
-                }
-                let group = read_group(record.extra.as_deref());
-                let split = if record
+                let panel = record
                     .spec_type
                     .as_deref()
-                    .is_some_and(crate::xiaomi::capability::is_load_panel_type)
-                {
+                    .is_some_and(crate::xiaomi::capability::is_load_panel_type);
+                let split = if panel {
                     read_panel_split(record.extra.as_deref())
                         .map_err(|()| CloudError::protocol(operation))?
                 } else {
                     None
                 };
+                if panel_parent_by_did
+                    .insert(record.did.clone(), panel && split.is_none())
+                    .is_some()
+                {
+                    return Err(CloudError::protocol(operation));
+                }
+                if record.spec_type.is_none()
+                    && let Ok(Some(split)) = read_panel_split(record.extra.as_deref())
+                {
+                    untyped_splits.push((devices.len(), split));
+                }
+                let group = read_group(record.extra.as_deref());
                 devices.push(CloudCatalogDevice {
                     did: record.did,
                     name: record.name.filter(|name| {
@@ -197,6 +206,12 @@ impl MijiaClient {
             )?;
             if cursor.is_none() {
                 break;
+            }
+        }
+        // A split without its own type needs a panel parent, possibly on a later page.
+        for (index, split) in untyped_splits {
+            if panel_parent_by_did.get(&split.parent_did) == Some(&true) {
+                devices[index].split = Some(split);
             }
         }
         resolve_group_identity_conflicts(&mut devices);
