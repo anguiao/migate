@@ -168,10 +168,6 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
 
             // Phase 1: a pure relation change rebuilds but must not bump any
             // configuration version. The unresolved member has no source device.
-            // Seed an old subscription slot after startup. The next instance
-            // must discard it before attempting to decode or resume it.
-            let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
-            store.matter().put(subscription_key, &[0xff]).unwrap();
             c.cloud.lock().unwrap().members.push("member-a".into());
             c.cloud.lock().unwrap().catalog_groups = vec![group_record(
                 "record-1",
@@ -214,7 +210,6 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 .device(&group)
                 .cloned()
                 .unwrap();
-            assert!(!store.matter().contains(subscription_key).unwrap());
             assert_eq!(
                 group_after_relation.configuration_version,
                 group_before.configuration_version

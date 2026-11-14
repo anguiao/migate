@@ -208,7 +208,7 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
 }
 
 #[test]
-fn mapping_rebuild_clears_late_subscriptions_and_commits_new_source_facts() {
+fn mapping_rebuild_keeps_late_subscriptions_and_commits_new_source_facts() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let configuration = saved_relay(&store, RelayMode::Wired);
@@ -224,7 +224,10 @@ fn mapping_rebuild_clears_late_subscriptions_and_commits_new_source_facts() {
         .put(subscription, b"old subscription")
         .unwrap();
     assert!(app.map_relay_type(key, RelayType::Light).unwrap());
-    assert!(!store.matter().contains(subscription).unwrap());
+    assert_eq!(
+        store.matter().get(subscription).unwrap().unwrap(),
+        b"old subscription"
+    );
     let mapped = store.devices().load_configuration().unwrap();
     assert_eq!(mapped.relay_channels[0].device_type, RelayType::Light);
 
@@ -243,7 +246,10 @@ fn mapping_rebuild_clears_late_subscriptions_and_commits_new_source_facts() {
     assert!(plan.rebuild);
     app.apply(app.prepare(plan)).unwrap();
     assert_eq!(store.devices().load_configuration().unwrap(), mapped);
-    assert!(!store.matter().contains(subscription).unwrap());
+    assert_eq!(
+        store.matter().get(subscription).unwrap().unwrap(),
+        b"late subscription"
+    );
     assert!(app.plan().unwrap().is_none());
     database
         .execute_batch("DROP TRIGGER reject_rewrite")
@@ -270,5 +276,52 @@ fn mapping_rebuild_clears_late_subscriptions_and_commits_new_source_facts() {
     assert_eq!(saved.relay_channels[0].device_type, RelayType::Switch);
     assert_eq!(saved.descriptions[0].name.as_deref(), Some("Renamed panel"));
     assert!(app.frozen().is_empty());
+    assert_eq!(
+        store.matter().get(subscription).unwrap().unwrap(),
+        b"another late subscription"
+    );
+}
+
+#[test]
+fn a_pending_mapping_cannot_carry_subscriptions_across_a_home_change() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let configuration = saved_relay(&store, RelayMode::Wired);
+    let source = AppSource::new(&store, None);
+    source.confirm_all();
+    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let key = &configuration.relay_channels[0].key;
+    assert!(app.map_relay_type(key, RelayType::Light).unwrap());
+    let mapped = store.devices().load_configuration().unwrap();
+    let subscription = crate::matter::subscription_keys().start;
+    store
+        .matter()
+        .put(subscription, b"last write from retiring instance")
+        .unwrap();
+    let next_scope = crate::configuration::Scope {
+        home_id: "next home".into(),
+        ..fixtures::scope()
+    };
+    source.scope(next_scope.clone());
+    assert!(app.frozen().is_empty());
+
+    let db = rusqlite::Connection::open(store.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_scope AFTER UPDATE ON bridge_configuration
+        BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    let plan = app.plan().unwrap().unwrap();
+    assert!(app.apply(app.prepare(plan)).is_err());
+    assert_eq!(store.devices().load_configuration().unwrap(), mapped);
+    assert!(store.matter().contains(subscription).unwrap());
+    assert!(app.frozen().is_empty());
+    db.execute_batch("DROP TRIGGER fail_scope").unwrap();
+    let plan = app.plan().unwrap().unwrap();
+    app.apply(app.prepare(plan)).unwrap();
+    assert_eq!(
+        store.devices().load_configuration().unwrap().scope,
+        Some(next_scope)
+    );
     assert!(!store.matter().contains(subscription).unwrap());
 }

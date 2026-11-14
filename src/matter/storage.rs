@@ -7,7 +7,7 @@ use rs_matter::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-/// Subscription slots that must be cleared in the configuration transaction.
+/// The protocol stack's persisted subscription slots.
 pub(crate) fn subscription_keys() -> std::ops::Range<u16> {
     PERSISTENT_SUBSCRIPTIONS_START
         ..PERSISTENT_SUBSCRIPTIONS_START + DEFAULT_MAX_SUBSCRIPTIONS as u16

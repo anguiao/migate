@@ -133,6 +133,18 @@ impl SourceHandle {
         self.0.graph.borrow().clone()
     }
 
+    /// A new Matter instance must not restore reports for a source whose
+    /// authority already ended, even if the next configuration failed to save.
+    pub(crate) fn source_retained(&self, scope: &Option<Scope>, key: &DeviceKey) -> bool {
+        let live = self.0.live.borrow();
+        live.scope == *scope
+            && live
+                .devices
+                .get(&key.id)
+                .and_then(|slot| slot.admitted.as_ref())
+                .is_some_and(|work| work.key == *key && !work.life.is_closed())
+    }
+
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
     pub(crate) fn snapshot(&self) -> SourceFacts {

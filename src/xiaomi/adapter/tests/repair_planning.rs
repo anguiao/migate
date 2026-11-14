@@ -119,30 +119,6 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
         let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
         c.store.matter().put(subscription_key, &[1, 2, 3]).unwrap();
         db.execute_batch(
-            "CREATE TRIGGER fail_subscription_delete BEFORE DELETE ON blobs
-             BEGIN SELECT RAISE(ABORT, 'injected'); END;",
-        )
-        .unwrap();
-        let prepared = c
-            .publication
-            .prepare(c.publication.plan().unwrap().unwrap());
-        assert!(c.publication.apply(prepared).is_err());
-        assert!(c.publication.failure().is_some());
-        assert!(c.store.matter().contains(subscription_key).unwrap());
-        assert_eq!(
-            c.store
-                .devices()
-                .load_configuration()
-                .unwrap()
-                .device(&key)
-                .cloned()
-                .unwrap(),
-            before
-        );
-        db.execute_batch("DROP TRIGGER fail_subscription_delete")
-            .unwrap();
-
-        db.execute_batch(
             "CREATE TRIGGER fail_config BEFORE UPDATE ON bridge_configuration
              BEGIN SELECT RAISE(ABORT, 'injected'); END;",
         )
@@ -172,6 +148,10 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
         db.execute_batch("DROP TRIGGER fail_config").unwrap();
         c.publication.stop_actions();
         c.publication.apply(latest).unwrap();
+        assert_eq!(
+            c.store.matter().get(subscription_key).unwrap().unwrap(),
+            [1, 2, 3]
+        );
         let light = function(&c.context.registry, "group-1", "light:2");
         assert_eq!(
             light.description().temperature_interval(),

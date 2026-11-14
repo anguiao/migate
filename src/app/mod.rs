@@ -158,6 +158,10 @@ impl App {
             .published
             .list()
             .into_iter()
+            .filter(|device| {
+                self.source
+                    .source_retained(&current.configuration.scope, device.key())
+            })
             .map(|device| {
                 let key = device.key();
                 let committed = current
@@ -206,6 +210,9 @@ impl App {
                 .entries
                 .iter()
                 .find(|entry| entry.physical.key() == &key.device)
+                && self
+                    .source
+                    .source_retained(&current.configuration.scope, &key.device)
             {
                 entries.push(matter::FrozenEntry {
                     device: source.physical.clone(),
@@ -300,23 +307,19 @@ impl App {
     /// The caller guarantees that no await happens between `prepare` and `apply`.
     pub(crate) fn apply(&self, prepared: Prepared) -> Result<(), StorageError> {
         let plan = prepared.plan;
-        let result = if plan.changed {
-            self.store.devices().commit_configuration_with_reset(
+        if plan.changed {
+            // Subscriptions identify a Matter peer and requested paths. The new
+            // model resolves those paths with current ACLs; a different Xiaomi
+            // account or home must not inherit the previous scope's requests.
+            let scope_changed = self.current().configuration.scope != plan.configuration.scope;
+            if let Err(error) = self.store.devices().commit_configuration_with_reset(
                 &plan.configuration,
                 &plan.clear_revocations,
-                plan.rebuild.then(matter::subscription_keys),
-            )
-        } else {
-            // The retiring instance could persist subscriptions after map-type returned.
-            self.store
-                .matter()
-                .delete_range(matter::subscription_keys())
-        };
-        if let Err(error) = result {
-            *self.failure.borrow_mut() = Some(error.to_string());
-            return Err(error);
-        }
-        if plan.changed {
+                scope_changed.then(matter::subscription_keys),
+            ) {
+                *self.failure.borrow_mut() = Some(error.to_string());
+                return Err(error);
+            }
             let entries = self.source.install(&plan, prepared.resources);
             let published = published_registry(&plan.derived.published, &entries);
             activate_temperature_bindings(&plan.configuration, &entries);
@@ -425,11 +428,7 @@ impl App {
         channel.device_type = device_type;
         self.store
             .devices()
-            .commit_configuration_with_reset(
-                &configuration,
-                &[],
-                visible.then(matter::subscription_keys),
-            )
+            .commit_configuration(&configuration, &[])
             .map_err(|error| error.to_string())?;
         *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
             configuration,

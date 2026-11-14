@@ -192,11 +192,7 @@ fn mcn02_profile_is_reconstructed_from_an_existing_configuration_without_persist
     );
     store
         .devices()
-        .commit_configuration_with_reset(
-            &refreshed.configuration,
-            &[],
-            refreshed.rebuild.then(crate::matter::subscription_keys),
-        )
+        .commit_configuration(&refreshed.configuration, &[])
         .unwrap();
     assert_eq!(
         store.matter().get(FABRIC_KEYS_START + 1).unwrap(),
