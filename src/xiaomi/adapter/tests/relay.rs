@@ -1,8 +1,21 @@
 use super::*;
-use crate::xiaomi::capability::PropertyBinding;
+use crate::{device::RelayMode, xiaomi::capability::PropertyBinding};
 
 fn binding(siid: u32, piid: u32) -> PropertyBinding {
     PropertyBinding { siid, piid }
+}
+
+fn panel_peer(mode: RelayMode) -> Rc<Peer> {
+    let peer = Rc::new(Peer::default());
+    let mode_value = match mode {
+        RelayMode::Wired => 0,
+        RelayMode::Wireless => 1,
+    };
+    for siid in [2, 3, 4] {
+        peer.value("one", binding(siid, 1), json!(false));
+        peer.value("one", binding(siid, 2), json!(mode_value));
+    }
+    peer
 }
 
 fn rig() -> Rig {
@@ -19,11 +32,7 @@ fn rig() -> Rig {
 fn wired_relays_are_published_as_independent_accessories() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(0));
-        }
+        let peer = panel_peer(RelayMode::Wired);
         let control = &c;
         c.peer(peer, |_| async move {
             until(|| {
@@ -31,7 +40,7 @@ fn wired_relays_are_published_as_independent_accessories() {
                     function(&control.context.registry, "one", &format!("relay:{siid}"))
                         .snapshot()
                         .relay_mode()
-                        == Some(crate::device::RelayMode::Wired)
+                        == Some(RelayMode::Wired)
                 })
             })
             .await;
@@ -50,11 +59,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
     use crate::matter::tests::support::PublishedRelayModel;
     std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| block_on(rig().run_result_without_publication(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(0));
-        }
+        let peer = panel_peer(RelayMode::Wired);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -62,7 +67,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
                 [2, 3, 4].iter().all(|siid| {
                     let id = format!("relay:{siid}");
                     let function = work.physical().function(&id).unwrap();
-                    function.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)
+                    function.snapshot().relay_mode() == Some(RelayMode::Wired)
                         && function.snapshot().power() == Some(Power::Off)
                         && work.function_observer(&id).is_some_and(|observer| {
                             work.source_binding_ready(&observer, binding(*siid, 2))
@@ -115,7 +120,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             assert!(model.write_label(ep3, "Unsaved").await.is_err());
             assert_eq!(model.label(ep3).await, "Middle relay");
             peer.notify_value("one", binding(3, 2), json!(1), false);
-            until(|| function(&control.context.registry, "one", "relay:3").snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)).await;
+            until(|| function(&control.context.registry, "one", "relay:3").snapshot().relay_mode() == Some(RelayMode::Wireless)).await;
             let plan = control.publication.plan().unwrap().unwrap();
             assert!(control.publication.apply(control.publication.prepare(plan)).is_err());
             assert_eq!(control.publication.frozen().len(), 3);
@@ -138,14 +143,14 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             for siid in [2, 4] { peer.notify_value("one", binding(siid, 2), json!(1), false); }
             until(|| [2, 3, 4].iter().all(|siid|
                 function(&control.context.registry, "one", &format!("relay:{siid}"))
-                    .snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless))).await;
+                    .snapshot().relay_mode() == Some(RelayMode::Wireless))).await;
             let plan = control.publication.plan().unwrap().unwrap();
             control.publication.apply(control.publication.prepare(plan)).unwrap();
             assert!(control.publication.frozen().is_empty());
             for siid in [2, 3, 4] { peer.notify_value("one", binding(siid, 2), json!(0), false); }
             until(|| [2, 3, 4].iter().all(|siid|
                 function(&control.context.registry, "one", &format!("relay:{siid}"))
-                    .snapshot().relay_mode() == Some(crate::device::RelayMode::Wired))).await;
+                    .snapshot().relay_mode() == Some(RelayMode::Wired))).await;
             let plan = control.publication.plan().unwrap().unwrap();
             control.publication.apply(control.publication.prepare(plan)).unwrap();
             let restored = control.publication.frozen();
@@ -166,11 +171,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
 fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(1));
-        }
+        let peer = panel_peer(RelayMode::Wireless);
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -183,8 +184,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
                             && [2, 3, 4].iter().all(|siid| {
                                 device.function(&format!("relay:{siid}")).is_some_and(|f| {
                                     f.snapshot().power() == Some(Power::Off)
-                                        && f.snapshot().relay_mode()
-                                            == Some(crate::device::RelayMode::Wireless)
+                                        && f.snapshot().relay_mode() == Some(RelayMode::Wireless)
                                 })
                             })
                     })
@@ -254,11 +254,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
 fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirement() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(1));
-        }
+        let peer = panel_peer(RelayMode::Wireless);
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
@@ -267,7 +263,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
                 .clone()
                 .unwrap();
             until(|| {
-                relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)
+                relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                     && work.function_observer("relay:2").is_some()
                     && work.source_binding_ready(
                         &work.function_observer("relay:2").unwrap(),
@@ -279,10 +275,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
             let source_signal = control.context.configuration_changed.listen();
             peer.notify_value("one", binding(2, 2), json!(0), false);
             source_signal.await;
-            assert_eq!(
-                changes.changed().await.relay_mode(),
-                Some(crate::device::RelayMode::Wired)
-            );
+            assert_eq!(changes.changed().await.relay_mode(), Some(RelayMode::Wired));
             assert_eq!(relay.snapshot().power(), Some(Power::Off));
 
             peer.state
@@ -297,10 +290,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
                     .is_some()
             })
             .await;
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wired)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wired));
 
             peer.state
                 .borrow_mut()
@@ -308,8 +298,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
                 .remove(&("one".into(), 2, 2));
             peer.value("one", binding(2, 2), json!(1));
             control.clock.advance(Duration::from_secs(61));
-            until(|| relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless))
-                .await;
+            until(|| relay.snapshot().relay_mode() == Some(RelayMode::Wireless)).await;
 
             let old_source = work.function_observer("relay:2").unwrap();
             force_unavailable(&control.context, "one", "access revoked");
@@ -329,10 +318,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
                 None,
                 false,
             );
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wireless)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wireless));
             assert_eq!(relay.snapshot().power(), Some(Power::Off));
             assert!(relay.execute(Command::On).await.is_err());
             assert_eq!(peer.count("rpcReq", "one", 2), 0);
@@ -345,11 +331,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
 fn relay_power_subscriptions_are_independent_when_another_channel_is_rejected() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(0));
-        }
+        let peer = panel_peer(RelayMode::Wired);
         peer.state
             .borrow_mut()
             .sub_reject
@@ -381,10 +363,8 @@ fn relay_power_subscriptions_are_independent_when_another_channel_is_rejected() 
 fn mode_notification_stays_live_when_every_power_subscription_is_rejected() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
+        let peer = panel_peer(RelayMode::Wireless);
         for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(1));
             peer.state
                 .borrow_mut()
                 .sub_reject
@@ -400,12 +380,12 @@ fn mode_notification_stays_live_when_every_power_subscription_is_rejected() {
             until(|| {
                 work.test_local_exhausted()
                     && work.test_local_subscribed_contains(binding(2, 2))
-                    && relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)
+                    && relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
             })
             .await;
             assert!(work.function_observer("relay:2").is_none());
             peer.notify_value("one", binding(2, 2), json!(0), false);
-            until(|| relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)).await;
+            until(|| relay.snapshot().relay_mode() == Some(RelayMode::Wired)).await;
             assert_eq!(relay.snapshot().power(), Some(Power::Off));
         })
         .await;
@@ -416,11 +396,7 @@ fn mode_notification_stays_live_when_every_power_subscription_is_rejected() {
 fn rejected_mode_subscription_does_not_block_power_feedback() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(0));
-        }
+        let peer = panel_peer(RelayMode::Wired);
         peer.state
             .borrow_mut()
             .sub_reject
@@ -472,11 +448,7 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
 fn retained_and_stale_modes_do_not_replace_confirmed_feedback() {
     block_on(rig().run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(1));
-        }
+        let peer = panel_peer(RelayMode::Wireless);
         peer.state
             .borrow_mut()
             .read_timeout
@@ -518,10 +490,7 @@ fn retained_and_stale_modes_do_not_replace_confirmed_feedback() {
                 None,
                 false,
             );
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wired)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wired));
             control.context.property_value_event(
                 &source,
                 "one",
@@ -538,17 +507,11 @@ fn retained_and_stale_modes_do_not_replace_confirmed_feedback() {
                 None,
                 false,
             );
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wired)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wired));
             peer.release_property("one", binding(2, 2), json!({"value":1}))
                 .await;
             until(|| !work.refresh.borrow().contains("relay:2", binding(2, 2))).await;
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wired)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wired));
         })
         .await;
     }));
@@ -570,11 +533,7 @@ fn mode_without_notify_is_polled_but_never_treated_as_a_power_notification() {
     let rig = Rig::profile_light("zimi.switch.dhkg05", instance);
     block_on(rig.run(|c| async move {
         c.announce();
-        let peer = Rc::new(Peer::default());
-        for siid in [2, 3, 4] {
-            peer.value("one", binding(siid, 1), json!(false));
-            peer.value("one", binding(siid, 2), json!(1));
-        }
+        let peer = panel_peer(RelayMode::Wireless);
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
@@ -583,7 +542,7 @@ fn mode_without_notify_is_polled_but_never_treated_as_a_power_notification() {
                 .clone()
                 .unwrap();
             until(|| {
-                relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)
+                relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                     && relay.snapshot().power() == Some(Power::Off)
                     && work.function_observer("relay:2").is_some()
             })
@@ -607,13 +566,10 @@ fn mode_without_notify_is_polled_but_never_treated_as_a_power_notification() {
                 false,
             );
             assert_eq!(relay.snapshot().power(), Some(Power::Off));
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wireless)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wireless));
             peer.value("one", binding(2, 2), json!(0));
             control.clock.advance(Duration::from_secs(61));
-            until(|| relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)).await;
+            until(|| relay.snapshot().relay_mode() == Some(RelayMode::Wired)).await;
         })
         .await;
     }));
@@ -635,7 +591,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
         future::or(peer.run(&listener), async {
             let relay = function(&c.context.registry, "one", "relay:4");
             until(|| {
-                relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)
+                relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                     && relay.snapshot().power() == Some(Power::Off)
                     && c.context.live.borrow().devices["one"]
                         .admitted
@@ -653,7 +609,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
             peer.property_at("one", 4, 1, json!(true));
             until(|| relay.snapshot().power() == Some(Power::On)).await;
             peer.property_at("one", 4, 2, json!(0));
-            until(|| relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)).await;
+            until(|| relay.snapshot().relay_mode() == Some(RelayMode::Wired)).await;
             assert!(
                 c.cloud
                     .lock()
@@ -698,10 +654,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
                 false,
             );
             assert_eq!(relay.snapshot().power(), Some(Power::On));
-            assert_eq!(
-                relay.snapshot().relay_mode(),
-                Some(crate::device::RelayMode::Wired)
-            );
+            assert_eq!(relay.snapshot().relay_mode(), Some(RelayMode::Wired));
             assert!(relay.execute(Command::Off).await.is_err());
             assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
         })
@@ -724,11 +677,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
     block_on(rig.run(|c| async move {
         future::or(cloud_peer.run(&listener), async {
             c.announce();
-            let peer = Rc::new(Peer::default());
-            for siid in [2, 3, 4] {
-                peer.value("one", binding(siid, 1), json!(false));
-                peer.value("one", binding(siid, 2), json!(1));
-            }
+            let peer = panel_peer(RelayMode::Wireless);
             let control = &c;
             c.peer(peer, |_| async move {
                 let relay = function(&control.context.registry, "one", "relay:2");
@@ -737,7 +686,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
                     .clone()
                     .unwrap();
                 until(|| {
-                    relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wireless)
+                    relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                         && work.test_observer_is_local()
                         && relay.snapshot().availability == Availability::Available
                 })
@@ -753,8 +702,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
                     .clone();
                 local_device_offline(&control.context, &handle, "one");
                 assert_eq!(relay.snapshot().availability, Availability::Available);
-                until(|| relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired))
-                    .await;
+                until(|| relay.snapshot().relay_mode() == Some(RelayMode::Wired)).await;
                 assert!(
                     control
                         .cloud
@@ -778,11 +726,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
         .spawn(|| {
             block_on(rig().run_result_without_publication(|c| async move {
                 c.announce();
-                let peer = Rc::new(Peer::default());
-                for siid in [2, 3, 4] {
-                    peer.value("one", binding(siid, 1), json!(false));
-                    peer.value("one", binding(siid, 2), json!(0));
-                }
+                let peer = panel_peer(RelayMode::Wired);
                 let control = &c;
                 c.peer(peer, |peer| async move {
                     until(|| {
@@ -790,7 +734,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                             function(&control.context.registry, "one", &format!("relay:{siid}"))
                                 .snapshot()
                                 .relay_mode()
-                                == Some(crate::device::RelayMode::Wired)
+                                == Some(RelayMode::Wired)
                         })
                     })
                     .await;
@@ -950,11 +894,7 @@ fn relay_power_read_reports_its_real_source_in_terminal_status() {
         move |next| report.update_adapter(next),
         move |c| async move {
             c.announce();
-            let peer = Rc::new(Peer::default());
-            for siid in [2, 3, 4] {
-                peer.value("one", binding(siid, 1), json!(false));
-                peer.value("one", binding(siid, 2), json!(0));
-            }
+            let peer = panel_peer(RelayMode::Wired);
             let control = &c;
             c.peer(peer, |_| async move {
                 until(|| {
@@ -1010,11 +950,7 @@ fn relay_power_live_notification_records_source_without_accepting_retained_or_in
         move |next| report.update_adapter(next),
         move |c| async move {
             c.announce();
-            let peer = Rc::new(Peer::default());
-            for siid in [2, 3, 4] {
-                peer.value("one", binding(siid, 1), json!(false));
-                peer.value("one", binding(siid, 2), json!(0));
-            }
+            let peer = panel_peer(RelayMode::Wired);
             peer.state
                 .borrow_mut()
                 .read_timeout
@@ -1027,7 +963,7 @@ fn relay_power_live_notification_records_source_without_accepting_retained_or_in
                     .unwrap();
                 let relay = work.physical().function("relay:2").unwrap();
                 until(|| {
-                    relay.snapshot().relay_mode() == Some(crate::device::RelayMode::Wired)
+                    relay.snapshot().relay_mode() == Some(RelayMode::Wired)
                         && work.function_observer("relay:2").is_some()
                 })
                 .await;
