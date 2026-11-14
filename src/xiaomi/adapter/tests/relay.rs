@@ -55,6 +55,83 @@ fn wired_relays_are_published_as_independent_accessories() {
 }
 
 #[test]
+fn home_relay_uses_current_hub_access_before_cloud_directory_recovers() {
+    use crate::matter::tests::support::PublishedRelayModel;
+
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let rig = rig();
+            rig.cloud.lock().unwrap().home_status = 503;
+            block_on(rig.run(|c| async move {
+                c.announce();
+                let control = &c;
+                c.peer(panel_peer(RelayMode::Wired), |peer| async move {
+                    let relay = function(&control.context.registry, "one", "relay:2");
+                    until(|| {
+                        control.context.status.borrow().catalog_problem.is_some()
+                            && relay.snapshot().power() == Some(Power::Off)
+                            && control.publication.frozen().len() == 3
+                    })
+                    .await;
+                    assert!(!control.context.live.borrow().devices["one"].confirmed);
+                    let key = relay.function_key();
+                    let endpoint = control
+                        .publication
+                        .current()
+                        .configuration
+                        .relay_channels
+                        .iter()
+                        .find(|channel| &channel.key == key)
+                        .unwrap()
+                        .endpoint;
+                    let model = PublishedRelayModel::new(&control.publication, &control.store);
+                    model.invoke(endpoint, 1).await.unwrap();
+                    assert_eq!(peer.count("rpcReq", "one", 2), 1);
+                    assert!(
+                        control
+                            .publication
+                            .map_relay_type(key, crate::configuration::RelayType::Light)
+                            .is_err()
+                    );
+
+                    peer.state.borrow_mut().omit.insert("one".into());
+                    peer.list_changed(&["one"]);
+                    until(|| {
+                        control.context.live.borrow().devices["one"]
+                            .access
+                            .is_none()
+                    })
+                    .await;
+                    assert!(model.invoke(endpoint, 0).await.is_err());
+                    assert_eq!(peer.count("rpcReq", "one", 2), 1);
+
+                    {
+                        let mut cloud = control.cloud.lock().unwrap();
+                        cloud.home_status = 200;
+                        cloud.other_home = true;
+                    }
+                    peer.state.borrow_mut().omit.remove("one");
+                    peer.list_changed(&["one"]);
+                    control.clock.advance(Duration::from_secs(31));
+                    control.context.request_sync();
+                    until(|| {
+                        control.context.lan_scope_invalid.get()
+                            && control.context.local_candidate("one", false).is_ok()
+                    })
+                    .await;
+                    assert!(model.invoke(endpoint, 0).await.is_err());
+                    assert_eq!(peer.count("rpcReq", "one", 2), 1);
+                })
+                .await;
+            }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
     use crate::matter::tests::support::PublishedRelayModel;
     std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| block_on(rig().run_result_without_publication(|c| async move {

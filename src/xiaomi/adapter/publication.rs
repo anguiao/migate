@@ -9,7 +9,7 @@
 
 use super::{
     model::AdapterError,
-    state::{Context, Live, LogicalSink},
+    state::{Context, DeviceSlot, Live, LogicalSink},
     work::DeviceWork,
 };
 use crate::xiaomi::capability::NativeDescription;
@@ -51,22 +51,27 @@ pub(crate) struct PreparedSources {
 }
 
 impl Live {
-    fn accessible_work(&self, scope: &Scope, key: &DeviceKey) -> Option<&DeviceWork> {
+    fn committed_work(&self, scope: &Scope, key: &DeviceKey) -> Option<(&DeviceSlot, &DeviceWork)> {
         let slot = self.devices.get(&key.id)?;
         let work = slot.admitted.as_deref()?;
         (self.scope.as_ref() == Some(scope)
             && key.source == "xiaomi"
-            && slot.confirmed
-            && ((slot.cloud_access.is_some() && !slot.cloud_forbidden)
-                || slot.access.as_ref().is_some_and(|access| {
-                    access.as_ref().is_ok_and(|access| access.spec_v2_access)
-                }))
             && slot
                 .committed
                 .as_ref()
                 .is_some_and(|source| source.raw.key == *key)
             && !work.life.is_closed())
-        .then_some(work)
+        .then_some((slot, work))
+    }
+}
+
+impl DeviceSlot {
+    fn confirmed_access(&self) -> bool {
+        self.confirmed
+            && ((self.cloud_access.is_some() && !self.cloud_forbidden)
+                || self.access.as_ref().is_some_and(|access| {
+                    access.as_ref().is_ok_and(|access| access.spec_v2_access)
+                }))
     }
 }
 
@@ -112,21 +117,28 @@ impl SourceHandle {
         let live = self.0.live.borrow();
         scope
             .as_ref()
-            .is_some_and(|scope| live.accessible_work(scope, key).is_some())
+            .and_then(|scope| live.committed_work(scope, key))
+            .is_some_and(|(slot, _)| slot.confirmed_access())
     }
 
     /// Publication supplies the last confirmed wired mode until fresh feedback arrives.
     pub(crate) fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool {
-        self.0.graph.borrow().published_relays.contains(key)
-            && self
-                .0
-                .live
-                .borrow()
-                .accessible_work(scope, &key.device)
-                .and_then(|work| work.physical().function(&key.id))
-                .is_some_and(|function| {
-                    function.snapshot().relay_mode() != Some(RelayMode::Wireless)
-                })
+        if !self.0.graph.borrow().published_relays.contains(key) {
+            return false;
+        }
+        let live = self.0.live.borrow();
+        let Some((slot, work)) = live.committed_work(scope, &key.device) else {
+            return false;
+        };
+        // The current home's hub can admit an already published relay while
+        // the first cloud directory sync is still pending.
+        let authorized = slot.confirmed_access()
+            || !self.0.lan_scope_invalid.get()
+                && self.0.local_candidate(&key.device.id, false).is_ok();
+        authorized
+            && work.physical().function(&key.id).is_some_and(|function| {
+                function.snapshot().relay_mode() != Some(RelayMode::Wireless)
+            })
     }
 
     pub(crate) fn committed_graph(&self) -> Rc<crate::configuration::DerivedConfiguration> {

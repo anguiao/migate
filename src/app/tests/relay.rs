@@ -40,7 +40,6 @@ fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads()
 
                 let store = Store::open(directory.path()).unwrap();
                 let mut source = AppSource::new(&store, None);
-                source.confirm_all();
                 let physical = source.physical.as_ref().unwrap();
                 physical.set_availability(Availability::Available);
                 assert_eq!(
@@ -57,6 +56,8 @@ fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads()
                 assert_eq!(model.label(endpoint).await, "Saved relay");
                 assert_eq!(model.unique_id(endpoint).await, unique_id);
                 assert!(model.power(endpoint).await.is_err());
+                assert!(model.invoke(endpoint, 1).await.is_err());
+                source.confirm_all();
                 let mut invoke = Box::pin(model.invoke(endpoint, 1));
                 assert!(poll_once(invoke.as_mut()).await.is_none());
                 let DeviceRequest::Power(request) =

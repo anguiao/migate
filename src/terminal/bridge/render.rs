@@ -543,7 +543,7 @@ pub(super) fn render(
                             .contains(function.function_key());
                         let visibility = if !view.configurable_devices.contains(key) {
                             if published {
-                                "published (current access unavailable; update pending)"
+                                "published (mapping access unavailable)"
                             } else {
                                 "hidden (current access unavailable)"
                             }
