@@ -1,10 +1,59 @@
 use super::*;
+use crate::device::RelayMode;
 use crate::xiaomi::capability::PropertyBinding;
 
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
 fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::work::DeviceWork> {
     context.live.borrow().devices[did].admitted.clone().unwrap()
+}
+
+#[test]
+fn restored_relays_wait_for_power_and_mode_only_on_published_channels() {
+    let rig = Rig::profile_light(
+        "zimi.switch.dhkg05",
+        serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/miot/zimi-dhkg05.json"
+        ))
+        .unwrap(),
+    );
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let panel = work(&rig.source.context, "one").physical();
+    for (id, mode) in [
+        ("relay:2", RelayMode::Wired),
+        ("relay:3", RelayMode::Wireless),
+    ] {
+        panel.function(id).unwrap().observe_relay_mode(mode);
+    }
+    let plan = app.plan().unwrap().unwrap();
+    app.apply(app.prepare(plan)).unwrap();
+    let configuration = rig.store.devices().load_configuration().unwrap();
+    let mode = PropertyBinding { siid: 2, piid: 2 };
+    for bindings in [[POWER, mode], [mode, POWER]] {
+        let (restored, _) = XiaomiAdapter::build(
+            rig.store.clone(),
+            rig.source.cloud.clone(),
+            rig.discovery.clone(),
+            rig.clock.clone(),
+        )
+        .unwrap();
+        let source = restored.source_handle();
+        let restarted = crate::app::App::open(source.clone(), rig.store.clone()).unwrap();
+        assert_eq!(restarted.frozen().len(), 1);
+        let panel = work(&restored.context, "one");
+        for binding in bindings {
+            assert!(!source.initial_reads_ready(&configuration));
+            if binding == POWER {
+                panel.observe_relay_power_notification("relay:2", true, PathKind::Local);
+            } else {
+                panel
+                    .refresh
+                    .borrow_mut()
+                    .fail_initial_for_test("relay:2", mode);
+            }
+        }
+        assert!(source.initial_reads_ready(&configuration));
+    }
 }
 
 #[test]

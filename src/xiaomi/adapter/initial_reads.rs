@@ -64,7 +64,9 @@ pub(super) fn ready(context: &Context, configuration: &CommittedConfiguration) -
             return false;
         }
     }
-    true
+    graph.published_relays.iter().all(|relay| {
+        current_work(&live, &relay.device).is_none_or(|work| function_ready(work, &relay.id))
+    })
 }
 
 fn current_work<'a>(live: &'a Live, key: &DeviceKey) -> Option<&'a DeviceWork> {
