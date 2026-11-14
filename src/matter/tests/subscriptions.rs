@@ -512,7 +512,7 @@ struct Observed {
     versions: std::collections::BTreeMap<u16, u32>,
     bdbis: std::collections::BTreeMap<u16, (u32, u32)>,
     roots: std::collections::BTreeMap<u16, (u32, u32)>,
-    unsupported: Vec<u16>,
+    status: Vec<(u16, IMStatusCode)>,
     lighting: std::collections::BTreeMap<(u16, u32, u32), (u32, u16)>,
     curtain: std::collections::BTreeMap<u32, (u32, Option<u16>)>,
     fan: std::collections::BTreeMap<u32, (u32, u8)>,
@@ -601,8 +601,8 @@ impl Observed {
                         }
                     }
                     AttrResp::Status(status) => {
-                        assert_eq!(status.status.status, IMStatusCode::UnsupportedEndpoint);
-                        self.unsupported.push(status.path.endpoint.unwrap());
+                        self.status
+                            .push((status.path.endpoint.unwrap(), status.status.status));
                     }
                 }
             }

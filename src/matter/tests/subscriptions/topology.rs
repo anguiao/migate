@@ -11,6 +11,20 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
     let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     connect(&matter, SERVER_ID, CLIENT_ID, boot + 20);
     connect(&client, CLIENT_ID, SERVER_ID, boot + 20);
+    if boot == 4 {
+        matter.with_state(|state| {
+            let mut limited = AclEntry::new(None, Privilege::VIEW, AuthMode::Case);
+            limited.add_subject(CLIENT_ID).unwrap();
+            limited
+                .add_target(rs_matter::acl::Target::new(Some(2), None, None))
+                .unwrap();
+            let fabric = state
+                .fabrics
+                .fabric_mut(NonZeroU8::new(1).unwrap())
+                .unwrap();
+            fabric.acl_update(0, limited).unwrap();
+        });
+    }
     let crypto = test_only_crypto();
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: InteractionModelState = InteractionModelState::new();
@@ -105,14 +119,14 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                 2 => {
                     let id = previous.unwrap();
                     let restored = receive_observed(&client, id).await.unwrap();
-                    assert_eq!(restored.unsupported, [5]);
+                    assert_eq!(restored.status, [(5, IMStatusCode::UnsupportedEndpoint)]);
                     assert_eq!(restored.parts[&0], [1, 2, 3]);
                     assert_eq!(restored.parts[&1], [2, 3]);
                     assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
                     wait_committed(&state).await;
                     id
                 }
-                _ => {
+                3 => {
                     let id = previous.unwrap();
                     let added = receive_observed(&client, id).await.unwrap();
                     assert_eq!(added.parts[&0], [1, 2, 3, 4, 5, 6, 7]);
@@ -133,6 +147,22 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
                     wait_committed(&state).await;
                     id
                 }
+                4 => {
+                    let id = previous.unwrap();
+                    let restored = receive_observed(&client, id).await.unwrap();
+                    assert_eq!(restored.powers.keys().copied().collect::<Vec<_>>(), [2]);
+                    assert!(restored.parts.is_empty() && restored.bdbis.is_empty());
+                    assert_eq!(restored.status.len(), 4);
+                    assert!(
+                        restored
+                            .status
+                            .iter()
+                            .all(|(_, status)| *status == IMStatusCode::UnsupportedAccess)
+                    );
+                    wait_committed(&state).await;
+                    id
+                }
+                _ => unreachable!(),
             };
             single.functions()[0].observe(true);
             let changed = receive_observed(&client, id).await.unwrap();
@@ -160,7 +190,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
 }
 
 #[test]
-fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_restart() {
+fn restored_subscription_follows_current_endpoints_and_access() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -168,6 +198,7 @@ fn dynamic_subscription_reports_add_delete_and_restores_deleted_paths_after_rest
             let id = dynamic_boot(directory.path(), 1, None);
             let restored = dynamic_boot(directory.path(), 2, Some(id));
             assert_eq!(dynamic_boot(directory.path(), 3, Some(restored)), id);
+            assert_eq!(dynamic_boot(directory.path(), 4, Some(id)), id);
         })
         .unwrap()
         .join()
