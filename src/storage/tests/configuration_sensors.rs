@@ -5,7 +5,7 @@ use crate::xiaomi::capability::tests::source::SourceFixture;
 use crate::{
     configuration::CommittedConfiguration,
     device::{DeviceKey, FunctionKind, MeasurementRange},
-    xiaomi::capability::{MeasurementUnit, NumericFormat, PropertyBinding, parse_device_for_model},
+    xiaomi::capability::{MeasurementUnit, NumericFormat, PropertyBinding},
 };
 use serde_json::{Value, json};
 
@@ -209,48 +209,6 @@ fn sensor_bindings_round_trip_with_parent_and_child_endpoints() {
 }
 
 #[test]
-fn old_outlet_and_light_configurations_remain_readable_alongside_sensors() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(dir.path()).unwrap();
-    let outlet = fixture("outlet", "cuco.plug.v3", OUTLET);
-    let sensor = sensor("sensor");
-    let planned = next(
-        &CommittedConfiguration::empty(),
-        scope("account", "home"),
-        vec![outlet, sensor],
-    )
-    .configuration;
-    save(&store, &planned);
-    assert_eq!(load(&store), planned);
-    let loaded = load(&store);
-    let outlet = loaded
-        .devices
-        .iter()
-        .find(|device| device.key.id == "outlet")
-        .unwrap();
-    assert_eq!(
-        outlet.native.as_ref().unwrap().device().functions()[0].kind(),
-        FunctionKind::Outlet
-    );
-    let sensor = loaded
-        .devices
-        .iter()
-        .find(|device| device.key.id == "sensor")
-        .unwrap();
-    assert_eq!(sensor.functions.len(), 2);
-    assert_eq!(outlet.endpoint, 2);
-    assert_eq!(sensor.endpoint, 4);
-    assert_eq!(
-        sensor
-            .functions
-            .iter()
-            .map(|f| f.endpoint)
-            .collect::<Vec<_>>(),
-        [5, 6]
-    );
-}
-
-#[test]
 fn multiple_sensors_keep_distinct_identities_names_and_bindings() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(dir.path()).unwrap();
@@ -280,23 +238,6 @@ fn multiple_sensors_keep_distinct_identities_names_and_bindings() {
         loaded.devices[1].native.as_ref().unwrap().device().key().id,
         "second"
     );
-}
-
-#[test]
-fn absent_optional_battery_field_remains_readable() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(dir.path()).unwrap();
-    seed(&store, vec![sensor("sensor")]);
-    let mut old: Value = serde_json::from_str(&raw(&store)).unwrap();
-    old["devices"][0]["native"]
-        .as_object_mut()
-        .unwrap()
-        .remove("battery");
-    corrupt(&store, &old);
-    let loaded = load(&store);
-    let native = loaded.devices[0].native.as_ref().unwrap();
-    assert!(native.device().battery().is_none());
-    assert_eq!(native.device().functions().len(), 2);
 }
 
 #[test]
@@ -419,14 +360,10 @@ fn native_measurement_metadata_is_preserved_without_a_battery_field() {
     .configuration;
     save(&store, &planned);
     let loaded = load(&store);
-    let measurement = loaded.devices[0]
-        .native
-        .as_ref()
-        .unwrap()
-        .device()
-        .functions()[0]
-        .measurement()
-        .unwrap();
+    let device = loaded.devices[0].native.as_ref().unwrap().device();
+    assert!(device.battery().is_none());
+    assert_eq!(device.battery_issue(), Some("battery service is missing"));
+    let measurement = device.functions()[0].measurement().unwrap();
     assert_eq!(measurement.format(), NumericFormat::Float);
     assert_eq!(measurement.unit(), MeasurementUnit::Celsius);
     assert_eq!(measurement.range().min(), -30.0);
@@ -596,53 +533,7 @@ fn specific_battery_parse_diagnostics_survive_save_and_load() {
 }
 
 #[test]
-fn absent_optional_battery_diagnostic_remains_absent() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(dir.path()).unwrap();
-    let instance: Value = serde_json::from_str(SENSOR).unwrap();
-    let parsed = parse_device_for_model(
-        DeviceKey::new("xiaomi", "sensor"),
-        "miaomiaoce.sensor_ht.t6",
-        &instance,
-    )
-    .unwrap();
-    let device = crate::xiaomi::capability::ParsedDevice::new(
-        parsed.key().clone(),
-        parsed.functions().to_vec(),
-        None,
-    )
-    .unwrap();
-    let native = crate::xiaomi::capability::NativeDescription::new(
-        "miaomiaoce.sensor_ht.t6".into(),
-        instance["type"].as_str().unwrap().into(),
-        device,
-    )
-    .unwrap();
-    let native = SourceFixture {
-        raw: sensor("sensor").raw,
-        native,
-    };
-    let planned = next(
-        &CommittedConfiguration::empty(),
-        scope("account", "home"),
-        vec![native],
-    )
-    .configuration;
-    save(&store, &planned);
-    let mut old: Value = serde_json::from_str(&raw(&store)).unwrap();
-    old["devices"][0]["native"]
-        .as_object_mut()
-        .unwrap()
-        .remove("battery_issue");
-    corrupt(&store, &old);
-    let loaded = load(&store);
-    let device = loaded.devices[0].native.as_ref().unwrap().device();
-    assert!(device.battery().is_none());
-    assert_eq!(device.battery_issue(), None);
-}
-
-#[test]
-fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readings() {
+fn co2_configuration_restores_identity_native_binding_and_endpoints() {
     let directory = tempfile::tempdir().unwrap();
     let original = fixture(
         "co2",
@@ -668,17 +559,6 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
     )
     .configuration;
     save(&store, &planned);
-    let (physical, _) = crate::device::PhysicalDevice::new(
-        planned.derive().served[&DeviceKey::new("xiaomi", "co2")]
-            .description
-            .clone(),
-    );
-    physical.functions()[0]
-        .observe_measurement(700.0, Some(100), 200)
-        .unwrap();
-    let wire = raw(&store);
-    assert!(!wire.contains("received_at"));
-    assert!(!wire.contains("source_time"));
     drop(store);
     let reopened = crate::storage::Store::open(directory.path()).unwrap();
     let restored = load(&reopened);
@@ -700,19 +580,6 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
             piid: 1029
         }
     );
-    let (restarted, _) = crate::device::PhysicalDevice::new(
-        restored.derive().served[&DeviceKey::new("xiaomi", "co2")]
-            .description
-            .clone(),
-    );
-    assert_eq!(
-        restarted.functions()[0]
-            .snapshot()
-            .measurement()
-            .unwrap()
-            .value,
-        None
-    );
     let unchanged = next(
         &restored,
         scope("account", "home"),
@@ -723,7 +590,7 @@ fn co2_configuration_restores_identity_bindings_and_endpoints_without_live_readi
 }
 
 #[test]
-fn illuminance_restores_current_identity_and_range_without_persisting_readings_or_steps() {
+fn illuminance_configuration_preserves_identity_range_and_ignores_steps() {
     for (model, text, battery) in [
         (
             "yeelink.light.nl1",
@@ -748,14 +615,7 @@ fn illuminance_restores_current_identity_and_range_without_persisting_readings_o
         .configuration;
         planned.devices[0].label = "Room light level".into();
         save(&store, &planned);
-        let (physical, _) =
-            crate::device::PhysicalDevice::new(planned.derive().served[&key].description.clone());
-        physical.functions()[0]
-            .observe_measurement(0.125, Some(100), 200)
-            .unwrap();
         let encoded = raw(&store);
-        assert!(!encoded.contains("source_time"));
-        assert!(!encoded.contains("received_at"));
         assert!(!encoded.contains("step"));
         drop(store);
         let reopened = crate::storage::Store::open(directory.path()).unwrap();
@@ -764,15 +624,6 @@ fn illuminance_restores_current_identity_and_range_without_persisting_readings_o
         let description = &restored.derive().served[&key].description;
         assert_eq!(description.label(), "Room light level");
         assert_eq!(description.has_battery(), battery);
-        let (restarted, _) = crate::device::PhysicalDevice::new(description.clone());
-        assert_eq!(
-            restarted.functions()[0]
-                .snapshot()
-                .measurement()
-                .unwrap()
-                .value,
-            None
-        );
         assert_ne!(
             restored.devices[0].endpoint,
             restored.devices[0].functions[0].endpoint

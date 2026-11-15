@@ -2,12 +2,8 @@
 //! the same constructors as the network boundary; corrupted records fail the
 //! load without being repaired.
 
-use super::fixtures::{native, planned, scope, unique};
-use crate::{
-    configuration::{CommittedConfiguration, CommittedDevice, CommittedFunction},
-    device::DeviceKey,
-    storage::Store,
-};
+use super::fixtures::{native, planned};
+use crate::storage::Store;
 use serde_json::{Value, json};
 
 const OUTLET: &str = include_str!("../../../tests/fixtures/miot/outlet.json");
@@ -75,41 +71,51 @@ fn outlet_and_light(store: &Store) {
 }
 
 #[test]
-fn stored_descriptions_recreate_supported_source_topologies() {
+fn stored_cp7pd_rejects_an_incorrect_channel_property_with_valid_function_ids() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    outlet(&store);
-    assert!(store.devices().load_configuration().is_ok());
-}
-
-#[test]
-fn stored_outlets_must_match_a_supported_channel_layout() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    outlet(&store);
+    let planned = planned(
+        &store,
+        vec![native(
+            "multi",
+            "cuco.plug.cp7pd",
+            serde_json::from_str(MULTI).unwrap(),
+        )],
+    );
+    assert_eq!(store.devices().load_configuration().unwrap(), planned);
     let mut changed = stored(&store);
-    let index = index_of(&changed, "outlet");
-    changed["devices"][index]["native"]["functions"] = json!([
-        {"kind":"outlet","id":"main","label":"Main power","power":{"siid":2,"piid":1}},
-        {"kind":"outlet","id":"outlet_2","label":"Second","power":{"siid":3,"piid":1}}
-    ]);
+    let channel = changed["devices"][0]["native"]["functions"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|function| function["id"] == "outlet:3")
+        .unwrap();
+    assert_eq!(channel["power"], json!({"siid":3,"piid":1}));
+    channel["power"]["piid"] = json!(2);
     overwrite(&store, &changed);
     assert!(store.devices().load_configuration().is_err());
 }
 
 #[test]
-fn stored_outlets_cannot_hide_a_light_function() {
+fn stored_core_function_must_belong_to_its_own_device() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    outlet(&store);
+    outlet_and_light(&store);
+    let valid = store.devices().load_configuration().unwrap();
     let mut changed = stored(&store);
-    let index = index_of(&changed, "outlet");
-    changed["devices"][index]["native"]["functions"] = json!([
-        {"kind":"light","id":"main","label":"Light","power":{"siid":2,"piid":1},
-         "lighting":{"profile":"on_off"}}
-    ]);
+    let outlet = index_of(&changed, "outlet");
+    let light = index_of(&changed, "light");
+    let light_id = changed["devices"][light]["native"]["functions"][0]["id"].clone();
+    assert_eq!(light_id, "light:2");
+    let original = changed["devices"][outlet]["native"]["recognition"]["core"][0].clone();
+    assert_eq!(original, "outlet:2");
+    changed["devices"][outlet]["native"]["recognition"]["core"][0] = light_id;
     overwrite(&store, &changed);
     assert!(store.devices().load_configuration().is_err());
+
+    changed["devices"][outlet]["native"]["recognition"]["core"][0] = original;
+    overwrite(&store, &changed);
+    assert_eq!(store.devices().load_configuration().unwrap(), valid);
 }
 
 #[test]
@@ -302,7 +308,7 @@ fn stored_split_records_require_valid_unique_aliases_and_channels() {
 }
 
 #[test]
-fn unknown_fields_are_rejected_at_every_layer() {
+fn unknown_fields_are_rejected_in_configuration_scope_device_native_and_function_records() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     outlet_and_light(&store);
@@ -393,11 +399,18 @@ fn a_native_function_without_a_reserved_identity_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     outlet_and_light(&store);
-    let mut changed = stored(&store);
-    let index = index_of(&changed, "light");
-    changed["devices"][index]["functions"] = json!([]);
-    overwrite(&store, &changed);
-    assert!(store.devices().load_configuration().is_err());
+    let mut configuration = store.devices().load_configuration().unwrap();
+    assert_eq!(configuration.validate(), Ok(()));
+    let light = configuration
+        .devices
+        .iter_mut()
+        .find(|device| device.key.id == "light")
+        .unwrap();
+    light.functions[0].id = "light:99".into();
+    assert_eq!(
+        configuration.validate(),
+        Err("Committed native function has no reserved identity")
+    );
 }
 
 #[test]
@@ -449,45 +462,21 @@ fn native_facts_without_a_home_scope_are_rejected() {
 
 #[test]
 fn in_memory_native_key_mismatch_is_rejected() {
-    let native = native(
-        "outlet",
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    outlet(&store);
+    let mut configuration = store.devices().load_configuration().unwrap();
+    assert_eq!(configuration.validate(), Ok(()));
+    let other = native(
+        "other",
         "cuco.plug.v3",
         serde_json::from_str(OUTLET).unwrap(),
     );
-    let mut other = native.native.clone();
-    other = crate::xiaomi::capability::NativeDescription::new(
-        other.model().to_owned(),
-        other.instance_type().to_owned(),
-        crate::xiaomi::capability::parse_device_for_model(
-            DeviceKey::new("xiaomi", "other"),
-            "cuco.plug.v3",
-            &serde_json::from_str(OUTLET).unwrap(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let configuration = CommittedConfiguration {
-        temperature_bindings: Default::default(),
-        relay_channels: Vec::new(),
-        split_devices: Vec::new(),
-        scope: Some(scope()),
-        root_version: 1,
-        descriptions: Vec::new(),
-        devices: vec![CommittedDevice {
-            key: DeviceKey::new("xiaomi", "outlet"),
-            unique_id: unique("outlet"),
-            endpoint: 2,
-            label: "Outlet".into(),
-            configuration_version: 1,
-            functions: vec![CommittedFunction {
-                id: "main".into(),
-                endpoint: 2,
-            }],
-            native: Some(other),
-        }],
-        groups: Vec::new(),
-    };
-    assert!(configuration.validate().is_err());
+    configuration.devices[0].native = Some(other.native);
+    assert_eq!(
+        configuration.validate(),
+        Err("Committed native facts belong to another device")
+    );
 }
 
 #[test]

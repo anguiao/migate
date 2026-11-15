@@ -434,17 +434,15 @@ fn rejects_invalid_semantics_without_overwriting_credentials() {
 
 #[cfg(unix)]
 #[test]
-fn xiaomi_credentials_remain_inside_private_storage() {
+fn stored_credentials_and_matter_records_use_private_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let dir = root.path().join("private");
     fs::create_dir(&dir).unwrap();
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-    Store::open(&dir)
-        .unwrap()
-        .xiaomi()
-        .fixture_replace(&record("secret"))
-        .unwrap();
+    let store = Store::open(&dir).unwrap();
+    store.matter().put(1, b"secret").unwrap();
+    store.xiaomi().fixture_replace(&record("secret")).unwrap();
     assert_eq!(
         fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
         0o700

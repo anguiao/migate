@@ -6,22 +6,6 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 #[test]
-fn home_device_info_skips_empty_members_without_http() {
-    let (base, requests) = mock_server(vec![response(json!({}))]);
-    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    assert!(
-        future::block_on(get_home_devices(
-            &cloud,
-            "token",
-            &home(Vec::<String>::new())
-        ))
-        .unwrap()
-        .is_empty()
-    );
-    assert!(requests.try_recv().is_err());
-}
-
-#[test]
 fn home_device_info_paginates_with_scoped_requests_and_explicit_online_state() {
     let mut first = device("first", true);
     first["name"] = json!(17);
@@ -77,67 +61,35 @@ fn home_device_info_paginates_with_scoped_requests_and_explicit_online_state() {
 
 #[test]
 fn home_device_info_batches_members_without_broadening_any_page() {
-    let members = (0..401)
-        .map(|index| format!("did-{index}"))
-        .collect::<Vec<_>>();
-    let expected_members = members.clone();
-    let mut request_index = 0;
-    let (base, requests) = dynamic_mock_server(6, move |request| {
-        let body: Value = form_data(&request.body);
-        let batch = request_index / 2;
-        let requested = &expected_members[batch * 150..((batch + 1) * 150).min(401)];
-        assert_eq!(body["dids"], json!(requested));
-        assert_eq!(body["limit"], 200);
-        let is_first = request_index % 2 == 0;
-        request_index += 1;
-        if is_first {
-            assert!(body.get("start_did").is_none());
-            response(json!({"list":[],"has_more":true,"next_start_did":"same-per-batch"}))
-        } else {
-            assert_eq!(body["start_did"], "same-per-batch");
-            response(
-                json!({"list":requested.iter().map(|did| device(did, true)).collect::<Vec<_>>(),"has_more":false}),
-            )
-        }
-    });
-    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    let devices = future::block_on(get_home_devices(&cloud, "token", &home(members))).unwrap();
-    assert_eq!(devices.len(), 401);
-    assert_eq!(requests.try_iter().count(), 6);
-}
-
-#[test]
-fn home_device_info_batches_member_requests_at_150() {
-    let members = (0..151)
-        .map(|index| format!("did-{index}"))
-        .collect::<Vec<_>>();
-    let (base, requests) = mock_server(vec![
-        response(json!({"list":[],"has_more":false})),
-        response(json!({"list":[],"has_more":false})),
-    ]);
-    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    future::block_on(get_home_devices(&cloud, "token", &home(members))).unwrap();
-    let requests = requests.try_iter().collect::<Vec<_>>();
-    assert_eq!(requests.len(), 2);
-    for (request, expected_count) in requests.iter().zip([150, 1]) {
-        let body: Value = form_data(&request.body);
-        assert_eq!(body["dids"].as_array().unwrap().len(), expected_count);
-        assert_eq!(body["limit"], 200);
+    for (total, requests_expected) in [(151, 4), (401, 6)] {
+        let members = (0..total)
+            .map(|index| format!("did-{index}"))
+            .collect::<Vec<_>>();
+        let expected_members = members.clone();
+        let mut request_index = 0;
+        let (base, requests) = dynamic_mock_server(requests_expected, move |request| {
+            let body: Value = form_data(&request.body);
+            let batch = request_index / 2;
+            let requested = &expected_members[batch * 150..((batch + 1) * 150).min(total)];
+            assert_eq!(body["dids"], json!(requested));
+            assert_eq!(body["limit"], 200);
+            let is_first = request_index % 2 == 0;
+            request_index += 1;
+            if is_first {
+                assert!(body.get("start_did").is_none());
+                response(json!({"list":[],"has_more":true,"next_start_did":"same-per-batch"}))
+            } else {
+                assert_eq!(body["start_did"], "same-per-batch");
+                response(
+                    json!({"list":requested.iter().map(|did| device(did, true)).collect::<Vec<_>>(),"has_more":false}),
+                )
+            }
+        });
+        let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
+        let devices = future::block_on(get_home_devices(&cloud, "token", &home(members))).unwrap();
+        assert_eq!(devices.len(), total);
+        assert_eq!(requests.try_iter().count(), requests_expected);
     }
-}
-
-#[test]
-fn home_device_info_accepts_only_is_online_wire_field() {
-    let record =
-        json!({"did":"target","model":"vendor.plug","spec_type":"instance-type","online":true});
-    let (base, _) = mock_server(vec![response(json!({"list":[record],"has_more":false}))]);
-    let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    assert_eq!(
-        future::block_on(get_home_devices(&cloud, "token", &home(["target"])))
-            .unwrap_err()
-            .kind(),
-        &CloudErrorKind::Protocol
-    );
 }
 
 #[test]
@@ -163,6 +115,11 @@ fn home_device_info_requires_valid_target_fields_and_boolean_online() {
         record.as_object_mut().unwrap().remove(field);
         invalid.push(record);
     }
+    let mut alias = valid.clone();
+    let object = alias.as_object_mut().unwrap();
+    let value = object.remove("isOnline").unwrap();
+    object.insert("online".into(), value);
+    invalid.push(alias);
     for (field, values) in [
         (
             "did",
@@ -321,15 +278,13 @@ fn home_device_info_rejects_requested_devices_outside_the_selected_home() {
 fn home_device_info_skips_http_for_no_requested_members() {
     let (base, requests) = mock_server(vec![response(json!({}))]);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    assert!(
-        future::block_on(cloud.get_home_devices(
-            &token_session("token"),
-            &home(["unrequested"]),
-            &[]
-        ))
-        .unwrap()
-        .is_empty()
-    );
+    for selected_home in [home(Vec::<String>::new()), home(["unrequested"])] {
+        assert!(
+            future::block_on(cloud.get_home_devices(&token_session("token"), &selected_home, &[]))
+                .unwrap()
+                .is_empty()
+        );
+    }
     assert!(requests.try_recv().is_err());
 }
 

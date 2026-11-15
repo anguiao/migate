@@ -233,37 +233,6 @@ fn stale_local_device_errors_cannot_revoke_current_access() {
 }
 
 #[test]
-fn an_unsent_pending_write_reselects_cloud_and_submits_the_absolute_target_once() {
-    let rig = Rig::new(true, &["one"]);
-    rig.cloud.lock().unwrap().online.insert("one".into());
-    block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_scope_valid.get()).await;
-        let wire = Rc::new(Wire::default());
-        let (handle, driver) = local(&c, wire.clone());
-        let one = function(&c.context.registry, "one", "outlet:2");
-        future::or(
-            async {
-                driver.run(|_| {}).await.unwrap();
-                panic!("driver unexpectedly stopped");
-            },
-            async {
-                let mut command = Box::pin(one.execute(Command::On));
-                assert!(poll_once(command.as_mut()).await.is_none());
-                until(|| wire.polls.get() > 0).await;
-                local_device_offline(&c.context, &handle, "one");
-                wire.allow(usize::MAX);
-                assert_eq!(command.await.unwrap().power(), Some(Power::On));
-                assert!(wire.written.borrow().is_empty());
-                let cloud = c.cloud.lock().unwrap();
-                assert_eq!(cloud.property_writes.len(), 1);
-                assert!(cloud.property_writes[0].3);
-            },
-        )
-        .await;
-    }));
-}
-
-#[test]
 fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_write() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
@@ -287,7 +256,7 @@ fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_writ
                 assert_eq!(inflight.actual_path, None);
                 local_device_offline(&c.context, &handle, "one");
                 wire.allow(usize::MAX);
-                command.await.unwrap();
+                assert_eq!(command.await.unwrap().power(), Some(Power::On));
                 let status = c.context.diagnostics();
                 let last = status.devices[0].commands[0].last.as_ref().unwrap();
                 assert_eq!(last.id, id);
@@ -297,7 +266,9 @@ fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_writ
                 );
                 assert_eq!(last.result, Some(Ok(())));
                 assert!(wire.written.borrow().is_empty());
-                assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+                let cloud = c.cloud.lock().unwrap();
+                assert_eq!(cloud.property_writes.len(), 1);
+                assert!(cloud.property_writes[0].3);
             },
         )
         .await;

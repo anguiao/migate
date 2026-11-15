@@ -253,7 +253,7 @@ fn ls2307_uses_required_mode_values_independently_of_labels_and_other_modes() {
 }
 
 #[test]
-fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
+fn invalid_or_missing_optional_light_properties_reduce_the_profile() {
     let original = description("xiaomi.light.ceil04");
     for (field, value) in [
         ("format", json!("string")),
@@ -296,21 +296,27 @@ fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
             .temperature()
             .is_none()
     );
+}
+
+#[test]
+fn lights_without_a_qualifying_power_service_are_rejected() {
+    let original = description("xiaomi.light.ceil04");
     let mut empty = original.clone();
     empty["services"][1]["properties"] = json!([]);
     assert!(parse_device(key(), &empty).is_err());
-    let mut sensor_only = original.clone();
+    let mut sensor_only = original;
     sensor_only["services"].as_array_mut().unwrap().remove(1);
     assert!(parse_device(key(), &sensor_only).is_err());
-    let mut ambiguous = original.clone();
-    let mut duplicate = ambiguous["services"][1].clone();
+}
+
+#[test]
+fn two_qualified_light_services_publish_distinct_functions() {
+    let mut combined = description("xiaomi.light.ceil04");
+    let mut duplicate = combined["services"][1].clone();
     duplicate["iid"] = json!(8);
-    ambiguous["services"]
-        .as_array_mut()
-        .unwrap()
-        .push(duplicate);
+    combined["services"].as_array_mut().unwrap().push(duplicate);
     assert_eq!(
-        parse_device(key(), &ambiguous)
+        parse_device(key(), &combined)
             .unwrap()
             .functions()
             .iter()

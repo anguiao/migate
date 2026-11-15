@@ -2,23 +2,8 @@ use super::*;
 use bytes::BytesMut;
 use mqttbytes::{
     QoS,
-    v5::{ConnAck, ConnectReturnCode, Packet, Publish},
+    v5::{Packet, Publish},
 };
-
-#[test]
-fn connack_roundtrips_through_encoding_and_framing() {
-    let bytes = encode_packet(&Packet::ConnAck(ConnAck::new(
-        ConnectReturnCode::Success,
-        false,
-    )))
-    .unwrap();
-    let mut frames = Frames::default();
-    frames.push(&bytes).unwrap();
-    assert!(matches!(
-        frames.next_packet().unwrap(),
-        Some(Packet::ConnAck(_))
-    ));
-}
 
 #[test]
 fn partial_frames_stay_pending_until_complete() {

@@ -197,8 +197,9 @@ fn fresh_stops_after_retarget_or_resumed_motion_follow_physical_feedback() {
         observe(CurtainValue::Status(CurtainMotion::Stopped));
         assert_eq!(target(function), Some(25));
         observe(CurtainValue::Status(CurtainMotion::Closing));
+        observe(CurtainValue::CurrentPosition(17));
         observe(CurtainValue::Status(CurtainMotion::Stopped));
-        assert_eq!(target(function), Some(25));
+        assert_eq!(target(function), Some(17));
         request.accept().unwrap();
         fresh.accepted().await.unwrap();
     });

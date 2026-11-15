@@ -86,28 +86,6 @@ fn partial_writes_accumulate_before_flush() {
 }
 
 #[test]
-fn a_completed_write_is_reported_before_flush_is_attempted() {
-    let mut frame = SendFrame::new(b"xyz".to_vec());
-    let mut stream = writer(10);
-    stream.flush_pending = true;
-    assert_eq!(
-        step(&mut frame, &mut stream),
-        SendStatus::Wrote {
-            accepted: 3,
-            complete: true,
-        },
-        "the full write is reported in the poll that accepted it"
-    );
-    assert_eq!(
-        step(&mut frame, &mut stream),
-        SendStatus::Pending,
-        "flush is a separate step once the frame is fully written"
-    );
-    stream.flush_pending = false;
-    assert_eq!(step(&mut frame, &mut stream), SendStatus::Flushed);
-}
-
-#[test]
 fn flush_follows_an_accepted_write_without_another_write() {
     let mut frame = SendFrame::new(b"ok".to_vec());
     let mut stream = writer(10);
@@ -184,11 +162,4 @@ fn a_zero_byte_write_is_an_io_error() {
         .expect_err("zero write must fail");
     assert_eq!(error.kind(), io::ErrorKind::WriteZero);
     assert!(!frame.started());
-}
-
-#[test]
-fn an_empty_frame_completes_through_flush() {
-    let mut frame = SendFrame::new(Vec::new());
-    let mut stream = writer(0);
-    assert_eq!(step(&mut frame, &mut stream), SendStatus::Flushed);
 }

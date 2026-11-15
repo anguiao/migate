@@ -93,19 +93,6 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
 }
 
 #[test]
-fn a_sensor_never_creates_a_native_write_request() {
-    block_on(async {
-        let physical = sensor();
-        physical.set_availability(Availability::Available);
-        let result = terminal_command(&physical, "on").await.unwrap();
-        assert!(result.contains("does not support"));
-        // There is no consumer for a read-only function at all.
-        let (_, receivers) = PhysicalDevice::new(physical.description());
-        assert!(receivers.is_empty());
-    });
-}
-
-#[test]
 fn a_supplied_source_time_is_displayed_without_rfc3339_assumptions() {
     let text = measurement_text(
         crate::device::MeasurementSnapshot {
@@ -158,7 +145,7 @@ fn status_shows_shared_battery_value_and_separate_times() {
 }
 
 #[test]
-fn co2_terminal_status_shows_native_ppm_and_independent_times() {
+fn measurement_status_shows_native_ppm_and_lux_with_independent_times() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
@@ -168,92 +155,59 @@ fn co2_terminal_status_shows_native_ppm_and_independent_times() {
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
         let registry = DeviceRegistry::new();
-        let (physical, receivers) = PhysicalDevice::new(
-            PhysicalDeviceDescription::new(
-                DeviceKey::new("xiaomi", "co2"),
-                "Air",
-                vec![FunctionDescription {
-                    id: "co2".into(),
-                    label: "CO₂".into(),
-                    kind: FunctionKind::CarbonDioxide(
-                        MeasurementRange::new(400.0, 5000.0).unwrap(),
-                    ),
-                }],
+        for (id, label, kind, value, expected) in [
+            (
+                "co2",
+                "CO₂",
+                FunctionKind::CarbonDioxide(MeasurementRange::new(400.0, 5000.0).unwrap()),
+                650.125,
+                "co2 (CO₂): 650.12 ppm",
+            ),
+            (
+                "illuminance",
+                "Illuminance",
+                FunctionKind::Illuminance(MeasurementRange::new(0.0, 10000.0).unwrap()),
+                0.125,
+                "illuminance (Illuminance): 0.12 lux",
+            ),
+        ] {
+            let (physical, receivers) = PhysicalDevice::new(
+                PhysicalDeviceDescription::new(
+                    DeviceKey::new("xiaomi", id),
+                    label,
+                    vec![FunctionDescription {
+                        id: id.into(),
+                        label: label.into(),
+                        kind,
+                    }],
+                )
+                .unwrap(),
+            );
+            assert!(receivers.is_empty());
+            add_device(&store, &physical.description());
+            registry.insert(physical.clone());
+            physical.functions()[0]
+                .observe_measurement(value, Some(100), 200)
+                .unwrap();
+            let output = handle_line(
+                &registry,
+                &store.devices(),
+                &status,
+                &format!("status {id}"),
+                0,
             )
-            .unwrap(),
-        );
-        assert!(receivers.is_empty());
-        add_device(&store, &physical.description());
-        registry.insert(physical.clone());
-        physical.functions()[0]
-            .observe_measurement(650.125, Some(100), 200)
-            .unwrap();
-        let output = handle_line(&registry, &store.devices(), &status, "status co2", 0)
             .await
             .unwrap()
             .unwrap();
-        assert!(output.contains("co2 (CO₂): 650.12 ppm"), "{output}");
-        assert!(output.contains("upstream time 100"), "{output}");
-        assert!(output.contains("received at"), "{output}");
-        assert!(
-            terminal_command(&physical, "on")
-                .await
-                .unwrap()
-                .contains("does not support")
-        );
-    });
-}
-
-#[test]
-fn illuminance_terminal_status_keeps_native_lux_and_independent_times() {
-    block_on(async {
-        let directory = tempfile::tempdir().unwrap();
-        let store = Store::open(directory.path()).unwrap();
-        let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
-            .unwrap()
-            .local_status()
-            .unwrap();
-        let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
-        let registry = DeviceRegistry::new();
-        let (physical, receivers) = PhysicalDevice::new(
-            PhysicalDeviceDescription::new(
-                DeviceKey::new("xiaomi", "illuminance"),
-                "Light level",
-                vec![FunctionDescription {
-                    id: "illuminance".into(),
-                    label: "Illuminance".into(),
-                    kind: FunctionKind::Illuminance(MeasurementRange::new(0.0, 10000.0).unwrap()),
-                }],
-            )
-            .unwrap(),
-        );
-        assert!(receivers.is_empty());
-        add_device(&store, &physical.description());
-        registry.insert(physical.clone());
-        physical.functions()[0]
-            .observe_measurement(0.125, Some(100), 200)
-            .unwrap();
-        let output = handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "status illuminance",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        assert!(
-            output.contains("illuminance (Illuminance): 0.12 lux"),
-            "{output}"
-        );
-        assert!(output.contains("upstream time 100"), "{output}");
-        assert!(output.contains("received at"), "{output}");
-        assert!(
-            terminal_command(&physical, "on")
-                .await
-                .unwrap()
-                .contains("does not support")
-        );
+            assert!(output.contains(expected), "{output}");
+            assert!(output.contains("upstream time 100"), "{output}");
+            assert!(output.contains("received at"), "{output}");
+            assert!(
+                terminal_command(&physical, "on")
+                    .await
+                    .unwrap()
+                    .contains("does not support")
+            );
+        }
     });
 }

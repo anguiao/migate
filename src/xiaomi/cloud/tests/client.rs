@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn miot_instance_endpoint_is_injected_only_for_tests() {
+fn instance_requests_use_the_public_miot_path_and_send_no_authorization() {
     let instance =
         json!({"type":"urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1","services":[]});
     let (base, requests) = mock_server(vec![MockResponse::json(200, &instance.to_string())]);
@@ -74,10 +74,7 @@ fn certificate_request_sends_only_base64_csr() {
     let request = requests.recv().unwrap();
     assert!(request.target.ends_with("/app/v2/ha/oauth/get_central_crt"));
     let body: Value = serde_json::from_str(&request.body).unwrap();
-    assert_eq!(
-        STANDARD.decode(body["csr"].as_str().unwrap()).unwrap(),
-        b"csr-pem"
-    );
+    assert_eq!(body, json!({"csr": STANDARD.encode(b"csr-pem")}));
 }
 
 #[test]

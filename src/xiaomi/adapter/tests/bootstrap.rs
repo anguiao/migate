@@ -14,9 +14,15 @@ fn equivalent_startup_recomputation_keeps_versions_and_uses_no_network() {
 
 #[test]
 fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup() {
-    let rig = Rig::new(true, &["one"]);
+    let rig = Rig::new(true, &["one", "two"]);
     let mut previous = rig.store.devices().load_configuration().unwrap();
-    previous.devices.clear();
+    let neighbor = previous
+        .device(&DeviceKey::new("xiaomi", "two"))
+        .unwrap()
+        .clone();
+    previous.devices.retain(|device| device.key == neighbor.key);
+    let fabric = rs_matter::persist::FABRIC_KEYS_START + 1;
+    rig.store.matter().put(fabric, b"fabric").unwrap();
     previous.descriptions[0].name = Some("Cached outlet name".into());
     previous.descriptions[0].diagnostic =
         Some("previous rules did not recognize this source".into());
@@ -32,11 +38,16 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
     )
     .unwrap();
     let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
-    assert!(app.frozen().is_empty());
+    assert_eq!(app.frozen().len(), 1);
     let plan = app.plan().unwrap().unwrap();
     app.apply(app.prepare(plan)).unwrap();
-    assert_eq!(app.frozen().len(), 1);
+    assert_eq!(app.frozen().len(), 2);
     let saved = rig.store.devices().load_configuration().unwrap();
+    assert_eq!(saved.device(&neighbor.key), Some(&neighbor));
+    assert_eq!(
+        rig.store.matter().get(fabric).unwrap().as_deref(),
+        Some(b"fabric".as_slice())
+    );
     assert_eq!(
         saved.descriptions[0].instance,
         previous.descriptions[0].instance
@@ -641,7 +652,7 @@ fn cached_build_dropped_before_run_releases_its_context_and_closes_commands() {
 fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails() {
     for corrupt_credentials in [false, true] {
         let Rig {
-            _directory: directory,
+            directory,
             source,
             store,
             discovery,
@@ -774,77 +785,4 @@ fn stopped_ha_or_missing_certificate_preserves_topology_and_maintenance() {
             assert_eq!(rig.cloud.lock().unwrap().certs, 1);
         }
     }
-}
-
-#[test]
-fn unsupported_cached_mcn04_is_recognized_without_disturbing_existing_identity_or_pairing() {
-    let rig = Rig::new(true, &["one", "two"]);
-    let mut before = rig.store.devices().load_configuration().unwrap();
-    let existing_key = DeviceKey::new("xiaomi", "two");
-    let existing = before.device(&existing_key).unwrap().clone();
-    before.devices.retain(|device| device.key.id != "one");
-    let input: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/lumi-mcn04.json"
-    ))
-    .unwrap();
-    let cached = before
-        .descriptions
-        .iter_mut()
-        .find(|raw| raw.key.id == "one")
-        .unwrap();
-    cached.model = "lumi.acpartner.mcn04".into();
-    cached.instance_type = input["type"].as_str().unwrap().into();
-    cached.instance = input;
-    cached.diagnostic = Some("previous rules did not recognize this source".into());
-    rig.store
-        .devices()
-        .commit_configuration(&before, &[])
-        .unwrap();
-    let fabric_key = rs_matter::persist::FABRIC_KEYS_START + 1;
-    rig.store
-        .matter()
-        .put(fabric_key, b"existing fabric")
-        .unwrap();
-    let (restored, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
-    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
-    let plan = app
-        .plan()
-        .unwrap()
-        .expect("cached mcn04 must be recognized");
-    app.apply(app.prepare(plan)).unwrap();
-    let after = rig.store.devices().load_configuration().unwrap();
-    assert_eq!(after.device(&existing_key).unwrap(), &existing);
-    assert_eq!(
-        rig.store.matter().get(fabric_key).unwrap(),
-        Some(b"existing fabric".to_vec())
-    );
-    let work = restored.context.live.borrow().devices["one"]
-        .admitted
-        .clone()
-        .unwrap();
-    assert_eq!(
-        work.native.device().functions()[0].observation_bindings(),
-        vec![
-            crate::xiaomi::capability::PropertyBinding { siid: 8, piid: 7 },
-            crate::xiaomi::capability::PropertyBinding { siid: 8, piid: 6 },
-        ]
-    );
-    let function = work.physical().function("air-conditioner:3").unwrap();
-    assert!(
-        function
-            .snapshot()
-            .air_conditioner()
-            .unwrap()
-            .power
-            .value
-            .is_none()
-    );
-    assert!(function.air_conditioner_constraints().is_none());
-    assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
 }

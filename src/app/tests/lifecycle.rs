@@ -1,4 +1,4 @@
-use super::super::{BridgeOptions, run_xiaomi_bridge};
+use super::super::{BridgeOptions, StartupGate, run_xiaomi_bridge};
 use super::{outlet, status};
 use crate::{storage::Store, xiaomi::adapter::tests::app_source::AppSource};
 use futures_lite::{
@@ -330,6 +330,19 @@ fn serving_terminal_io_failure_drops_the_source() {
         .unwrap();
 }
 
+struct ObservedEof<'a>(&'a event_listener::Event);
+
+impl futures_lite::io::AsyncRead for ObservedEof<'_> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.0.notify(usize::MAX);
+        std::task::Poll::Ready(Ok(0))
+    }
+}
+
 #[test]
 fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
     std::thread::Builder::new()
@@ -342,11 +355,11 @@ fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
                 let status = status(&store);
                 let started = event_listener::Event::new();
                 let listener = started.listen();
-                let paired = Cell::new(false);
-                let AppSource {
-                    adapter, handle, ..
-                } = AppSource::new(&store, None);
-                run_xiaomi_bridge(
+                let eof = event_listener::Event::new();
+                let eof_seen = eof.listen();
+                let source = AppSource::new(&store, None);
+                let handle = source.handle.clone();
+                let error = run_xiaomi_bridge(
                     BridgeOptions {
                         store: &store,
                         identity: &identity,
@@ -354,25 +367,37 @@ fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
                         port: 0,
                     },
                     async { Ok(handle) },
-                    async move {
-                        let _adapter = adapter;
-                        future::pending().await
-                    },
-                    Cursor::new(b"list\nstatus\n"),
-                    Vec::new(),
                     async {
                         listener.await;
-                        Ok(())
+                        eof_seen.await;
+                        let rebuilt = started.listen();
+                        source.describe(outlet());
+                        source.stage();
+                        rebuilt.await;
+                        Err("source update served after EOF".into())
+                    },
+                    futures_lite::io::BufReader::new(ObservedEof(&eof)),
+                    Vec::new(),
+                    async {
+                        async_io::Timer::after(std::time::Duration::from_secs(10)).await;
+                        Err("timed out waiting for the bridge to serve the update".into())
                     },
                     |_| {
-                        paired.set(true);
                         started.notify(usize::MAX);
                         Ok(())
                     },
                 )
                 .await
-                .unwrap();
-                assert!(paired.get());
+                .unwrap_err();
+                assert_eq!(error.to_string(), "source update served after EOF");
+                assert!(
+                    store
+                        .devices()
+                        .load_configuration()
+                        .unwrap()
+                        .device(outlet().key())
+                        .is_some()
+                );
             })
         })
         .unwrap()
@@ -397,8 +422,10 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                 let committed = app.clone();
                 let updates = Rc::new(Cell::new(0));
                 let source_updates = updates.clone();
-                let flood_started = std::time::Instant::now();
+                let (expire, deadline) = flume::bounded(0);
+                let gate = StartupGate::until(deadline);
                 let source = async move {
+                    let mut expire = Some(expire);
                     future::yield_now().await;
                     source.describe(
                         crate::device::PhysicalDeviceDescription::new(
@@ -409,17 +436,17 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                         .unwrap(),
                     );
                     source.read_power(false);
-                    while flood_started.elapsed() < std::time::Duration::from_secs(5) {
+                    loop {
                         source.stage();
                         source_updates.set(source_updates.get() + 1);
+                        if source_updates.get() == 4 {
+                            drop(expire.take());
+                        }
                         future::yield_now().await;
                     }
-                    future::pending::<Result<(), crate::RuntimeError>>().await
                 };
                 let started = event_listener::Event::new();
                 let listening = started.listen();
-                let began = std::time::Instant::now();
-                let started_at = Cell::new(None);
                 let published_at_start = Cell::new(0);
                 let bridge = super::super::run_lifecycle(
                     BridgeOptions {
@@ -428,7 +455,7 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                         status: &status,
                         port: 0,
                     },
-                    async { Ok((app, std::time::Duration::from_millis(50))) },
+                    async { Ok((app, gate)) },
                     source,
                     Cursor::new([]),
                     Vec::new(),
@@ -437,7 +464,12 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                         Ok(())
                     },
                     |_| {
-                        started_at.set(Some(std::time::Instant::now()));
+                        assert!(updates.get() >= 4);
+                        assert!(
+                            !committed
+                                .source
+                                .initial_reads_ready(&committed.current().configuration)
+                        );
                         published_at_start.set(committed.frozen().len());
                         started.notify(usize::MAX);
                         Ok(())
@@ -449,11 +481,7 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                 })
                 .await
                 .unwrap();
-                assert!(updates.get() > 1);
                 assert_eq!(published_at_start.get(), 2);
-                let elapsed = started_at.get().unwrap().duration_since(began);
-                assert!(elapsed >= std::time::Duration::from_millis(50));
-                assert!(elapsed < std::time::Duration::from_secs(5));
             })
         })
         .unwrap()
@@ -495,7 +523,7 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
             let stopping = done.listen();
             let bridge = super::super::run_lifecycle(
                 BridgeOptions { store: &store, identity: &identity, status: &status, port: 0 },
-                async { Ok((app.clone(), std::time::Duration::ZERO)) },
+                async { Ok((app.clone(), StartupGate::new(std::time::Duration::ZERO))) },
                 async move { let _source = source; future::pending().await },
                 input, output,
                 async { stopping.await; Ok(()) },

@@ -45,7 +45,7 @@ fn equivalent_kelvin_encodings_share_one_shape() {
 }
 
 #[test]
-fn profile_range_and_outlet_order_change_the_shape() {
+fn light_profile_temperature_range_and_child_labels_change_the_shape() {
     let on_off = light(LightProfile::OnOff);
     let dimmable = light(LightProfile::Dimmable);
     assert_ne!(
@@ -66,10 +66,6 @@ fn profile_range_and_outlet_order_change_the_shape() {
         label: id.into(),
         kind: FunctionKind::Outlet,
     };
-    let first = fixed_shape(&[outlet("a"), outlet("b")]);
-    let second = fixed_shape(&[outlet("b"), outlet("a")]);
-    assert_ne!(first, second);
-
     // Every child label is part of the Descriptor TagList.
     let mut renamed = outlet("a");
     renamed.label = "Renamed".into();

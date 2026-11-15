@@ -241,8 +241,7 @@ fn first_binding_applies_the_initial_catalog_without_a_cached_scope() {
     }));
 }
 
-#[test]
-fn missing_description_member_group_is_controllable_with_unknown_state() {
+fn group_with_undescribed_member() -> Rig {
     let rig = Rig::new(false, &["one"]);
     let instance: Value = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/miot/group3-instance.json"
@@ -261,16 +260,19 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
         )];
         cloud.catalog_instances.insert(instance_type, instance);
     }
+    rig
+}
+
+#[test]
+fn missing_description_member_group_is_controllable_with_unknown_state() {
+    let rig = group_with_undescribed_member();
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.cloud.lock().unwrap().homes > 0).await;
         until(|| {
             c.context
-                .live
-                .borrow()
-                .devices
-                .get("group-1")
-                .is_some_and(|slot| slot.admitted.is_some())
+                .registry
+                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .is_some()
         })
         .await;
         {
@@ -331,23 +333,32 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
                 .iter()
                 .all(|(did, _, _)| did != "group-1")
         );
-        // A repeated complete directory must preserve the native instance.
-        c.context.request_sync();
-        until(|| c.cloud.lock().unwrap().catalogs >= 2).await;
-        {
+    }));
+}
+
+#[test]
+fn repeated_and_failed_directories_keep_the_admitted_native_group() {
+    let rig = group_with_undescribed_member();
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.context
+                .registry
+                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .is_some()
+        })
+        .await;
+        let first = c.context.live.borrow().devices["group-1"]
+            .admitted
+            .clone()
+            .unwrap();
+        for (status, failed) in [(503, true), (200, false)] {
+            c.cloud.lock().unwrap().catalog_status = status;
+            c.context.request_sync();
+            until(|| c.context.status.borrow().catalog_problem.is_some() == failed).await;
             let live = c.context.live.borrow();
             let slot = &live.devices["group-1"];
-            assert!(std::rc::Rc::ptr_eq(slot.admitted.as_ref().unwrap(), &first));
-            assert!(slot.cloud_access.is_some());
-        }
-        // A failed account catalog keeps confirmed groups and their access.
-        c.cloud.lock().unwrap().catalog_status = 503;
-        c.context.request_sync();
-        until(|| c.cloud.lock().unwrap().catalogs >= 3).await;
-        {
-            let live = c.context.live.borrow();
-            let slot = &live.devices["group-1"];
-            assert!(std::rc::Rc::ptr_eq(slot.admitted.as_ref().unwrap(), &first));
+            assert!(Rc::ptr_eq(slot.admitted.as_ref().unwrap(), &first));
             assert!(slot.cloud_access.is_some());
         }
     }));

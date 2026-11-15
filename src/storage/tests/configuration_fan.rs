@@ -7,93 +7,52 @@ use crate::{
 
 #[test]
 fn fan_configuration_restores_shape_identity_and_unknown_state() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(directory.path()).unwrap();
-    let native = fixture(
-        "fan",
-        "dmaker.fan.p5c",
-        include_str!("../../../tests/fixtures/miot/dmaker-p5c.json"),
-    );
-    let planned = next(
-        &CommittedConfiguration::empty(),
-        scope("account", "home"),
-        vec![native],
-    )
-    .configuration;
-    save(&store, &planned);
-    drop(store);
-    let reopened = crate::storage::Store::open(directory.path()).unwrap();
-    let restored = load(&reopened);
-    assert_eq!(restored, planned);
-    let entry = &restored.devices[0];
-    assert_ne!(entry.functions[0].endpoint, entry.endpoint);
-    let unchanged = next(
-        &restored,
-        scope("account", "home"),
-        vec![SourceFixture::committed(&restored, &entry.key.id)],
-    );
-    assert!(!unchanged.changed && !unchanged.rebuild);
-    let (physical, _) = PhysicalDevice::new(
-        restored.derive().served[&DeviceKey::new("xiaomi", "fan")]
-            .description
-            .clone(),
-    );
-    let snapshot = physical.functions()[0].snapshot();
-    assert_eq!(snapshot.power(), Some(Power::Unknown));
-    assert_eq!(snapshot.fan().unwrap().speed.value, None);
-}
-
-#[test]
-fn fan_without_swing_round_trips_alongside_existing_outlet() {
-    use super::configuration::{native, raw};
-    let directory = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(directory.path()).unwrap();
-    let outlet = fixture(
-        "outlet",
-        "cuco.plug.v3",
-        include_str!("../../../tests/fixtures/miot/outlet.json"),
-    );
-    let original = next(
-        &CommittedConfiguration::empty(),
-        scope("account", "home"),
-        vec![outlet.clone()],
-    )
-    .configuration;
-    save(&store, &original);
-    let old = load(&store);
-    let mut description: serde_json::Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/miot/dmaker-p5c.json")).unwrap();
-    description["services"][1]["properties"][3]["access"] = serde_json::json!(["read"]);
-    let fan = native("fan", "dmaker.fan.p5c", description);
-    let updated = next(&old, scope("account", "home"), vec![outlet, fan]).configuration;
-    save(&store, &updated);
-    let restored = load(&store);
-    assert_eq!(restored, updated);
-    assert!(raw(&store).contains("\"kind\":\"fan\""));
-    let old_outlet = old
-        .devices
-        .iter()
-        .find(|device| device.key.id == "outlet")
-        .unwrap();
-    let new_outlet = restored
-        .devices
-        .iter()
-        .find(|device| device.key.id == "outlet")
-        .unwrap();
-    assert_eq!(old_outlet.endpoint, new_outlet.endpoint);
-    assert_eq!(old_outlet.unique_id, new_outlet.unique_id);
-    let restored_fan = restored
-        .devices
-        .iter()
-        .find(|device| device.key.id == "fan")
-        .unwrap();
-    assert_eq!(
-        restored_fan.native.as_ref().unwrap().device().functions()[0]
-            .fan()
-            .unwrap()
-            .swing(),
-        None
-    );
+    for swing in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::storage::Store::open(directory.path()).unwrap();
+        let mut instance: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/miot/dmaker-p5c.json"))
+                .unwrap();
+        if !swing {
+            instance["services"][1]["properties"][3]["access"] = serde_json::json!(["read"]);
+        }
+        let native = SourceFixture::new("fan", "dmaker.fan.p5c", instance);
+        let planned = next(
+            &CommittedConfiguration::empty(),
+            scope("account", "home"),
+            vec![native],
+        )
+        .configuration;
+        save(&store, &planned);
+        drop(store);
+        let reopened = crate::storage::Store::open(directory.path()).unwrap();
+        let restored = load(&reopened);
+        assert_eq!(restored, planned);
+        let entry = &restored.devices[0];
+        assert_eq!(
+            entry.native.as_ref().unwrap().device().functions()[0]
+                .fan()
+                .unwrap()
+                .swing()
+                .is_some(),
+            swing
+        );
+        assert_ne!(entry.functions[0].endpoint, entry.endpoint);
+        let unchanged = next(
+            &restored,
+            scope("account", "home"),
+            vec![SourceFixture::committed(&restored, &entry.key.id)],
+        );
+        assert!(!unchanged.changed && !unchanged.rebuild);
+        let (physical, _) = PhysicalDevice::new(
+            restored.derive().served[&DeviceKey::new("xiaomi", "fan")]
+                .description
+                .clone(),
+        );
+        let snapshot = physical.functions()[0].snapshot();
+        assert_eq!(snapshot.power(), Some(Power::Unknown));
+        assert_eq!(snapshot.fan().unwrap().speed.value, None);
+    }
 }
 
 #[test]

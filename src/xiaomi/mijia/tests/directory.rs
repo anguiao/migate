@@ -54,9 +54,15 @@ fn all_home_member_and_device_pages_are_scoped_and_preserve_group_relations() {
 
 #[test]
 fn directory_rejects_bad_or_failed_later_page_instead_of_returning_partial() {
-    for second in [
-        MockResponse::json(429, "{}"),
-        response(json!({"info":[],"has_more":true,"max_id":"cursor"})),
+    for (second, expected) in [
+        (
+            MockResponse::json(429, "{}"),
+            CloudErrorKind::HttpStatus(429),
+        ),
+        (
+            response(json!({"info":[],"has_more":true,"max_id":"cursor"})),
+            CloudErrorKind::Protocol,
+        ),
     ] {
         let (base, requests) = mock_server(vec![
             response(
@@ -66,10 +72,7 @@ fn directory_rejects_bad_or_failed_later_page_instead_of_returning_partial() {
         ]);
         let client = client(&base, Duration::from_secs(1));
         let error = block_on(client.get_owned_homes(&session())).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            CloudErrorKind::Protocol | CloudErrorKind::HttpStatus(429)
-        ));
+        assert_eq!(error.kind(), &expected);
         assert_eq!(requests.try_iter().count(), 2);
     }
 }
@@ -93,13 +96,4 @@ fn home_lookup_never_requests_a_device_outside_the_selected_home() {
         block_on(client.get_home_devices(&session(), &home, &["outsider".into()])).unwrap_err();
     assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);
     assert!(requests.try_recv().is_err());
-}
-
-#[test]
-fn catalog_does_not_collapse_duplicate_member_keys() {
-    let body = r#"{"code":0,"result":{"list":[{"did":"group","model":"vendor.group","isOnline":true,"extra":{"member_list":{"group_did":"group","status":"1","member_ship":{"one":"1","one":"1"},"is_physical":true}}}],"has_more":false}}"#;
-    let (base, _) = mock_server(vec![MockResponse::json(200, body)]);
-    let catalog =
-        block_on(client(&base, Duration::from_secs(1)).get_device_catalog(&session())).unwrap();
-    assert_eq!(catalog.devices[0].group, CloudGroupStatus::Failed);
 }

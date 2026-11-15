@@ -45,6 +45,15 @@ fn two_independent_fan_endpoints_keep_speed_max_two_and_off_low_high() {
     let handler = model_handler(vec![frozen]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
 
+    block_on(async {
+        let high = Context::at(&im, 11, 0x202, 2);
+        assert_eq!(
+            report_value(&read_bytes(&handler, &high).await.unwrap())
+                .u8()
+                .unwrap(),
+            100
+        );
+    });
     physical
         .function("fan:3:2")
         .unwrap()

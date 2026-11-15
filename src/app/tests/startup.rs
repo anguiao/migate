@@ -6,6 +6,17 @@ use crate::{
 };
 use futures_lite::future::{block_on, poll_once};
 
+// Closing the sender releases every waiter, including a replacement Matter runner.
+impl StartupDeadline for flume::Receiver<()> {
+    fn expired(&self) -> bool {
+        self.is_disconnected()
+    }
+
+    async fn wait(&self) {
+        assert!(self.recv_async().await.is_err());
+    }
+}
+
 fn outlet(id: &str) -> PhysicalDeviceDescription {
     PhysicalDeviceDescription::new(
         DeviceKey::new("xiaomi", id),
@@ -32,10 +43,7 @@ fn first_observation_or_read_failure_releases_the_gate_once() {
     block_on(async {
         for observed in [true, false] {
             let (_directory, source, app) = fixture();
-            let gate = StartupGate {
-                deadline: Instant::now() + Duration::from_secs(60),
-                complete: Cell::new(false),
-            };
+            let gate = StartupGate::new(Duration::from_secs(60));
             let mut wait = Box::pin(gate.wait(&app));
             assert!(poll_once(wait.as_mut()).await.is_none());
             if observed {
@@ -60,10 +68,7 @@ fn deadline_releases_pending_reads_without_discarding_later_observations() {
     block_on(async {
         let (_directory, source, app) = fixture();
         assert!(!app.source.initial_reads_ready(&app.current().configuration));
-        let gate = StartupGate {
-            deadline: Instant::now(),
-            complete: Cell::new(false),
-        };
+        let gate = StartupGate::new(Duration::ZERO);
         gate.wait(&app).await;
         assert!(!app.source.initial_reads_ready(&app.current().configuration));
         source.read_power(true);
@@ -81,15 +86,13 @@ fn deadline_releases_pending_reads_without_discarding_later_observations() {
 fn restarting_the_wait_keeps_the_original_deadline() {
     block_on(async {
         let (_directory, _source, app) = fixture();
-        let gate = StartupGate {
-            deadline: Instant::now() + Duration::from_millis(20),
-            complete: Cell::new(false),
-        };
+        let (expire, deadline) = flume::bounded(0);
+        let gate = StartupGate::until(deadline);
         let mut first_wait = Box::pin(gate.wait(&app));
         assert!(poll_once(first_wait.as_mut()).await.is_none());
         drop(first_wait);
 
-        async_io::Timer::at(gate.deadline).await;
+        drop(expire);
         assert!(
             poll_once(Box::pin(gate.wait(&app)).as_mut())
                 .await
@@ -103,10 +106,7 @@ fn restarting_the_wait_keeps_the_original_deadline() {
 fn removing_a_waiting_device_uses_the_committed_configuration() {
     block_on(async {
         let (_directory, source, app) = fixture();
-        let gate = StartupGate {
-            deadline: Instant::now() + Duration::from_secs(60),
-            complete: Cell::new(false),
-        };
+        let gate = StartupGate::new(Duration::from_secs(60));
         let mut wait = Box::pin(gate.wait(&app));
         assert!(poll_once(wait.as_mut()).await.is_none());
 

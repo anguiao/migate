@@ -125,9 +125,7 @@ fn mcn04_patch_round_trips_bindings_without_restoring_observations() {
 }
 
 #[test]
-fn mcn02_profile_is_reconstructed_from_an_existing_configuration_without_persistence() {
-    use rs_matter::persist::{FABRIC_KEYS_START, PERSISTENT_SUBSCRIPTIONS_START};
-
+fn mcn02_direct_profile_is_derived_when_reopening_current_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(directory.path()).unwrap();
     let native = fixture(
@@ -144,25 +142,13 @@ fn mcn02_profile_is_reconstructed_from_an_existing_configuration_without_persist
     save(&store, &planned);
     let stored = raw(&store);
     assert!(!stored.contains("lumi.mcn02.legacy-miio"));
-    let mut legacy: serde_json::Value = serde_json::from_str(&stored).unwrap();
-    let wire = &mut legacy["devices"][0]["native"];
-    assert!(wire.get("legacy_profile").is_none());
-    wire["recognition"]["core"] = serde_json::json!([]);
-    corrupt(&store, &legacy);
-    let before = raw(&store);
-    store
-        .matter()
-        .put(FABRIC_KEYS_START + 1, b"fabric")
-        .unwrap();
-    store
-        .matter()
-        .put(PERSISTENT_SUBSCRIPTIONS_START, b"subscription")
-        .unwrap();
-    let restored = load(&store);
-    assert_eq!(raw(&store), before);
-    assert_eq!(restored.devices[0].unique_id, planned.devices[0].unique_id);
-    assert_eq!(restored.devices[0].endpoint, planned.devices[0].endpoint);
-    assert_eq!(restored.devices[0].functions, planned.devices[0].functions);
+    let wire: serde_json::Value = serde_json::from_str(&stored).unwrap();
+    assert!(wire["devices"][0]["native"].get("legacy_profile").is_none());
+    drop(store);
+    let reopened = crate::storage::Store::open(directory.path()).unwrap();
+    let restored = load(&reopened);
+    assert_eq!(restored, planned);
+    assert_eq!(raw(&reopened), stored);
     assert_eq!(
         restored.devices[0]
             .native
@@ -173,33 +159,5 @@ fn mcn02_profile_is_reconstructed_from_an_existing_configuration_without_persist
             .patch()
             .target(),
         "air-conditioner:2"
-    );
-
-    let refreshed = next(
-        &restored,
-        scope("account", "home"),
-        vec![fixture(
-            "ac",
-            "lumi.acpartner.mcn02",
-            include_str!("../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"),
-        )],
-    );
-    assert!(refreshed.changed);
-    assert!(!refreshed.rebuild);
-    assert_eq!(
-        refreshed.operations[0].kind,
-        crate::configuration::OperationKind::Reused
-    );
-    store
-        .devices()
-        .commit_configuration(&refreshed.configuration, &[])
-        .unwrap();
-    assert_eq!(
-        store.matter().get(FABRIC_KEYS_START + 1).unwrap(),
-        Some(b"fabric".to_vec())
-    );
-    assert_eq!(
-        store.matter().get(PERSISTENT_SUBSCRIPTIONS_START).unwrap(),
-        Some(b"subscription".to_vec())
     );
 }

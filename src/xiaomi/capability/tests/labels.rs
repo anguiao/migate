@@ -3,7 +3,7 @@
 use crate::{device::DeviceKey, xiaomi::capability::parse_device_for_model};
 
 #[test]
-fn parsed_source_function_labels_are_bounded() {
+fn parsed_outlet_and_light_samples_have_bounded_function_labels() {
     for (model, data) in [
         (
             "cuco.plug.v3",

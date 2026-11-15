@@ -78,11 +78,11 @@ fn setup_with_sensor_range(store: &Store, sensor_range: MeasurementRange) -> App
 }
 
 #[test]
-fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publication_change() {
+fn terminal_binding_persists_without_changing_published_endpoints() {
     block_on(async {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
-        let source = setup_with_sensor_range(&store, MeasurementRange::new(-30.0, 400.0).unwrap());
+        let source = setup(&store);
         let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
@@ -94,14 +94,73 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
             .into_iter()
             .find(|entry| entry.device.key().id == "ac")
             .unwrap();
-        let sensor = app
-            .current()
-            .devices()
-            .into_iter()
-            .find(|device| device.key().id == "sensor")
+        let help = run(&terminal, "help").await;
+        assert!(help.contains("bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION"));
+        assert!(help.contains("unbind-sensor TARGET_DID TARGET_FUNCTION"));
+        let output = terminal
+            .handle_line(
+                "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
+                0,
+            )
+            .await
             .unwrap()
-            .function("temperature:3:1001")
             .unwrap();
+        assert!(output.contains("bound"), "{output}");
+        assert!(
+            futures_lite::future::poll_once(committed_event)
+                .await
+                .is_some()
+        );
+        assert_eq!(
+            app.current().configuration.root_version,
+            before.root_version
+        );
+        assert_eq!(app.current().configuration.devices, before.devices);
+        assert_eq!(
+            app.frozen()
+                .into_iter()
+                .find(|entry| entry.device.key().id == "ac")
+                .unwrap()
+                .identity,
+            published.identity
+        );
+        assert!(
+            futures_lite::future::poll_once(source_event)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            store.devices().load_configuration().unwrap(),
+            app.current().configuration
+        );
+        let repeated = terminal
+            .handle_line(
+                "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
+                0,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(repeated.contains("already bound"), "{repeated}");
+    });
+}
+
+#[test]
+fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures() {
+    block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let source = setup_with_sensor_range(&store, MeasurementRange::new(-30.0, 400.0).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let status = status(&store);
+        let terminal = Context::committed(app.clone(), &status);
+        let view = app.current();
+        let published = app
+            .frozen()
+            .into_iter()
+            .find(|entry| entry.device.key().id == "ac")
+            .unwrap();
+        let sensor = function(&app, "sensor", "temperature:3:1001");
         sensor.set_temperature_source_available(true);
         sensor.observe_measurement(21.5, Some(100), 200).unwrap();
         status.update_adapter(crate::xiaomi::adapter::AdapterStatus {
@@ -146,23 +205,11 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
                 }],
             }],
         });
-        let help = run(&terminal, "help").await;
-        assert!(help.contains("bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION"));
-        assert!(help.contains("unbind-sensor TARGET_DID TARGET_FUNCTION"));
-        let output = terminal
-            .handle_line(
-                "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
-                0,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(output.contains("bound"), "{output}");
-        assert!(
-            futures_lite::future::poll_once(committed_event)
-                .await
-                .is_some()
-        );
+        run(
+            &terminal,
+            "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
+        )
+        .await;
         let output = terminal.handle_line("status ac", 0).await.unwrap().unwrap();
         assert!(output.contains("Target temperature"), "{output}");
         assert!(output.contains("Ambient temperature: 21.50 °C"), "{output}");
@@ -177,19 +224,6 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
             output.contains("synchronization limited: subscription rejected"),
             "{output}"
         );
-        assert_eq!(
-            app.current().configuration.root_version,
-            before.root_version
-        );
-        assert_eq!(app.current().configuration.devices, before.devices);
-        assert_eq!(
-            app.frozen()
-                .into_iter()
-                .find(|entry| entry.device.key().id == "ac")
-                .unwrap()
-                .identity,
-            published.identity
-        );
         assert!(matches!(
             published
                 .device
@@ -199,25 +233,8 @@ fn terminal_binding_projects_the_current_sensor_and_persists_without_a_publicati
                 .ambient_temperature(),
             Some(crate::device::AmbientTemperature::Available(reading)) if reading.value == Some(21.5)
         ));
-        assert!(
-            futures_lite::future::poll_once(source_event)
-                .await
-                .is_none()
-        );
-        assert_eq!(
-            store.devices().load_configuration().unwrap(),
-            app.current().configuration
-        );
-        let repeated = terminal
-            .handle_line(
-                "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
-                0,
-            )
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(repeated.contains("already bound"), "{repeated}");
-        let native = before
+        let native = view
+            .configuration
             .device(&DeviceKey::new("xiaomi", "sensor"))
             .unwrap()
             .native

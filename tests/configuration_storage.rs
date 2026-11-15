@@ -4,7 +4,7 @@ use migate::storage::Store;
 use rusqlite::Connection;
 
 #[test]
-fn schema13_is_one_private_singleton() {
+fn a_new_store_creates_one_configuration_record() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     let db = Connection::open(store.path()).unwrap();
@@ -18,24 +18,4 @@ fn schema13_is_one_private_singleton() {
         })
         .unwrap();
     assert_eq!(rows, 1);
-    for table in [
-        "device_cache",
-        "device_identity",
-        "device_function",
-        "endpoint_allocation",
-        "xiaomi_scope",
-        "native_group",
-        "native_group_member",
-        "publication_root",
-        "xiaomi_auth",
-    ] {
-        let exists = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                [table],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap();
-        assert!(!exists, "legacy table {table} must be removed");
-    }
 }

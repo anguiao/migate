@@ -13,7 +13,11 @@ fn identity_is_ed25519_pkcs8_and_csr_has_expected_signed_subject() {
     assert_ne!(first.virtual_did, second.virtual_did);
     let key = KeyPair::from_pem(&first.private_key_pem).unwrap();
     assert_eq!(key.algorithm(), &PKCS_ED25519);
-    let (_, pem) = parse_x509_pem(first.csr_pem.as_bytes()).unwrap();
+    let reused =
+        ClientIdentity::from_private_key("12345", "987654321", &first.private_key_pem).unwrap();
+    assert_eq!(reused.private_key_pem, first.private_key_pem);
+    assert_eq!(reused.virtual_did, "987654321");
+    let (_, pem) = parse_x509_pem(reused.csr_pem.as_bytes()).unwrap();
     let (_, csr) = X509CertificationRequest::from_der(&pem.contents).unwrap();
     csr.verify_signature().unwrap();
     let subject = &csr.certification_request_info.subject;
@@ -32,15 +36,9 @@ fn identity_is_ed25519_pkcs8_and_csr_has_expected_signed_subject() {
     );
     assert_eq!(
         subject.iter_common_name().next().unwrap().as_str().unwrap(),
-        expected_common_name("12345", &first.virtual_did)
+        "mips.12345.bfe54caa6d483cc3887dce9d1b8eb91408f1ea7a.2"
     );
     assert!(!format!("{first:?}").contains(&first.private_key_pem));
-
-    let reused =
-        ClientIdentity::from_private_key("12345", &first.virtual_did, &first.private_key_pem)
-            .unwrap();
-    assert_eq!(reused.private_key_pem, first.private_key_pem);
-    assert_eq!(reused.virtual_did, first.virtual_did);
 }
 
 #[test]
@@ -83,6 +81,16 @@ fn certificate_must_match_identity_subject_key_and_ordered_validity() {
         )
         .is_err()
     );
+    let reversed = sign_csr(&identity.csr_pem, 1_000, 100).unwrap();
+    assert!(
+        validate_certificate(
+            "12345",
+            &identity.virtual_did,
+            &identity.private_key_pem,
+            &reversed
+        )
+        .is_err()
+    );
     let wrong_label = pem
         .replace("BEGIN CERTIFICATE", "BEGIN CERTIFICATE REQUEST")
         .replace("END CERTIFICATE", "END CERTIFICATE REQUEST");
@@ -119,7 +127,7 @@ fn validity_states_cover_future_expired_and_three_day_boundary() {
 }
 
 #[test]
-fn bundled_ca_matches_upstream_fingerprint() {
+fn bundled_ca_pem_bytes_match_the_upstream_file_digest() {
     assert_eq!(
         hex(&Sha256::digest(XIAOMI_CA_PEM.as_bytes())),
         "8b7bf306be3632e08b0ead308249e5f2b2520dc921ad143872d5fcc7c68d6759"

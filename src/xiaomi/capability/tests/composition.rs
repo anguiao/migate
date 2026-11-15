@@ -176,12 +176,14 @@ fn recognition_metadata_identifies_category_core_and_failed_candidate() {
     let mut input = description(vec![light(), invalid]);
     input["type"] = json!("urn:miot-spec-v2:device:light:0000A001:example:1");
     let parsed = super::super::parse_device_for_model(key(), "example", &input).unwrap();
-    let debug = format!("{parsed:?}");
-    assert!(debug.contains("category: \"light\""), "{debug}");
-    assert!(debug.contains("core: [\"light:2\"]"), "{debug}");
+    let recognition = parsed.recognition();
+    assert_eq!(recognition.category(), "light");
+    assert_eq!(recognition.core(), ["light:2"]);
     assert!(
-        debug.contains("fan:3") && debug.contains("write"),
-        "{debug}"
+        recognition
+            .diagnostics()
+            .iter()
+            .any(|issue| issue.target() == "fan:3" && issue.reason().contains("write"))
     );
 }
 
@@ -204,7 +206,15 @@ fn invalid_optional_rgb_preserves_the_independent_temperature_light() {
             .is_some()
     );
     assert!(parsed.functions()[0].lighting().unwrap().color().is_none());
-    assert!(format!("{parsed:?}").contains("write"));
+    assert!(
+        parsed
+            .recognition()
+            .diagnostics()
+            .iter()
+            .any(|issue| issue.target() == "light:2"
+                && issue.reason().contains("RGB")
+                && issue.reason().contains("write"))
+    );
 }
 
 #[test]
@@ -224,7 +234,13 @@ fn cp7pd_channel_failure_does_not_turn_master_into_an_outlet() {
         parsed.refresh_trigger(),
         Some(PropertyBinding { siid: 2, piid: 1 })
     );
-    assert!(format!("{parsed:?}").contains("outlet:3"));
+    assert!(
+        parsed
+            .recognition()
+            .diagnostics()
+            .iter()
+            .any(|issue| issue.target() == "outlet:3" && issue.reason().contains("write"))
+    );
     super::super::NativeDescription::new(
         "cuco.plug.cp7pd".into(),
         input["type"].as_str().unwrap().into(),

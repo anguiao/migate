@@ -79,7 +79,7 @@ fn notifications_coalesce_and_same_values_do_not_increment_revision() {
 }
 
 #[test]
-fn commands_change_state_only_after_acceptance_and_repeat_targets_are_allowed() {
+fn the_same_power_target_can_be_submitted_again_after_observation() {
     block_on(async {
         let (physical, mut receiver) = ready_device();
         let device = &physical.functions()[0];

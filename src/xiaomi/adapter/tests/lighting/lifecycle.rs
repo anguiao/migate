@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn stopping_the_source_clears_light_state_but_not_outlet_cache() {
+fn stopping_the_source_clears_the_light_state() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);

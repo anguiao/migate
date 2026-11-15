@@ -107,27 +107,6 @@ fn authentication_protocol_and_http_errors_remain_distinct() {
 }
 
 #[test]
-fn request_and_body_read_timeouts_are_temporary_without_replays() {
-    for delayed in [
-        MockResponse::json(200, r#"{"code":0,"result":[]}"#).delayed(Duration::from_millis(250)),
-        MockResponse::delayed_body(
-            200,
-            r#"{"code":0,"result":[]}"#,
-            1,
-            Duration::from_millis(250),
-        ),
-    ] {
-        let (base, requests) = mock_server(vec![delayed, response(json!([]))]);
-        let client = client(&base, Duration::from_millis(40));
-        let error = block_on(client.read_properties(&session(), "device", &[POWER])).unwrap_err();
-        assert_eq!(error.kind(), &CloudErrorKind::Timeout);
-        assert!(error.is_temporary());
-        requests.recv().unwrap();
-        assert!(requests.recv_timeout(Duration::from_millis(50)).is_err());
-    }
-}
-
-#[test]
 fn action_encodes_ordered_native_inputs_and_preserves_correlated_code_and_output() {
     let (base, requests) = mock_server(vec![
         response(

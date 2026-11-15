@@ -81,31 +81,51 @@ fn cloud_tls_deadline_covers_a_stalled_handshake() {
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
     let address = listener.get_ref().local_addr().unwrap();
     let server = Fixture::valid();
-    let start = Instant::now();
-    let result = block_on(with_deadline(
-        connect_addresses(
+    block_on(async {
+        let (connected, accepted) = flume::bounded(1);
+        let connect = connect_addresses(
             ServerName::try_from(HOST.to_owned()).unwrap(),
             vec![address],
             server.client_config(),
-        ),
-        start + Duration::from_millis(50),
-    ));
-    assert_eq!(result.unwrap_err(), NotificationError::Timeout);
-    assert!(start.elapsed() < Duration::from_secs(1));
+        );
+        let handshake = async {
+            let mut connect = Box::pin(connect);
+            assert!(future::poll_once(connect.as_mut()).await.is_none());
+            accepted.recv_async().await.unwrap();
+            let result = with_deadline(connect, Instant::now() + Duration::from_millis(50)).await;
+            assert_eq!(result.unwrap_err(), NotificationError::Timeout);
+        };
+        let hold_connection = async {
+            let (_socket, _) = listener.accept().await.unwrap();
+            connected.send_async(()).await.unwrap();
+            future::pending::<()>().await
+        };
+        future::or(future::or(handshake, hold_connection), async {
+            async_io::Timer::after(Duration::from_secs(10)).await;
+            panic!("stalled TLS handshake outlived its deadline");
+        })
+        .await;
+    });
 }
 
 #[test]
 fn cloud_tls_deadline_returns_while_blocking_resolution_is_still_running() {
     let (release, blocked) = std::sync::mpsc::channel();
-    let start = Instant::now();
-    let result = block_on(with_deadline(
-        blocking::unblock(move || {
-            blocked.recv().unwrap();
+    let (started, entered) = flume::bounded(1);
+    let (finished, done) = flume::bounded(1);
+    let result = block_on(async {
+        let mut resolver = Box::pin(blocking::unblock(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv_timeout(Duration::from_secs(10));
+            finished.send(()).unwrap();
             Ok::<(), NotificationError>(())
-        }),
-        start + Duration::from_millis(50),
-    ));
+        }));
+        assert!(future::poll_once(resolver.as_mut()).await.is_none());
+        entered.recv_async().await.unwrap();
+        with_deadline(resolver, Instant::now() + Duration::from_millis(50)).await
+    });
     assert_eq!(result, Err(NotificationError::Timeout));
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(done.try_recv(), Err(flume::TryRecvError::Empty));
     release.send(()).unwrap();
+    done.recv_timeout(Duration::from_secs(10)).unwrap();
 }

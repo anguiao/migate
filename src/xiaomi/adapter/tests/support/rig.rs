@@ -89,7 +89,7 @@ pub(in super::super) struct CloudState {
 }
 pub(in super::super) struct Rig {
     pub(in super::super) uid: String,
-    pub(in super::super) _directory: tempfile::TempDir,
+    pub(in super::super) directory: Rc<tempfile::TempDir>,
     pub(in super::super) source: XiaomiAdapter,
     pub(in super::super) ready: TopologyReady,
     pub(in super::super) store: Store,
@@ -733,7 +733,7 @@ impl Rig {
         source.request_timeout = Duration::from_millis(150);
         Self {
             uid,
-            _directory: directory,
+            directory: Rc::new(directory),
             source,
             ready,
             store,

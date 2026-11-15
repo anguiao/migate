@@ -22,6 +22,7 @@ fn local_status_distinguishes_missing_invalid_and_repaired_certificates() {
         store.xiaomi().fixture_replace(&record).unwrap();
         let (auth, requests) = service(&store, vec![]);
         let report = auth.local_status().unwrap();
+        assert_eq!(report.account.as_ref().unwrap().uid, "uid");
         assert!(matches!(report.ha, AuthenticationState::Checking));
         assert_eq!(report.certificate, None);
         assert_eq!(
@@ -35,20 +36,6 @@ fn local_status_distinguishes_missing_invalid_and_repaired_certificates() {
         assert_eq!(repaired.certificate_update, CertificateUpdate::NotNeeded);
         assert!(requests.try_recv().is_err());
     }
-}
-
-#[test]
-fn invalid_certificate_does_not_hide_account_identity() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let mut record = valid_record("uid", "access", NOW + 500, NOW + 1_000_000);
-    record.hub.as_mut().unwrap().certificate_pem = Some("invalid certificate".into());
-    store.xiaomi().fixture_replace(&record).unwrap();
-    let (auth, _) = service(&store, vec![]);
-
-    let report = auth.local_status().unwrap();
-    assert!(!matches!(report.ha, AuthenticationState::NotSignedIn));
-    assert_eq!(report.certificate, None);
 }
 
 #[test]

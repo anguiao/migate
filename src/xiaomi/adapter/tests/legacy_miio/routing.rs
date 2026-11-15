@@ -125,54 +125,6 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
         .devices()
         .commit_configuration(&before, &[])
         .unwrap();
-    {
-        let db = rusqlite::Connection::open(rig.store.path()).unwrap();
-        let stored: String = db
-            .query_row(
-                "SELECT json FROM bridge_configuration WHERE id=1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let mut legacy: Value = serde_json::from_str(&stored).unwrap();
-        let device = legacy["devices"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|device| device["native"]["model"] == "lumi.acpartner.mcn02")
-            .unwrap();
-        device["native"]["recognition"]["core"] = json!([]);
-        db.execute(
-            "UPDATE bridge_configuration SET json=?1 WHERE id=1",
-            [legacy.to_string()],
-        )
-        .unwrap();
-    }
-    let legacy = rig.store.devices().load_configuration().unwrap();
-    assert!(
-        legacy
-            .device(&DeviceKey::new("xiaomi", did))
-            .unwrap()
-            .native
-            .as_ref()
-            .unwrap()
-            .device()
-            .recognition()
-            .core()
-            .is_empty()
-    );
-    assert_eq!(
-        before
-            .device(&DeviceKey::new("xiaomi", did))
-            .unwrap()
-            .native
-            .as_ref()
-            .unwrap()
-            .device()
-            .recognition()
-            .core(),
-        ["air-conditioner:2"]
-    );
     rig.store
         .matter()
         .put(rs_matter::persist::FABRIC_KEYS_START + 1, b"fabric")

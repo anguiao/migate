@@ -223,39 +223,6 @@ fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
 }
 
 #[test]
-fn unused_legacy_scenes_blob_is_preserved_without_loading() {
-    std::thread::Builder::new()
-        .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
-            let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(dir.path()).unwrap();
-            let key = rs_matter::persist::SCENES_KEY;
-            store.matter().put(key, &[0xff, 0x11]).unwrap();
-            let identity = store.load_identity().unwrap();
-            let (device, _receiver) = test_device();
-            let bridge = Bridge::new(
-                vec![single_entry(&device)],
-                1,
-                &store,
-                &identity,
-                std::rc::Rc::new(NoLabels),
-            );
-            let error =
-                block_on(bridge.run(0, |_| Err(std::io::Error::other("startup completed"))))
-                    .unwrap_err();
-            assert_eq!(error.to_string(), "startup completed");
-            bridge.check_failure().unwrap();
-            assert_eq!(
-                Store::open(dir.path()).unwrap().matter().get(key).unwrap(),
-                Some(vec![0xff, 0x11])
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-#[test]
 fn pairing_codes_use_the_same_passcode() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();

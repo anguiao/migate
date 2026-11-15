@@ -3,6 +3,121 @@
 use super::*;
 
 #[test]
+fn committed_sensor_identities_restart_with_unknown_observations() {
+    let samples = [
+        (
+            "co2",
+            "xiaomi.sensor_ht.new3pr",
+            include_str!("../../../../../tests/fixtures/miot/xiaomi-new3pr.json"),
+        ),
+        (
+            "lux",
+            "yeelink.light.nl1",
+            include_str!("../../../../../tests/fixtures/miot/yeelink-nl1.json"),
+        ),
+        (
+            "contact",
+            "isa.magnet.dw2hl",
+            include_str!("../../../../../tests/fixtures/miot/isa-dw2hl.json"),
+        ),
+    ]
+    .map(|(did, model, text)| (did, model, serde_json::from_str(text).unwrap()));
+    let rig = Rig::custom_lights(&samples);
+    let stored_native = |store: &Store| {
+        let json: String = rusqlite::Connection::open(store.path())
+            .unwrap()
+            .query_row(
+                "SELECT json FROM bridge_configuration WHERE id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let configuration: Value = serde_json::from_str(&json).unwrap();
+        configuration["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|device| {
+                (
+                    device["device_id"].as_str().unwrap().to_owned(),
+                    device["native"].clone(),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let before_observations = stored_native(&rig.store);
+    assert_eq!(before_observations.len(), 3);
+    let directory = rig.directory.clone();
+    let cloud = rig.source.cloud.clone();
+    let discovery = rig.discovery.clone();
+    let clock = rig.clock.clone();
+    block_on(rig.run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let stamp = 1_700_000_100;
+        for (did, siid, piid, value) in [
+            ("co2", 8, 1029, json!(700)),
+            ("lux", 4, 1, json!(0.125)),
+            ("contact", 2, 2, json!(false)),
+        ] {
+            peer.value(did, PropertyBinding { siid, piid }, value);
+            peer.state
+                .borrow_mut()
+                .update_times
+                .insert((did.into(), siid, piid), stamp);
+        }
+        let control = &c;
+        c.peer(peer, |_| async move {
+            let contact = function(&control.context.registry, "contact", "contact:2:2");
+            until(|| {
+                let co2 = measurement(&control.context, "co2", "co2:8:1029");
+                let lux = measurement(&control.context, "lux", "illuminance:4:1");
+                let contact = contact.snapshot().state_sensor().unwrap();
+                co2.value == Some(700.0)
+                    && lux.value == Some(0.125)
+                    && contact.active == Some(true)
+                    && [co2.source_time, lux.source_time, contact.source_time] == [Some(stamp); 3]
+                    && [co2.received_at, lux.received_at, contact.received_at]
+                        .iter()
+                        .all(Option::is_some)
+            })
+            .await;
+            control
+                .publication
+                .rename(&DeviceKey::new("xiaomi", "co2"), "Office air")
+                .unwrap();
+        })
+        .await;
+    }));
+    let store = Store::open(directory.path()).unwrap();
+    assert_eq!(stored_native(&store), before_observations);
+    let (adapter, ready) = XiaomiAdapter::build(store, cloud, discovery, clock).unwrap();
+    block_on(ready.wait()).unwrap();
+    assert_eq!(
+        adapter
+            .context
+            .registry
+            .get(&DeviceKey::new("xiaomi", "co2"))
+            .unwrap()
+            .label(),
+        "Office air"
+    );
+    for (did, id) in [("co2", "co2:8:1029"), ("lux", "illuminance:4:1")] {
+        let reading = measurement(&adapter.context, did, id);
+        assert_eq!(reading.value, None);
+        assert_eq!(reading.source_time, None);
+        assert_eq!(reading.received_at, None);
+    }
+    let contact = function(&adapter.context.registry, "contact", "contact:2:2")
+        .snapshot()
+        .state_sensor()
+        .unwrap();
+    assert_eq!(contact.active, None);
+    assert_eq!(contact.source_time, None);
+    assert_eq!(contact.received_at, None);
+}
+
+#[test]
 fn cloud_measurement_read_started_before_notification_cannot_overwrite_it() {
     let (rig, listener, cloud) = with_cloud_sensors(&["sensor"]);
     {

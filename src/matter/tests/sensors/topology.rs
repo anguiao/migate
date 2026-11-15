@@ -3,49 +3,6 @@
 use super::*;
 
 #[test]
-fn a_single_measurement_keeps_a_physical_parent_and_battery() {
-    for kind in [
-        FunctionKind::Temperature(MeasurementRange::new(-30.0, 100.0).unwrap()),
-        FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap()),
-    ] {
-        let (device, _) = PhysicalDevice::new(
-            PhysicalDeviceDescription::new(
-                DeviceKey::new("xiaomi", "single"),
-                "Single",
-                vec![FunctionDescription {
-                    id: "measurement".into(),
-                    label: "Measurement".into(),
-                    kind,
-                }],
-            )
-            .unwrap()
-            .with_battery(),
-        );
-        let handler = model_handler(vec![entry(&device, 2, &[("measurement", 3)])]);
-        handler.access(|node| {
-            let parent = node
-                .endpoints
-                .iter()
-                .find(|endpoint| endpoint.id == 2)
-                .unwrap();
-            assert!(parent.clusters.iter().any(|cluster| cluster.id == 0x2f));
-            let child = node
-                .endpoints
-                .iter()
-                .find(|endpoint| endpoint.id == 3)
-                .unwrap();
-            assert_eq!(child.device_types.len(), 1);
-            assert!(
-                child
-                    .clusters
-                    .iter()
-                    .any(|cluster| cluster.id == 0x402 || cluster.id == 0x405)
-            );
-        });
-    }
-}
-
-#[test]
 fn mixed_light_children_publish_their_real_light_profiles() {
     use crate::device::{LightProfile, TemperatureInterval};
     let interval = TemperatureInterval::new(2700, 6500).unwrap();

@@ -67,6 +67,15 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let after = c.store.devices().load_configuration().unwrap();
         assert_eq!(after.root_version, before.root_version);
         assert_eq!(after.devices, before.devices);
+        assert_eq!(after.groups, before.groups);
+        let member = registry.get(&DeviceKey::new("xiaomi", "member-a")).unwrap();
+        assert!(
+            member
+                .function("light:2")
+                .unwrap()
+                .description()
+                .supports_rgb()
+        );
         for native in after
             .devices
             .iter()

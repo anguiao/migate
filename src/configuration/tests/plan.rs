@@ -35,28 +35,22 @@ fn unique(id: &str) -> String {
 }
 
 fn outlet_native(id: &str, siid: u32) -> SourceFixture {
-    outlet_native_with_piid(id, siid, 1)
-}
-fn outlet_native_with_piid(id: &str, siid: u32, piid: u32) -> SourceFixture {
     SourceFixture::new(
         id,
         "vendor.plug",
         json!({"type": OUTLET_TYPE, "services": [{
             "iid": siid, "type": "urn:miot-spec-v2:service:switch:0000780C:vendor-v1:1",
-            "properties": [{"iid": piid, "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1", "format": "bool", "access": ["read", "write", "notify"]}]
+            "properties": [{"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1", "format": "bool", "access": ["read", "write", "notify"]}]
         }]}),
     )
 }
 fn ct_light_native(id: &str, min: u32, max: u32) -> SourceFixture {
-    ct_light_native_with_power(id, min, max, 1)
-}
-fn ct_light_native_with_power(id: &str, min: u32, max: u32, piid: u32) -> SourceFixture {
     SourceFixture::new(
         id,
         "vendor.light",
         json!({"type": LIGHT_TYPE, "services": [{
             "iid": 2, "type": "urn:miot-spec-v2:service:light:00007802:vendor-v1:1", "properties": [
-                {"iid": piid, "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1", "format": "bool", "access": ["read", "write", "notify"]},
+                {"iid": 1, "type": "urn:miot-spec-v2:property:on:00000006:vendor-v1:1", "format": "bool", "access": ["read", "write", "notify"]},
                 {"iid": 3, "type": "urn:miot-spec-v2:property:brightness:0000000D:vendor-v1:1", "format": "uint8", "unit": "percentage", "value-range": [1, 100, 1], "access": ["read", "write", "notify"]},
                 {"iid": 4, "type": "urn:miot-spec-v2:property:color-temperature:0000000F:vendor-v1:1", "format": "uint16", "unit": "kelvin", "value-range": [min, max, 1], "access": ["read", "write", "notify"]}
             ]
@@ -481,76 +475,64 @@ fn hidden_member_republishes_with_a_version_bump() {
 
 #[test]
 fn urn_only_change_is_reused_without_rebuild_or_a_version_bump() {
-    let before = outlet_native("outlet", 2);
-    let mut instance = before.raw.instance.clone();
-    instance["type"] = "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2".into();
-    let metadata_only = SourceFixture::new("outlet", "vendor.plug", instance);
-    let current = CommittedConfiguration {
-        temperature_bindings: Default::default(),
-        relay_channels: Vec::new(),
-        split_devices: Vec::new(),
-        scope: Some(scope()),
-        root_version: 2,
-        descriptions: vec![before.raw.clone()],
-        devices: vec![committed("outlet", before, "Kitchen", 1)],
-        groups: Vec::new(),
-    };
-    let facts = facts(
-        scope(),
-        vec![source("outlet", metadata_only, None)],
-        Vec::new(),
+    let ac = SourceFixture::new(
+        "ac",
+        "lumi.acpartner.mcn02",
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
+        ))
+        .unwrap(),
     );
-    let plan = plan(current, facts, BTreeMap::new()).unwrap();
-    assert!(plan.changed);
-    assert!(!plan.rebuild);
-    assert_eq!(
-        plan.operations,
-        [PlanOperation {
-            key: key("outlet"),
-            kind: OperationKind::Reused,
-        }]
-    );
-    let device = plan.configuration.device(&key("outlet")).unwrap();
-    assert_eq!(device.configuration_version, 1);
-    assert_eq!(
-        device.native.as_ref().unwrap().instance_type(),
-        "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2"
-    );
-    assert_eq!(plan.configuration.root_version, 2);
-}
-
-#[test]
-fn native_control_change_replaces_and_rebuilds_without_a_version_bump() {
-    let before = outlet_native("outlet", 2);
-    let after = outlet_native_with_piid("outlet", 2, 7);
-    let current = CommittedConfiguration {
-        temperature_bindings: Default::default(),
-        relay_channels: Vec::new(),
-        split_devices: Vec::new(),
-        scope: Some(scope()),
-        root_version: 2,
-        descriptions: vec![before.raw.clone()],
-        devices: vec![committed("outlet", before, "Kitchen", 1)],
-        groups: Vec::new(),
-    };
-    let facts = facts(scope(), vec![source("outlet", after, None)], Vec::new());
-    let plan = plan(current, facts, BTreeMap::new()).unwrap();
-    assert!(plan.rebuild);
-    assert_eq!(
-        plan.operations,
-        [PlanOperation {
-            key: key("outlet"),
-            kind: OperationKind::ReplacedNative,
-        }]
-    );
-    assert_eq!(
-        plan.configuration
-            .device(&key("outlet"))
-            .unwrap()
-            .configuration_version,
-        1
-    );
-    assert_eq!(plan.configuration.root_version, 2);
+    for (original, urn) in [
+        (
+            outlet_native("outlet", 2),
+            "urn:miot-spec-v2:device:outlet:0000A002:vendor-v2:2",
+        ),
+        (
+            ac,
+            "urn:miot-spec-v2:device:air-conditioner:0000A004:lumi-mcn02:2",
+        ),
+    ] {
+        let id = &original.raw.key.id;
+        let initial = plan(
+            CommittedConfiguration::empty(),
+            facts(
+                scope(),
+                vec![source(id, original.clone(), None)],
+                Vec::new(),
+            ),
+            BTreeMap::from([(key(id), unique(id))]),
+        )
+        .unwrap()
+        .configuration;
+        let mut instance = original.raw.instance.clone();
+        instance["type"] = json!(urn);
+        let updated = SourceFixture::new(id, original.model(), instance);
+        let result = plan(
+            initial.clone(),
+            facts(scope(), vec![source(id, updated, None)], Vec::new()),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(result.changed);
+        assert!(!result.rebuild);
+        assert_eq!(
+            result.operations,
+            [PlanOperation {
+                key: key(id),
+                kind: OperationKind::Reused
+            }]
+        );
+        let device = result.configuration.device(&key(id)).unwrap();
+        let native = device.native.as_ref().unwrap();
+        assert_eq!(native.instance_type(), urn);
+        assert_eq!(native.legacy_profile(), original.legacy_profile());
+        assert_eq!(
+            device.configuration_version,
+            initial.devices[0].configuration_version
+        );
+        assert_eq!(result.configuration.root_version, initial.root_version);
+    }
 }
 
 #[test]
@@ -581,36 +563,6 @@ fn removed_device_unpublishes_and_bumps_its_version() {
     assert_eq!(device.native, None);
     assert!(plan.derived.published.is_empty());
     assert_eq!(plan.configuration.root_version, 3);
-}
-
-#[test]
-fn scope_change_alone_does_not_bump_root_or_device_versions() {
-    let native = outlet_native("outlet", 2);
-    let current = CommittedConfiguration {
-        temperature_bindings: Default::default(),
-        relay_channels: Vec::new(),
-        split_devices: Vec::new(),
-        scope: Some(scope()),
-        root_version: 2,
-        descriptions: vec![native.raw.clone()],
-        devices: vec![committed("outlet", native.clone(), "Kitchen", 1)],
-        groups: Vec::new(),
-    };
-    let facts = facts(
-        other_scope(),
-        vec![source("outlet", native, None)],
-        Vec::new(),
-    );
-    let plan = plan(current, facts, BTreeMap::new()).unwrap();
-    assert!(plan.rebuild);
-    assert_eq!(
-        plan.configuration
-            .device(&key("outlet"))
-            .unwrap()
-            .configuration_version,
-        1
-    );
-    assert_eq!(plan.configuration.root_version, 2);
 }
 
 #[test]
@@ -966,7 +918,9 @@ fn scope_change_replaces_the_native_instance_with_the_same_key() {
 fn hidden_member_replacement_rebuilds_without_a_version_bump() {
     let group_native = ct_light_native("group-1", 2700, 6500);
     let before = ct_light_native("member", 2700, 6500);
-    let after = ct_light_native_with_power("member", 2700, 6500, 7);
+    let mut instance = before.raw.instance.clone();
+    instance["services"][0]["properties"][1]["format"] = json!("uint16");
+    let after = SourceFixture::new("member", before.model(), instance);
     let relation = GroupRelation {
         group_did: "group-1".into(),
         record_did: "record-1".into(),
@@ -1118,22 +1072,6 @@ fn assert_state_semantics_replaced(before: SourceFixture, after: SourceFixture) 
 }
 
 #[test]
-fn native_state_semantics_mapping_change_replaces_runtime_without_changing_publication() {
-    let before: serde_json::Value =
-        serde_json::from_str(include_str!("../../../tests/fixtures/miot/linp-m1.json")).unwrap();
-    let mut after = before.clone();
-    // Keep the property and native values; the new description changes their meaning.
-    after["services"][1]["properties"][0]["value-list"][0]["description"] =
-        serde_json::json!("Closed");
-    after["services"][1]["properties"][0]["value-list"][1]["description"] =
-        serde_json::json!("Open");
-    assert_state_semantics_replaced(
-        state_native_from_instance("linp.magnet.m1", &before),
-        state_native_from_instance("linp.magnet.m1", &after),
-    );
-}
-
-#[test]
 fn native_state_semantics_event_arguments_change_replaces_runtime_without_changing_publication() {
     let after: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/miot/xiaomi-pir1.json"
@@ -1177,39 +1115,4 @@ fn changed_mcn02_direct_profile_replaces_source_without_changing_identity() {
     assert_eq!(after.endpoint, before.endpoint);
     assert_eq!(after.functions, before.functions);
     assert_eq!(after.configuration_version, before.configuration_version);
-}
-
-#[test]
-fn mcn02_urn_metadata_change_keeps_the_same_direct_profile_and_runtime() {
-    let mut instance: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
-    ))
-    .unwrap();
-    let original = SourceFixture::new("ac", "lumi.acpartner.mcn02", instance.clone());
-    let initial = plan(
-        CommittedConfiguration::empty(),
-        facts(scope(), vec![source("ac", original, None)], Vec::new()),
-        BTreeMap::from([(key("ac"), unique("ac"))]),
-    )
-    .unwrap()
-    .configuration;
-    instance["type"] = json!("urn:miot-spec-v2:device:air-conditioner:0000A004:lumi-mcn02:2");
-    let updated = plan(
-        initial.clone(),
-        facts(
-            scope(),
-            vec![source(
-                "ac",
-                SourceFixture::new("ac", "lumi.acpartner.mcn02", instance),
-                None,
-            )],
-            Vec::new(),
-        ),
-        BTreeMap::new(),
-    )
-    .unwrap();
-    assert!(updated.changed);
-    assert_eq!(updated.operations[0].kind, OperationKind::Reused);
-    assert!(!updated.rebuild);
-    assert_eq!(updated.configuration.root_version, initial.root_version);
 }

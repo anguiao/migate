@@ -1,6 +1,6 @@
 use super::{
     App, BridgeOptions,
-    startup::{INITIAL_READ_LIMIT, StartupGate},
+    startup::{INITIAL_READ_LIMIT, StartupDeadline, StartupGate},
 };
 use crate::{
     RuntimeError,
@@ -58,16 +58,16 @@ pub async fn run_xiaomi_bridge(
                 app.fail(error.to_string());
             }
         }
-        Ok::<_, RuntimeError>((app, INITIAL_READ_LIMIT))
+        Ok::<_, RuntimeError>((app, StartupGate::new(INITIAL_READ_LIMIT)))
     };
     run_lifecycle(options, prepare, source, input, output, interrupt, pairing).await
 }
 
 /// The one bridge lifecycle: one application configuration owner races the
 /// source, terminal input, interrupt and the real Matter runner.
-async fn run_lifecycle(
+async fn run_lifecycle<D: StartupDeadline>(
     options: BridgeOptions<'_>,
-    prepare: impl Future<Output = Result<(Rc<App>, Duration), RuntimeError>>,
+    prepare: impl Future<Output = Result<(Rc<App>, StartupGate<D>), RuntimeError>>,
     source: impl Future<Output = Result<(), RuntimeError>>,
     input: impl AsyncBufRead + Unpin,
     output: impl AsyncWrite + Unpin,
@@ -93,7 +93,7 @@ async fn run_lifecycle(
         ),
     )
     .await?;
-    let Some((app, startup_limit)) = app else {
+    let Some((app, startup)) = app else {
         return Ok(());
     };
     let terminal = terminal::bridge::Context::committed(app.clone(), options.status);
@@ -114,7 +114,6 @@ async fn run_lifecycle(
     // astro-dnssd unregisters asynchronously, so immediate re-registration of
     // the same name can otherwise overlap its previous registration.
     let mut advertisement = Advertisement::new(options.port);
-    let startup = StartupGate::new(startup_limit);
     loop {
         let renamer: Rc<dyn crate::matter::LabelWriter> = app.clone();
         let bridge = Bridge::new(

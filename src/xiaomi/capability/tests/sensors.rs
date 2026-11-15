@@ -212,24 +212,6 @@ fn official_t6_uses_the_standard_temperature_property_semantics() {
 }
 
 #[test]
-fn optional_battery_is_ignored_and_does_not_create_a_function() {
-    let device = parse_device(sensor_key(), &sensor_description()).unwrap();
-    assert_eq!(device.functions().len(), 2);
-    assert!(
-        device
-            .functions()
-            .iter()
-            .all(|function| function.measurement().is_some())
-    );
-    assert!(
-        device
-            .functions()
-            .iter()
-            .all(|function| function.lighting().is_none())
-    );
-}
-
-#[test]
 fn both_measurements_need_read_and_notify_access_but_not_write() {
     for piid in [1001, 1008] {
         for permission in ["read", "notify"] {
@@ -341,6 +323,12 @@ fn battery_property_mut(description: &mut Value) -> &mut Value {
 fn standard_battery_is_a_physical_binding_not_a_third_function() {
     let device = parse_device(sensor_key(), &sensor_description()).unwrap();
     assert_eq!(device.functions().len(), 2);
+    assert!(
+        device
+            .functions()
+            .iter()
+            .all(|function| function.measurement().is_some())
+    );
     assert!(device.battery_issue().is_none());
     let battery = device.battery().unwrap();
     assert_eq!(

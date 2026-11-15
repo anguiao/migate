@@ -604,8 +604,8 @@ fn accepted_command_without_a_read_route_refreshes_after_recovery() {
                     .borrow()
                     .contains("curtain:2", *binding)
             }));
-            control.context.priority.set(PathPriority::LocalFirst);
-            work(control).refresh_changed.notify(usize::MAX);
+            peer.list_changed(&["one"]);
+            until(|| control.context.priority() == PathPriority::LocalFirst).await;
             until(|| peer.count("get", "one", 0) == before + 3).await;
         })
         .await;

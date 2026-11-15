@@ -1,14 +1,11 @@
 //! Current state bindings persist atomically, independently of live observations.
 use super::configuration::{fixture, load, next, raw, save, scope};
+use crate::configuration::CommittedConfiguration;
 use crate::xiaomi::capability::tests::source::SourceFixture;
-use crate::{
-    configuration::CommittedConfiguration,
-    device::{DeviceKey, PhysicalDevice, StateInput},
-};
 use serde_json::json;
 
 #[test]
-fn state_bindings_restore_without_runtime_observations_or_endpoint_changes() {
+fn state_bindings_and_endpoint_identities_round_trip_for_each_model() {
     for (model, text) in [
         (
             "isa.magnet.dw2hl",
@@ -37,40 +34,22 @@ fn state_bindings_restore_without_runtime_observations_or_endpoint_changes() {
         )
         .configuration;
         save(&store, &planned);
-        let key = DeviceKey::new("xiaomi", "state");
-        let (device, _) = PhysicalDevice::new(planned.derive().served[&key].description.clone());
-        for function in device
-            .functions()
-            .iter()
-            .filter(|function| function.description().kind.is_state_sensor())
-        {
-            function
-                .observe_state(
-                    Some(true),
-                    StateInput::Property(serde_json::json!(1)),
-                    Some(10),
-                    20,
-                )
-                .unwrap();
-        }
-        let encoded = raw(&store);
-        assert!(!encoded.contains("source_time"));
-        assert!(!encoded.contains("received_at"));
         drop(store);
         let reopened = crate::storage::Store::open(directory.path()).unwrap();
         let restored = load(&reopened);
         assert_eq!(restored, planned);
-        let (device, receivers) =
-            PhysicalDevice::new(restored.derive().served[&key].description.clone());
-        assert!(receivers.is_empty());
-        for function in device
-            .functions()
-            .iter()
-            .filter(|function| function.description().kind.is_state_sensor())
-        {
-            assert_eq!(function.snapshot().state_sensor().unwrap().active, None);
-        }
         let entry = &restored.devices[0];
+        assert!(
+            entry
+                .native
+                .as_ref()
+                .unwrap()
+                .device()
+                .functions()
+                .iter()
+                .any(|function| function.kind().is_state_sensor()),
+            "{model}"
+        );
         assert!(
             entry
                 .functions
@@ -144,6 +123,12 @@ fn adding_state_preserves_existing_child_endpoints() {
         &plan.configuration.devices[0].functions[..2],
         &current.functions[..]
     );
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(directory.path()).unwrap();
+    save(&store, &plan.configuration);
+    drop(store);
+    let reopened = crate::storage::Store::open(directory.path()).unwrap();
+    assert_eq!(load(&reopened), plan.configuration);
 }
 
 #[test]

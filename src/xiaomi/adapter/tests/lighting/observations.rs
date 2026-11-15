@@ -45,15 +45,27 @@ fn all_light_samples_read_and_subscribe_every_property() {
                         && control.context.active_notification("one") == Some(PathKind::Local)
                 })
                 .await;
-                let work = control.context.live.borrow().devices["one"]
-                    .admitted
-                    .clone()
-                    .unwrap();
-                assert_eq!(
-                    work.bindings().len(),
-                    if model == "devcea.light.ls2307" { 5 } else { 3 }
-                );
-                assert_eq!(peer.count("subscribe", "one", 0), work.bindings().len());
+                let mut expected = vec![(2, 1), (2, 2), (2, 3)];
+                if model == "devcea.light.ls2307" {
+                    expected.extend([(4, 1), (4, 2)]);
+                }
+                until(|| peer.count("get", "one", 0) >= expected.len()).await;
+                for operation in ["get", "subscribe"] {
+                    let seen = peer.state.borrow();
+                    let mut bindings = seen
+                        .seen
+                        .iter()
+                        .filter(|(op, payload)| op == operation && payload["did"] == "one")
+                        .map(|(_, payload)| {
+                            (
+                                payload["siid"].as_u64().unwrap(),
+                                payload["piid"].as_u64().unwrap(),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    bindings.sort_unstable();
+                    assert_eq!(bindings, expected, "{model} {operation}");
+                }
             })
             .await;
         }));
@@ -423,6 +435,17 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
             peer.release_property("one", BRIGHTNESS, json!({"value":50}))
                 .await;
             until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
+            peer.release_property("one", COLOR, json!({"value":0x184573}))
+                .await;
+            until(|| {
+                light.snapshot().lighting().unwrap().color
+                    == Some(Rgb {
+                        red: 0x18,
+                        green: 0x45,
+                        blue: 0x73,
+                    })
+            })
+            .await;
         })
         .await;
     }));

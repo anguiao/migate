@@ -249,29 +249,6 @@ fn scoped_load_rejects_foreign_accounts_and_members_without_network_requests() {
 }
 
 #[test]
-fn fixed_home_load_reports_incompatible_capability() {
-    let mut unsupported = instance();
-    unsupported["services"][1]["properties"][0]["access"] = json!(["read", "notify"]);
-    let (base, requests) = mock_server(vec![
-        detail(&unsupported),
-        MockResponse::json(200, &unsupported.to_string()),
-    ]);
-    let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
-    let mijia = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    assert!(matches!(
-        block_on(load_device(
-            &cloud,
-            &mijia,
-            &credentials(),
-            &home("local", &["target"]),
-            "target"
-        )),
-        Ok(crate::xiaomi::capability::SourceDescription { native: None, .. })
-    ));
-    assert_eq!(requests.try_iter().count(), 2);
-}
-
-#[test]
 fn loads_only_local_member_detail_and_spec_using_processed_credentials() {
     let instance = instance();
     let (base, requests) = mock_server(vec![

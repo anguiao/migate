@@ -27,17 +27,16 @@ fn mcn02_profile_is_derived_from_the_native_description_and_reported_as_core() {
     assert_eq!(source.device().recognition().core(), ["air-conditioner:2"]);
     assert!(source.device().recognition().patches().is_empty());
 
+    let mut alternate = instance.clone();
+    alternate["type"] = json!("urn:miot-spec-v2:device:air-condition-outlet:0000A045:lumi-mcn02:1");
+    assert_eq!(
+        SourceFixture::new("one", "lumi.acpartner.mcn02", alternate).legacy_profile(),
+        Some(profile)
+    );
+
     let generic = SourceFixture::new("one", "other.air-conditioner", instance);
     assert!(generic.legacy_profile().is_none());
     assert_eq!(generic.device().recognition().core(), ["air-conditioner:2"]);
-}
-
-#[test]
-fn valid_device_urn_does_not_narrow_the_existing_mcn02_mapping() {
-    let mut instance = instance();
-    instance["type"] = json!("urn:miot-spec-v2:device:air-condition-outlet:0000A045:lumi-mcn02:1");
-    let source = SourceFixture::new("one", "lumi.acpartner.mcn02", instance);
-    assert!(source.legacy_profile().is_some());
 }
 
 #[test]

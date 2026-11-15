@@ -9,13 +9,17 @@ use std::{process::Command, thread};
 
 #[test]
 fn invalid_arguments_exit_without_starting_services() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("unused");
     let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+        .env("MIGATE_DATA_DIR", &data)
         .arg("--unknown")
         .output()
         .unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("Usage:"));
     assert!(result.stdout.is_empty());
+    assert!(!data.exists());
 }
 
 #[test]
@@ -96,7 +100,7 @@ fn auth_check_without_credentials_reports_both_states_and_quoted_login_command()
 }
 
 #[test]
-fn logout_is_idempotent_and_auth_modes_do_not_start_matter() {
+fn repeated_logout_preserves_identity_without_starting_matter() {
     let directory = tempfile::tempdir().unwrap();
     let identity = migate::storage::Store::open(directory.path())
         .unwrap()
@@ -343,16 +347,23 @@ fn a_data_directory_cannot_be_used_by_two_processes_and_exit_releases_it() {
 #[test]
 fn log_filter_controls_diagnostics_without_changing_command_output() {
     let directory = tempfile::tempdir().unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_migate"))
-        .env("RUST_LOG", "off")
-        .arg("--data-dir")
-        .arg(directory.path())
-        .args(["auth", "logout"])
-        .output()
-        .unwrap();
-    assert!(result.status.success());
-    assert!(result.stderr.is_empty());
-    assert!(!result.stdout.is_empty());
+    for filter in ["off", "info"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+            .env("RUST_LOG", filter)
+            .arg("--data-dir")
+            .arg(directory.path())
+            .args(["auth", "logout"])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"Xiaomi credentials removed.\n");
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        if filter == "off" {
+            assert!(stderr.is_empty(), "{stderr}");
+        } else {
+            assert!(stderr.contains("Data directory:"), "{stderr}");
+        }
+    }
 }
 
 #[test]

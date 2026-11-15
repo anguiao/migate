@@ -105,7 +105,7 @@ fn corrupted_curtain_bindings_cannot_be_restored() {
 }
 
 #[test]
-fn old_outlet_remains_readable_when_a_curtain_is_added() {
+fn adding_a_curtain_preserves_the_existing_outlet_identity() {
     let directory = tempfile::tempdir().unwrap();
     let store = crate::storage::Store::open(directory.path()).unwrap();
     let outlet = fixture(
@@ -138,6 +138,9 @@ fn old_outlet_remains_readable_when_a_curtain_is_added() {
         .find(|device| device.key.id == "outlet")
         .unwrap();
     assert_eq!(restored_outlet, &old.devices[0]);
+    let native = restored_outlet.native.as_ref().unwrap().device();
+    assert!(native.battery().is_none());
+    assert_eq!(native.battery_issue(), None);
     let restored_curtain = restored
         .devices
         .iter()

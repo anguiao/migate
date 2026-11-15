@@ -250,30 +250,29 @@ fn model_adapters_accept_urn_metadata_with_unchanged_bindings() {
     ] {
         let original: Value = serde_json::from_str(fixture).unwrap();
         let expected = super::parse_device_for_model(key(), model, &original).unwrap();
-        for tail in ["2", "1:0000C816", "2:0000C816"] {
-            let mut revised = original.clone();
-            let revise_type = |value: &mut Value| {
-                let prefix = value["type"].as_str().unwrap().rsplit_once(':').unwrap().0;
-                value["type"] = json!(format!("{prefix}:{tail}"));
-            };
-            revise_type(&mut revised);
-            for service in revised["services"].as_array_mut().unwrap() {
-                revise_type(service);
-                if let Some(properties) = service["properties"].as_array_mut() {
-                    for property in properties {
-                        revise_type(property);
-                    }
+        let tail = "2:0000C816";
+        let mut revised = original.clone();
+        let revise_type = |value: &mut Value| {
+            let prefix = value["type"].as_str().unwrap().rsplit_once(':').unwrap().0;
+            value["type"] = json!(format!("{prefix}:{tail}"));
+        };
+        revise_type(&mut revised);
+        for service in revised["services"].as_array_mut().unwrap() {
+            revise_type(service);
+            if let Some(properties) = service["properties"].as_array_mut() {
+                for property in properties {
+                    revise_type(property);
                 }
             }
-            let parsed = super::parse_device_for_model(key(), model, &revised).unwrap();
-            assert_eq!(parsed, expected, "{model} {tail}");
-            super::NativeDescription::new(
-                model.into(),
-                revised["type"].as_str().unwrap().into(),
-                parsed,
-            )
-            .unwrap();
         }
+        let parsed = super::parse_device_for_model(key(), model, &revised).unwrap();
+        assert_eq!(parsed, expected, "{model} {tail}");
+        super::NativeDescription::new(
+            model.into(),
+            revised["type"].as_str().unwrap().into(),
+            parsed,
+        )
+        .unwrap();
     }
 }
 

@@ -7,22 +7,43 @@ use std::{
 
 pub(super) const INITIAL_READ_LIMIT: Duration = Duration::from_secs(20);
 
+pub(super) trait StartupDeadline {
+    fn expired(&self) -> bool;
+    async fn wait(&self);
+}
+
+impl StartupDeadline for Instant {
+    fn expired(&self) -> bool {
+        Instant::now() >= *self
+    }
+
+    async fn wait(&self) {
+        async_io::Timer::at(*self).await;
+    }
+}
+
 /// A cold-start deadline shared by every Matter runner created during startup.
-pub(super) struct StartupGate {
-    deadline: Instant,
+pub(super) struct StartupGate<D = Instant> {
+    deadline: D,
     complete: Cell<bool>,
 }
 
 impl StartupGate {
     pub(super) fn new(limit: Duration) -> Self {
+        Self::until(Instant::now() + limit)
+    }
+}
+
+impl<D: StartupDeadline> StartupGate<D> {
+    pub(super) fn until(deadline: D) -> Self {
         Self {
-            deadline: Instant::now() + limit,
+            deadline,
             complete: Cell::new(false),
         }
     }
 
     pub(super) fn prefer_runner(&self) -> bool {
-        self.complete.get() || Instant::now() >= self.deadline
+        self.complete.get() || self.deadline.expired()
     }
 
     pub(super) async fn wait(&self, app: &App) {
@@ -41,7 +62,7 @@ impl StartupGate {
             }
         };
         let settled = future::or(reads_settled, async {
-            async_io::Timer::at(self.deadline).await;
+            self.deadline.wait().await;
             false
         })
         .await;

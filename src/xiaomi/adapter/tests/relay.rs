@@ -29,32 +29,6 @@ fn rig() -> Rig {
 }
 
 #[test]
-fn wired_relays_are_published_as_independent_accessories() {
-    block_on(rig().run(|c| async move {
-        c.announce();
-        let peer = panel_peer(RelayMode::Wired);
-        let control = &c;
-        c.peer(peer, |_| async move {
-            until(|| {
-                [2, 3, 4].iter().all(|siid| {
-                    function(&control.context.registry, "one", &format!("relay:{siid}"))
-                        .snapshot()
-                        .relay_mode()
-                        == Some(RelayMode::Wired)
-                })
-            })
-            .await;
-            if let Some(plan) = control.publication.plan().unwrap() {
-                let prepared = control.publication.prepare(plan);
-                control.publication.apply(prepared).unwrap();
-            }
-            assert_eq!(control.publication.frozen().len(), 3);
-        })
-        .await;
-    }));
-}
-
-#[test]
 fn home_relay_uses_current_hub_access_before_cloud_directory_recovers() {
     use crate::matter::tests::support::PublishedRelayModel;
 

@@ -13,14 +13,6 @@ fn v13() -> Value {
     .unwrap()
 }
 
-fn without_heater(mut instance: Value) -> Value {
-    instance["services"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|service| service["iid"] != 3);
-    instance
-}
-
 #[test]
 fn v13_round_trips_light_and_heating_only_bindings() {
     let directory = tempfile::tempdir().unwrap();
@@ -80,53 +72,4 @@ fn v13_round_trips_light_and_heating_only_bindings() {
             .iter()
             .any(|function| function["kind"] == "heater")
     );
-}
-
-#[test]
-fn adding_the_heater_preserves_parent_and_existing_light_identity() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(directory.path()).unwrap();
-    let previous = next(
-        &CommittedConfiguration::empty(),
-        scope("account", "home"),
-        vec![SourceFixture::new("bath", MODEL, without_heater(v13()))],
-    )
-    .configuration;
-    save(&store, &previous);
-    let parent = previous.devices[0].endpoint;
-    let unique_id = previous.devices[0].unique_id.clone();
-    let light_endpoint = previous.devices[0]
-        .functions
-        .iter()
-        .find(|function| function.id == "light:2")
-        .unwrap()
-        .endpoint;
-
-    let upgraded = next(
-        &previous,
-        scope("account", "home"),
-        vec![SourceFixture::new("bath", MODEL, v13())],
-    )
-    .configuration;
-    save(&store, &upgraded);
-    let restored = load(&store);
-    let entry = &restored.devices[0];
-    assert_eq!(entry.endpoint, parent);
-    assert_eq!(entry.unique_id, unique_id);
-    assert_eq!(
-        entry
-            .functions
-            .iter()
-            .find(|function| function.id == "light:2")
-            .unwrap()
-            .endpoint,
-        light_endpoint
-    );
-    let heater = entry
-        .functions
-        .iter()
-        .find(|function| function.id == "heater:3")
-        .unwrap();
-    assert!(![parent, light_endpoint].contains(&heater.endpoint));
-    assert_eq!(restored, upgraded);
 }

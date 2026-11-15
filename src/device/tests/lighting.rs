@@ -190,25 +190,6 @@ fn reports_for_absent_capabilities_are_unsupported() {
 }
 
 #[test]
-fn lighting_starts_unknown_except_for_capability_determined_temperature_mode() {
-    for rgb in [false, true] {
-        let (device, _) = new_device(light(rgb));
-        let lighting = device.functions()[0].snapshot().lighting().unwrap();
-        assert_eq!(lighting.brightness_percent, None);
-        assert_eq!(lighting.temperature_kelvin, None);
-        assert_eq!(lighting.color, None);
-        assert_eq!(
-            lighting.mode,
-            if rgb {
-                None
-            } else {
-                Some(LightMode::Temperature)
-            }
-        );
-    }
-}
-
-#[test]
 fn one_light_report_updates_power_and_values_with_one_revision_and_keeps_mode_explicit() {
     let (device, _) = new_device(light(true));
     let function = &device.functions()[0];

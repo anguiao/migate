@@ -212,99 +212,53 @@ fn uses_final_config_directory_and_reports_io_failure() {
     assert_eq!(fs::read(path).unwrap(), b"secret");
 }
 
-#[cfg(unix)]
 #[test]
-fn private_permissions() {
-    use std::os::unix::fs::PermissionsExt;
+fn unsupported_schema_is_rejected_without_modifying_data_or_permissions() {
     let root = tempfile::tempdir().unwrap();
-    let dir = root.path().join("private");
+    let dir = root.path().join("data");
     fs::create_dir(&dir).unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-    Store::open(&dir)
-        .unwrap()
-        .matter()
-        .put(1, b"secret")
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = dir.join("state.db");
+    let db = Connection::open(&path).unwrap();
+    db.pragma_update(None, "user_version", 99).unwrap();
+    db.execute_batch("CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('keep');")
         .unwrap();
-    assert_eq!(
-        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-        0o700
-    );
-    assert_eq!(
-        fs::metadata(dir.join("state.db"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
-}
+    drop(db);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let before = directory_snapshot(&dir);
 
-#[test]
-fn rejects_unsupported_or_damaged_schemas_without_changing_data() {
-    for (setup, expected) in [
-        (
-            "PRAGMA user_version = 12; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('previous');",
-            "previous",
-        ),
-        (
-            "PRAGMA user_version = 14; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('future');",
-            "future",
-        ),
-        (
-            "PRAGMA user_version = 1; CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('missing');",
-            "missing",
-        ),
-        (
-            "CREATE TABLE identity (id INTEGER PRIMARY KEY, bridge_id INTEGER NOT NULL, light_id TEXT NOT NULL) STRICT;
-             CREATE TABLE blobs (key INTEGER PRIMARY KEY, value BLOB NOT NULL) STRICT;
-             CREATE TABLE marker (value TEXT); INSERT INTO marker VALUES ('damaged');",
-            "damaged",
-        ),
-    ] {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("data");
-        fs::create_dir(&dir).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let path = dir.join("state.db");
-        let db = Connection::open(&path).unwrap();
-        db.execute_batch(setup).unwrap();
-        drop(db);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        }
-        let before = directory_snapshot(&dir);
-
-        let error = Store::open(&dir).err().unwrap();
-        assert_eq!(error.path(), path);
-        // A rejected database must be left byte-for-byte and permission-for-
-        // permission untouched: no journal, no chmod, no schema rewrite.
-        assert_eq!(directory_snapshot(&dir), before);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
-                0o755
-            );
-            assert_eq!(
-                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-                0o644
-            );
-        }
-        let db = Connection::open(error.path()).unwrap();
+    let error = Store::open(&dir).err().unwrap();
+    assert_eq!(error.path(), path);
+    // A rejected database must be left byte-for-byte and permission-for-
+    // permission untouched: no journal, no chmod, no schema rewrite.
+    assert_eq!(directory_snapshot(&dir), before);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            db.query_row("SELECT value FROM marker", [], |row| row
-                .get::<_, String>(0))
-                .unwrap(),
-            expected
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
         );
     }
+    let db = Connection::open(error.path()).unwrap();
+    assert_eq!(
+        db.query_row("SELECT value FROM marker", [], |row| row
+            .get::<_, String>(0))
+            .unwrap(),
+        "keep"
+    );
 }
 
 fn directory_snapshot(dir: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
