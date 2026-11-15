@@ -5,7 +5,7 @@ use crate::{
         air_conditioner::{AirConditionerFanSpeed, AirConditionerMode, AirConditionerTarget},
     },
     storage::LanRecord,
-    xiaomi::lan::{Token, test_support::LegacyDevice},
+    xiaomi::lan::{Token, tests::support::LegacyDevice},
 };
 use std::sync::atomic::Ordering;
 
@@ -41,7 +41,7 @@ fn setup_with_description(did: &str, description: Value) -> (Rig, LegacyDevice) 
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     (rig, peer)
 }

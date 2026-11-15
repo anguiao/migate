@@ -1,6 +1,6 @@
 use super::*;
 use crate::storage::{AccountRecovery, RecoveryStop};
-use crate::xiaomi::{mijia::MijiaClient, test_support::ReceivedRequest};
+use crate::xiaomi::{mijia::MijiaClient, tests::support::ReceivedRequest};
 use std::sync::mpsc::Receiver;
 
 #[derive(Clone, Copy)]

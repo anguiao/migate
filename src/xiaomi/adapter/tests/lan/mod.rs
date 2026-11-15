@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     storage::LanRecord,
     xiaomi::{
-        lan::{Token, test_support::FakeDevice},
+        lan::{Token, tests::support::FakeDevice},
         mijia::{CloudDeviceInfo, LanCandidate, LanCredentials},
     },
 };

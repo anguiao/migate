@@ -1,14 +1,11 @@
 mod session;
 mod tls;
 mod wire;
-#[cfg(test)]
 pub(crate) use session::SessionDriver;
 pub use session::{
     CentralEvent, DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout,
     SendDecision, SendHooks, SessionHandle, connect,
 };
-#[cfg(test)]
-pub(crate) use wire::{decode_mips, encode_mips};
 
 use std::{error::Error, fmt};
 
@@ -51,6 +48,3 @@ impl Error for CentralError {}
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-#[cfg(test)]
-pub(crate) use tests::support as test_support;

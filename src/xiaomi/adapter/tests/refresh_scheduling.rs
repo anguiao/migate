@@ -1,11 +1,11 @@
 use super::*;
 
 fn manual_rig(members: &[&str]) -> Rig {
-    let mut rig = Rig::new(true, members);
+    let rig = Rig::new(true, members);
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    rig.source.request_timeout = Duration::from_secs(2);
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     rig
 }
 
@@ -64,8 +64,8 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
         "device07", "device08", "device09", "device10", "device11", "device12", "device13",
         "device14", "device15", "device16",
     ];
-    let mut rig = Rig::new(true, &dids).with_stall_timeout(Duration::from_secs(10));
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = Rig::new(true, &dids).with_stall_timeout(Duration::from_secs(10));
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());

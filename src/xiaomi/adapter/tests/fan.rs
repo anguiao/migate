@@ -44,15 +44,11 @@ mod lifecycle;
 mod polling;
 
 fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
-    use crate::xiaomi::adapter::notifications::NotificationConnector;
     let rig = rig();
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source
-        .context
-        .notification_connector
-        .set(NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ));
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.online.insert("one".into());
@@ -228,15 +224,12 @@ fn fan_recovery_reads_all_fields_and_rejects_retired_sources() {
 
 #[test]
 fn fan_pushless_device_keeps_local_reads_and_uses_cloud_notifications() {
-    use crate::xiaomi::adapter::notifications::{NotificationConnector, NotificationSource};
+    use crate::xiaomi::adapter::notifications::NotificationSource;
     let rig = rig();
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source
-        .context
-        .notification_connector
-        .set(NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ));
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     {
         let mut http = rig.cloud.lock().unwrap();
         http.online.insert("one".into());

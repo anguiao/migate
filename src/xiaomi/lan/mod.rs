@@ -7,7 +7,10 @@ mod wire;
 pub(crate) use client::{Client, Failure, RequestError, SendStage};
 pub(crate) use discovery::Discovery;
 
-use std::fmt;
+use std::{fmt, time::Duration};
+
+pub(crate) const PORT: u16 = 54321;
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Token([u8; 16]);
@@ -42,6 +45,4 @@ impl fmt::Debug for Token {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
-pub(crate) use tests::support as test_support;
+pub(crate) mod tests;

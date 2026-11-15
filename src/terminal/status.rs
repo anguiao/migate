@@ -15,13 +15,6 @@ use crate::xiaomi::{
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::CertificateStatus,
 };
-#[cfg(test)]
-use crate::xiaomi::{
-    adapter::{ChannelCommands, CommandStatus, PathKind, RecoveryStatus},
-    certificate::CertificateValidity,
-};
-#[cfg(test)]
-use std::path::Path;
 use std::{cell::RefCell, fmt::Write as _, path::PathBuf};
 use time::OffsetDateTime;
 

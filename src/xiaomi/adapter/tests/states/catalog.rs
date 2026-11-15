@@ -141,7 +141,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
         let (_events, receiver) = flume::unbounded();
         let (discovery, _driver) = Discovery::with_events(receiver);
         let (restored, _) =
-            XiaomiAdapter::new(c.store.clone(), c.context.cloud.clone(), discovery).unwrap();
+            XiaomiAdapter::new(c.store.clone(), c.cloud_client.clone(), discovery).unwrap();
         let app =
             Rc::new(crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap());
         assert_eq!(app.current().configuration, current);

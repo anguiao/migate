@@ -1,6 +1,6 @@
 use super::*;
 use crate::storage::{AccountRecovery, RecoveryStop};
-use crate::xiaomi::test_support::ReceivedRequest;
+use crate::xiaomi::tests::support::ReceivedRequest;
 use std::{path::Path, sync::mpsc::Receiver};
 use url::Url;
 

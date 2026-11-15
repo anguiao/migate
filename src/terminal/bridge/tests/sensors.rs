@@ -5,7 +5,7 @@ use crate::device::{
     Availability, DeviceKey, FunctionDescription, FunctionKind, MeasurementRange, PhysicalDevice,
     PhysicalDeviceDescription,
 };
-use crate::terminal::bridge::measurement_text;
+use crate::terminal::bridge::render::measurement_text;
 use crate::terminal::bridge::tests::support::{add_device, handle_line, terminal_command};
 use crate::xiaomi::auth::AuthService;
 use crate::xiaomi::cloud::CloudClient;

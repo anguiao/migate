@@ -472,7 +472,10 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                 peer.state.borrow_mut().hold_reads = true;
                 peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
-                let stamp = work.observations.read_stamp("light:2", active);
+                let stamp = work.observations.read_stamp_input(
+                    "light:2",
+                    crate::xiaomi::capability::ReadInput::Property(active),
+                );
                 for _ in 0..3 {
                     peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 }
@@ -536,7 +539,10 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("light:2", COLOR);
             until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
-            let stamp = work.observations.read_stamp("light:2", COLOR);
+            let stamp = work.observations.read_stamp_input(
+                "light:2",
+                crate::xiaomi::capability::ReadInput::Property(COLOR),
+            );
             peer.notify_value("one", MODE, json!(1), false);
             until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             assert!(

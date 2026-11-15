@@ -119,8 +119,8 @@ fn motion_peer() -> Rc<Peer> {
 }
 
 fn held_contact_rig() -> Rig {
-    let mut rig = contact_rig();
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = contact_rig();
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     rig
 }
 fn held_contact_peer() -> Rc<Peer> {
@@ -142,11 +142,9 @@ fn accept_contact(peer: &Peer) {
 
 fn cloud_rig(rig: Rig) -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.online.insert("one".into());

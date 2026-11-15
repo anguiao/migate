@@ -63,11 +63,9 @@ fn physical_repair_preserves_native_power_brightness_and_temperature() {
     rig.cloud.lock().unwrap().catalog_groups[0]["extra"]["member_list"]["is_physical"] =
         json!(true);
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     let peer = Rc::new(CloudPeer::default());
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {

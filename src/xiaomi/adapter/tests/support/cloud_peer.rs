@@ -273,11 +273,9 @@ pub(in super::super) fn with_cloud_rig(rig: Rig) -> (Rig, Async<TcpListener>, Rc
     let members = rig.cloud.lock().unwrap().members.clone();
     rig.cloud.lock().unwrap().online.extend(members);
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        crate::xiaomi::adapter::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     (rig, listener, Rc::new(CloudPeer::default()))
 }
 pub(in super::super) fn cloud_active(c: &Control, did: &str) -> bool {

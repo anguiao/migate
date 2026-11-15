@@ -43,11 +43,6 @@ pub struct CloudClient {
 }
 
 impl CloudClient {
-    #[cfg(test)]
-    pub(in crate::xiaomi) fn test_base_url(&self) -> &str {
-        &self.base_url
-    }
-
     pub fn new() -> Result<Self, CloudError> {
         Self::build(CLOUD_BASE_URL, Duration::from_secs(30))
     }

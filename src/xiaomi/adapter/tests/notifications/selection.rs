@@ -5,11 +5,9 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     block_on(rig.run(|c| async move {
         let mut broker = CloudBroker::accept(&listener).await;
         let mut property = false;
@@ -291,8 +289,8 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
 #[test]
 fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
     for notify_after_send in [false, true] {
-        let (mut rig, listener, cloud) = with_cloud_peer(&["one"]);
-        rig.source.request_timeout = Duration::from_secs(2);
+        let (rig, listener, cloud) = with_cloud_peer(&["one"]);
+        rig.network.gateway_timeout.set(Duration::from_secs(2));
         block_on(rig.run(|c| async move {
             future::or(cloud.run(&listener), async {
                 c.announce();

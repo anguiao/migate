@@ -47,8 +47,8 @@ fn curtain_rejection_and_timeout_are_reported_without_replay() {
 #[test]
 fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replacement() {
     use crate::device::{CommandError, CurtainCommand};
-    let mut rig = rig();
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = rig();
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;

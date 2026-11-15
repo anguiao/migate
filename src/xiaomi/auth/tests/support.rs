@@ -1,5 +1,5 @@
 use super::*;
-use crate::storage::XiaomiStore;
+use crate::{storage::XiaomiStore, xiaomi::mijia::MijiaClient};
 
 pub(super) const NOW: i64 = 2_000_000_000;
 pub(super) const UUID: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -21,7 +21,7 @@ pub(super) fn home_body(uid: Option<&str>, dids: &[&str]) -> String {
 }
 
 pub(super) fn certificate_response(
-    request: &crate::xiaomi::test_support::ReceivedRequest,
+    request: &crate::xiaomi::tests::support::ReceivedRequest,
 ) -> MockResponse {
     let body: Value = serde_json::from_str(&request.body).unwrap();
     let csr = STANDARD.decode(body["csr"].as_str().unwrap()).unwrap();
@@ -78,7 +78,7 @@ pub(super) fn service(
     responses: Vec<MockResponse>,
 ) -> (
     AuthService,
-    std::sync::mpsc::Receiver<crate::xiaomi::test_support::ReceivedRequest>,
+    std::sync::mpsc::Receiver<crate::xiaomi::tests::support::ReceivedRequest>,
 ) {
     let (base, requests) = mock_server(responses);
     let cloud = CloudClient::for_test(&base, Duration::from_secs(1)).unwrap();
@@ -117,6 +117,20 @@ impl AuthService {
             account: AccountClient::for_test("http://127.0.0.1:9", Duration::from_secs(1)),
             mijia: crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1)),
             now,
+        }
+    }
+
+    pub(in crate::xiaomi) fn for_adapter_test(
+        store: XiaomiStore,
+        cloud: CloudClient,
+        base: &str,
+    ) -> Self {
+        Self {
+            store,
+            cloud,
+            account: AccountClient::for_test(base, Duration::from_secs(1)),
+            mijia: MijiaClient::for_test(base, Duration::from_secs(1)),
+            now: || time::OffsetDateTime::now_utc().unix_timestamp(),
         }
     }
 }

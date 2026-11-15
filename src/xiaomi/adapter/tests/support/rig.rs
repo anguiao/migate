@@ -91,6 +91,7 @@ pub(in super::super) struct Rig {
     pub(in super::super) uid: String,
     pub(in super::super) directory: Rc<tempfile::TempDir>,
     pub(in super::super) source: XiaomiAdapter,
+    pub(in super::super) network: Rc<TestNetwork>,
     pub(in super::super) ready: TopologyReady,
     pub(in super::super) store: Store,
     pub(in super::super) discovery: Discovery,
@@ -109,6 +110,7 @@ pub(in super::super) struct Control {
     pub(in super::super) ready: Option<TopologyReady>,
     pub(in super::super) store: Store,
     pub(in super::super) context: Rc<crate::xiaomi::adapter::state::Context>,
+    pub(in super::super) cloud_client: CloudClient,
     pub(in super::super) discovery: Discovery,
     pub(in super::super) events: flume::Sender<mdns_sd::ServiceEvent>,
     pub(in super::super) listener: Async<TcpListener>,
@@ -118,6 +120,17 @@ pub(in super::super) struct Control {
     pub(in super::super) clock: Arc<TestClock>,
 }
 impl Rig {
+    pub(in super::super) fn reopen_adapter(&self) -> (XiaomiAdapter, TopologyReady) {
+        self.network
+            .build(
+                self.store.clone(),
+                self.source.cloud.clone(),
+                self.discovery.clone(),
+                self.clock.clone(),
+            )
+            .unwrap()
+    }
+
     pub(in super::super) fn new(restore: bool, members: &[&str]) -> Self {
         Self::build(restore, members, None)
     }
@@ -548,7 +561,7 @@ impl Rig {
                     let csr = String::from_utf8(csr).unwrap();
                     let now = time::OffsetDateTime::now_utc().unix_timestamp();
                     let signed =
-                        crate::xiaomi::test_support::sign_csr(&csr, now - 60, now + 864_000)
+                        crate::xiaomi::tests::support::sign_csr(&csr, now - 60, now + 864_000)
                             .unwrap();
                     json!({"code":0,"result":{"cert":signed}})
                 } else {
@@ -716,25 +729,15 @@ impl Rig {
         clock
             .automatic
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let auth = crate::xiaomi::auth::AuthService::for_adapter_test(
-            store.xiaomi(),
-            client.clone(),
-            &base,
-        );
-        let (mut source, ready) = XiaomiAdapter::build_with_auth(
-            store.clone(),
-            client,
-            discovery.clone(),
-            clock.clone(),
-            auth,
-        )
-        .unwrap();
-        source.test_ca = Some(tls.ca_pem.clone());
-        source.request_timeout = Duration::from_millis(150);
+        let network = TestNetwork::new(Some(tls.ca_pem.clone()));
+        let (source, ready) = network
+            .build(store.clone(), client, discovery.clone(), clock.clone())
+            .unwrap();
         Self {
             uid,
             directory: Rc::new(directory),
             source,
+            network,
             ready,
             store,
             discovery,
@@ -825,7 +828,6 @@ impl Rig {
                 changed.await;
             }
         };
-        let running = self.source.run(on_status);
         let discovering = async {
             self.driver.run().await?;
             future::pending::<Result<(), AdapterError>>().await
@@ -834,6 +836,7 @@ impl Rig {
             uid: self.uid.clone(),
             ready: Some(self.ready),
             publication: publication.clone(),
+            cloud_client: self.source.cloud.clone(),
             store: self.store,
             context,
             discovery: self.discovery,
@@ -844,6 +847,7 @@ impl Rig {
             cloud: self.cloud,
             clock: self.clock,
         });
+        let running = self.source.run(on_status);
         let ticking = async {
             loop {
                 async_io::Timer::after(Duration::from_millis(1)).await;
@@ -874,6 +878,17 @@ impl Rig {
     }
 }
 impl Control {
+    pub(in super::super) fn reopen_adapter(&self) -> (XiaomiAdapter, TopologyReady) {
+        TestNetwork::new(None)
+            .build(
+                self.store.clone(),
+                self.cloud_client.clone(),
+                self.discovery.clone(),
+                self.clock.clone(),
+            )
+            .unwrap()
+    }
+
     pub(in super::super) fn announce(&self) {
         self.events
             .send(announcement(

@@ -212,17 +212,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
 fn restored_and_duplicate_description_sync_keeps_channel_commands() {
     let mut rig = Rig::new(true, &["multi"]);
     let stable = rig.data[1].clone();
-    let (mut source, ready) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
-    source.test_ca = rig.source.test_ca.clone();
-    source.request_timeout = rig.source.request_timeout;
-    rig.source = source;
-    rig.ready = ready;
+    (rig.source, rig.ready) = rig.reopen_adapter();
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());

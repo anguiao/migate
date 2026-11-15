@@ -84,35 +84,6 @@ impl PartialEq for ParsedDevice {
 }
 impl Eq for ParsedDevice {}
 impl ParsedDevice {
-    #[cfg(test)]
-    pub(crate) fn new(
-        key: DeviceKey,
-        functions: Vec<ParsedFunction>,
-        refresh_trigger: Option<PropertyBinding>,
-    ) -> Result<Self, CapabilityError> {
-        Self::new_with_battery(key, functions, refresh_trigger, None)
-    }
-    #[cfg(test)]
-    pub(crate) fn new_with_battery(
-        key: DeviceKey,
-        functions: Vec<ParsedFunction>,
-        refresh_trigger: Option<PropertyBinding>,
-        battery: Option<BatteryBinding>,
-    ) -> Result<Self, CapabilityError> {
-        Self::from_parts(
-            key,
-            functions,
-            refresh_trigger,
-            battery,
-            None,
-            RecognitionMetadata {
-                category: "test".into(),
-                core: Vec::new(),
-                patches: Vec::new(),
-                diagnostics: Vec::new(),
-            },
-        )
-    }
     pub(crate) fn from_parts(
         key: DeviceKey,
         functions: Vec<ParsedFunction>,

@@ -4,8 +4,8 @@ use futures_lite::future::poll_once;
 
 #[test]
 fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
-    let mut rig = rig();
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = rig();
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;

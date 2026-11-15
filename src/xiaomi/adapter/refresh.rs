@@ -387,30 +387,7 @@ impl RefreshState {
             .map(|(_, problem)| problem.clone())
             .collect()
     }
-    #[cfg(test)]
-    pub(super) fn snapshot(&self) -> RefreshSnapshot {
-        RefreshSnapshot {
-            pending: self.pending.iter().cloned().collect(),
-            inflight: self.inflight.keys().cloned().collect(),
-            problems: self.problems.clone(),
-        }
-    }
-    #[cfg(test)]
-    pub(super) fn exhaust_pending(&mut self, id: &str, binding: PropertyBinding) {
-        self.pending
-            .iter_mut()
-            .find(|read| read.id == id && read.input == ReadInput::Property(binding))
-            .unwrap()
-            .attempts = 3;
-    }
 }
-#[cfg(test)]
-pub(super) struct RefreshSnapshot {
-    pub(super) pending: Vec<Refresh>,
-    pub(super) inflight: BTreeSet<PropertyKey>,
-    pub(super) problems: BTreeMap<PropertyKey, String>,
-}
-
 pub(super) struct ReadFlight {
     life: Lifetime,
     path: ControlPath,

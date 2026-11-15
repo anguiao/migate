@@ -21,8 +21,6 @@ pub(super) struct AccountFlow {
     jar: CookieJar,
     pub(super) identity: AccountClientIdentity,
     pub(super) timeout: Duration,
-    #[cfg(test)]
-    test_port: Option<u16>,
 }
 
 impl AccountFlow {
@@ -32,27 +30,10 @@ impl AccountFlow {
         stage: AccountStage,
     ) -> Result<Self, AccountError> {
         let jar = CookieJar::new();
-        let builder = HttpClient::builder()
+        let client = (config.client_builder)()
             .timeout(config.timeout)
             .redirect_policy(RedirectPolicy::None)
-            .cookie_jar(jar.clone());
-        #[cfg(test)]
-        let builder = if let Some(port) = config.test_port {
-            let map = [
-                "account.xiaomi.com",
-                "c3.account.xiaomi.com",
-                "c3.lp.account.xiaomi.com",
-                "sts.api.io.mi.com",
-            ]
-            .into_iter()
-            .fold(isahc::net::dns::ResolveMap::new(), |map, host| {
-                map.add(host, port, [127, 0, 0, 1])
-            });
-            builder.dns_resolve(map).proxy(None)
-        } else {
-            builder
-        };
-        let client = builder
+            .cookie_jar(jar.clone())
             .build()
             .map_err(|_| AccountError::new(stage, AccountErrorKind::Network))?;
         let flow = Self {
@@ -60,8 +41,6 @@ impl AccountFlow {
             jar,
             identity,
             timeout: config.timeout,
-            #[cfg(test)]
-            test_port: config.test_port,
         };
         flow.set_cookie("deviceId", flow.identity.device_id(), true, stage)?;
         Ok(flow)
@@ -90,12 +69,8 @@ impl AccountFlow {
         } else {
             builder
         };
-        #[cfg(test)]
-        let secure = self.test_port.is_none();
-        #[cfg(not(test))]
-        let secure = true;
         let cookie = builder
-            .secure(secure)
+            .secure(true)
             .build()
             .map_err(|_| AccountError::protocol(stage))?;
         let uri: Uri = ACCOUNT_URL
@@ -135,23 +110,9 @@ impl AccountFlow {
         stage: AccountStage,
     ) -> Result<Response<AsyncBody>, AccountError> {
         validate_request_url(url, stage)?;
-        let transport = url.clone();
-        #[cfg(test)]
-        let transport = if let Some(port) = self.test_port {
-            let mut transport = transport;
-            transport
-                .set_scheme("http")
-                .map_err(|_| AccountError::protocol(stage))?;
-            transport
-                .set_port(Some(port))
-                .map_err(|_| AccountError::protocol(stage))?;
-            transport
-        } else {
-            transport
-        };
         let mut request = Request::builder()
             .method(method)
-            .uri(transport.as_str())
+            .uri(url.as_str())
             .timeout(timeout)
             .header("User-Agent", self.identity.user_agent());
         if body.is_some() {
@@ -170,7 +131,7 @@ impl AccountFlow {
                 },
             )
         })?;
-        let uri: Uri = transport
+        let uri: Uri = url
             .as_str()
             .parse()
             .map_err(|_| AccountError::protocol(stage))?;

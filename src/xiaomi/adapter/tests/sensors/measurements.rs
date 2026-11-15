@@ -91,7 +91,9 @@ fn committed_sensor_identities_restart_with_unknown_observations() {
     }));
     let store = Store::open(directory.path()).unwrap();
     assert_eq!(stored_native(&store), before_observations);
-    let (adapter, ready) = XiaomiAdapter::build(store, cloud, discovery, clock).unwrap();
+    let (adapter, ready) = TestNetwork::new(None)
+        .build(store, cloud, discovery, clock)
+        .unwrap();
     block_on(ready.wait()).unwrap();
     assert_eq!(
         adapter
@@ -416,9 +418,10 @@ fn an_earlier_read_cannot_overwrite_a_later_notification() {
             })
             .await;
             let current = work(&control.context, "sensor");
-            let earlier = current
-                .observations
-                .read_stamp("temperature:3:1001", TEMPERATURE);
+            let earlier = current.observations.read_stamp_input(
+                "temperature:3:1001",
+                crate::xiaomi::capability::ReadInput::Property(TEMPERATURE),
+            );
             peer.notify_value_at("sensor", TEMPERATURE, json!(30.0), Some(300), false);
             until(|| {
                 measurement(&control.context, "sensor", "temperature:3:1001").value == Some(30.0)
@@ -473,8 +476,14 @@ fn retained_measurement_and_battery_cannot_override_or_retire_fresh_reads() {
             let current = work(&control.context, "sensor");
             let temperature = measurement(&control.context, "sensor", id);
             let battery_before = battery(&control.context, "sensor").unwrap();
-            let temperature_stamp = current.observations.read_stamp(id, TEMPERATURE);
-            let battery_stamp = current.observations.read_stamp("battery", BATTERY);
+            let temperature_stamp = current.observations.read_stamp_input(
+                id,
+                crate::xiaomi::capability::ReadInput::Property(TEMPERATURE),
+            );
+            let battery_stamp = current.observations.read_stamp_input(
+                "battery",
+                crate::xiaomi::capability::ReadInput::Property(BATTERY),
+            );
             current.notify_value_at(TEMPERATURE, &json!(30.0), Some(100), true, false, 1);
             current.notify_value_at(BATTERY, &json!(10), Some(100), true, false, 1);
             assert_eq!(measurement(&control.context, "sensor", id), temperature);

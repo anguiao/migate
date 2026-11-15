@@ -14,3 +14,9 @@ impl CloudClient {
         Ok(client)
     }
 }
+
+impl CloudClient {
+    pub(in crate::xiaomi) fn test_base_url(&self) -> &str {
+        &self.base_url
+    }
+}

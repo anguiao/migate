@@ -5,7 +5,7 @@ use crate::{
     xiaomi::{
         adapter::{StepReceipt, model::PathKind},
         capability::{PropertyBinding, ReadInput, SHARED_FEEDBACK_CHANNEL},
-        lan::{Token, test_support::LegacyDevice},
+        lan::{Token, tests::support::LegacyDevice},
     },
 };
 use std::sync::atomic::Ordering;
@@ -48,7 +48,7 @@ fn setup(instance: Value) -> (Rig, LegacyDevice) {
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     (rig, peer)
 }
@@ -297,10 +297,7 @@ fn legacy_command_business_ack_mismatch_keeps_the_mixed_direct_connection() {
 #[test]
 fn failed_direct_shared_read_after_cloud_switch_does_not_consume_new_baseline() {
     let (rig, peer) = setup(v13());
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(100));
+    rig.network.lan_timeout.set(Duration::from_millis(100));
     let (rig, listener, cloud) = with_cloud_rig(rig);
     {
         let mut state = rig.cloud.lock().unwrap();

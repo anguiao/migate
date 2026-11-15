@@ -2,8 +2,6 @@ mod context;
 mod render;
 pub(crate) use context::Context;
 use context::View;
-#[cfg(test)]
-use render::measurement_text;
 use render::{configuration_lines, render};
 
 use super::{AuthStatus, current_time};

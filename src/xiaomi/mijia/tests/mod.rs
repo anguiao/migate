@@ -2,13 +2,13 @@ use super::*;
 use crate::xiaomi::{
     capability::PropertyBinding,
     cloud::{CloudError, CloudErrorKind},
-    test_support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
+    tests::support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_lite::future::{self, block_on};
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Value, json};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::{collections::HashMap, time::Duration};
 
 mod catalog;
@@ -30,7 +30,7 @@ fn session() -> MijiaSession {
 }
 
 fn client(base: &str, timeout: Duration) -> MijiaClient {
-    MijiaClient::for_signed_test(base, timeout)
+    MijiaClient::for_test(base, timeout)
 }
 
 fn form(request: &ReceivedRequest) -> HashMap<String, String> {
@@ -46,14 +46,13 @@ fn data(request: &ReceivedRequest) -> Value {
 fn assert_signed(request: &ReceivedRequest) {
     let fields = form(request);
     assert_eq!(fields.len(), 3);
-    assert_eq!(fields["_nonce"], "ABEiM0RVZncBsFUV");
-    let signed_nonce = STANDARD
-        .decode("0Ny4eATjlcPNVrJgvScGXPztKlGn5VzLtuoj/0zojbU=")
-        .unwrap();
+    let nonce = STANDARD.decode(&fields["_nonce"]).unwrap();
+    assert_eq!(nonce.len(), 12);
+    let signed_nonce = Sha256::digest([b"0123456789abcdef".as_slice(), nonce.as_slice()].concat());
     let signature_input = format!(
         "{}&{}&{}&data={}",
         request.target.strip_prefix("/app").unwrap(),
-        "0Ny4eATjlcPNVrJgvScGXPztKlGn5VzLtuoj/0zojbU=",
+        STANDARD.encode(signed_nonce),
         fields["_nonce"],
         fields["data"]
     );
@@ -75,7 +74,10 @@ fn signed_http_reads_owned_home_directory() {
         json!({"homelist":[{"uid":"123","id":"9","dids":["one"],"roomlist":[]}],"has_more":false}),
     )]);
     let client = client(&base, Duration::from_secs(1));
+    let minute = || time::OffsetDateTime::now_utc().unix_timestamp() / 60;
+    let start = minute();
     let homes = block_on(client.get_owned_homes(&session())).unwrap();
+    let end = minute();
     assert_eq!(homes.homes[0].dids, ["one"]);
     let request = requests.recv().unwrap();
     assert_eq!(request.target, "/app/v2/homeroom/gethome");
@@ -91,12 +93,10 @@ fn signed_http_reads_owned_home_directory() {
         fields["data"],
         r#"{"app_ver":9,"fetch_share":false,"fetch_share_dev":false,"limit":150,"plat_form":0}"#
     );
-    assert_eq!(fields["_nonce"], "ABEiM0RVZncBsFUV");
-    assert_eq!(
-        fields["signature"],
-        "c4QaSx6bHoubYvX5TkcyQQIy6OCEefxqqXtlKfx6lhY="
-    );
-    assert!(request.body.contains("_nonce=ABEiM0RVZncBsFUV"));
+    assert_signed(&request);
+    let nonce = STANDARD.decode(&fields["_nonce"]).unwrap();
+    let signed_minute = u32::from_be_bytes(nonce[8..].try_into().unwrap());
+    assert!((start..=end).contains(&i64::from(signed_minute)));
     assert!(request.body.contains("%3D"));
     assert!(requests.try_recv().is_err());
 }

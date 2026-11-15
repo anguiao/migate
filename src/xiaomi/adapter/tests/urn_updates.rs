@@ -42,11 +42,9 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
         .online
         .extend(["one".into(), "two".into()]);
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        crate::xiaomi::adapter::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     let peer = Rc::new(CloudPeer::default());
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
@@ -588,7 +586,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         let (_events, receiver) = flume::unbounded();
         let (discovery, _driver) = Discovery::with_events(receiver);
         let (restored, _) =
-            XiaomiAdapter::new(c.store.clone(), c.context.cloud.clone(), discovery).unwrap();
+            XiaomiAdapter::new(c.store.clone(), c.cloud_client.clone(), discovery).unwrap();
         let app =
             Rc::new(crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap());
         let restored_matter = PublishedLightModel::new(&app, &c.store);

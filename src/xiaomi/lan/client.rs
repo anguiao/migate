@@ -1,4 +1,4 @@
-use super::{Token, wire};
+use super::{TIMEOUT, Token, wire};
 use async_io::{Async, Timer};
 use futures_lite::future;
 use serde_json::{Value, json};
@@ -14,7 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const TIMEOUT: Duration = Duration::from_secs(10);
 static IDS: OnceLock<AtomicU32> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,19 +67,14 @@ impl Client {
         Rc::ptr_eq(&self.0, &other.0)
     }
 
-    pub(crate) fn new(did: u64, address: SocketAddr, token: Token) -> Self {
+    pub(crate) fn new(did: u64, address: SocketAddr, token: Token, timeout: Duration) -> Self {
         Self(Rc::new(Inner {
             did,
             address,
             token,
             timestamp: RefCell::new(None),
-            timeout: TIMEOUT,
+            timeout,
         }))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_timeout(&mut self, timeout: Duration) {
-        Rc::get_mut(&mut self.0).unwrap().timeout = timeout;
     }
 
     /// One attempt has one deadline and never retransmits an emitted request.

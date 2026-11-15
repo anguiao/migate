@@ -92,13 +92,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         })
         .await;
         let reads_before_restart = c.cloud.lock().unwrap().instance_reads.clone();
-        let (restored, _) = XiaomiAdapter::build(
-            c.store.clone(),
-            c.context.cloud.clone(),
-            c.discovery.clone(),
-            c.clock.clone(),
-        )
-        .unwrap();
+        let (restored, _) = c.reopen_adapter();
         assert!(
             restored.context.live.borrow().devices["one"]
                 .candidate

@@ -1,10 +1,7 @@
 //! Curtain integration through the existing local and cloud transports.
 use super::*;
 use crate::device::{CurtainMotion, CurtainSnapshot};
-use crate::xiaomi::{
-    adapter::notifications::{NotificationConnector, NotificationSource},
-    capability::PropertyBinding,
-};
+use crate::xiaomi::{adapter::notifications::NotificationSource, capability::PropertyBinding};
 
 const STATUS: PropertyBinding = PropertyBinding { siid: 2, piid: 2 };
 const CURRENT: PropertyBinding = PropertyBinding { siid: 2, piid: 3 };
@@ -57,12 +54,9 @@ async fn settled(c: &Control) {
 fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
     let rig = rig();
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source
-        .context
-        .notification_connector
-        .set(NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ));
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.online.insert("one".into());

@@ -41,7 +41,7 @@ fn only_matching_authenticated_response_settles_request() {
         let packet = wire::encode(DID, 43, &peer_token, &payload);
         socket.send_to(&packet, source).unwrap();
     });
-    let client = Client::new(DID, address, token);
+    let client = Client::new(DID, address, token, crate::xiaomi::lan::TIMEOUT);
     let sent = Cell::new(0);
     assert_eq!(
         future::block_on(client.request_guarded(
@@ -76,7 +76,7 @@ fn timeout_reports_whether_business_packet_was_sent() {
             }
             thread::sleep(Duration::from_millis(100));
         });
-        let client = Client::new(DID, address, token.clone());
+        let client = Client::new(DID, address, token.clone(), crate::xiaomi::lan::TIMEOUT);
         let error = future::block_on(client.request_with_timeout(
             "test",
             json!([]),
@@ -122,7 +122,7 @@ fn late_reply_cannot_settle_a_new_request() {
         let packet = wire::encode(DID, 43, &peer_token, &serde_json::to_vec(&current).unwrap());
         socket.send_to(&packet, source).unwrap();
     });
-    let client = Client::new(DID, address, token);
+    let client = Client::new(DID, address, token, crate::xiaomi::lan::TIMEOUT);
     let first =
         future::block_on(client.request_with_timeout("test", json!([]), Duration::from_millis(30)))
             .unwrap_err();
@@ -149,7 +149,7 @@ fn withdrawn_after_handshake_never_sends_business() {
         hello(&socket, &mut buffer);
         assert!(socket.recv_from(&mut buffer).is_err());
     });
-    let client = Client::new(DID, address, token);
+    let client = Client::new(DID, address, token, crate::xiaomi::lan::TIMEOUT);
     let checks = Cell::new(0);
     let sent = Cell::new(0);
     let guard = || {

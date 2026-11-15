@@ -1,3 +1,5 @@
+pub(crate) use super::super::wire::{decode_mips, encode_mips};
+
 use super::super::*;
 use crate::{
     storage::{TokenSet, XiaomiRecord},
@@ -177,7 +179,7 @@ pub(crate) async fn connect(
     request: std::time::Duration,
 ) -> Result<(SessionHandle, SessionDriver), CentralError> {
     let stream = tls::connect(address, credentials, ca).await?;
-    session::start(
+    session::tests::start(
         Box::new(stream),
         &credentials.hub.as_ref().unwrap().virtual_did,
         session::Timing {

@@ -1041,7 +1041,10 @@ fn relay_power_live_notification_records_source_without_accepting_retained_or_in
                     false,
                 );
                 assert_eq!(work.observation_source("relay:2"), None);
-                let stale = work.observations.read_stamp("relay:2", binding(2, 1));
+                let stale = work.observations.read_stamp_input(
+                    "relay:2",
+                    crate::xiaomi::capability::ReadInput::Property(binding(2, 1)),
+                );
                 peer.notify_value("one", binding(2, 1), json!(false), false);
                 until(|| relay.snapshot().power() == Some(Power::Off)).await;
                 work.observe_read_at(

@@ -1,5 +1,5 @@
 use super::*;
-use crate::xiaomi::test_support::sign_csr;
+use crate::xiaomi::tests::support::sign_csr;
 use rcgen::{KeyPair, PKCS_ED25519};
 use sha2::Sha256;
 use x509_parser::{

@@ -13,6 +13,7 @@ mod local;
 mod mcn04;
 mod membership;
 mod model;
+mod network;
 mod notifications;
 mod observations;
 pub(crate) mod publication;

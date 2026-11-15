@@ -71,7 +71,10 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
                 .admitted
                 .clone()
                 .unwrap();
-            let old_read = work.observations.read_stamp("light:2", BRIGHTNESS);
+            let old_read = work.observations.read_stamp_input(
+                "light:2",
+                crate::xiaomi::capability::ReadInput::Property(BRIGHTNESS),
+            );
             light
                 .begin_light_action(brightness(80.0), true)
                 .unwrap()

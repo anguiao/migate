@@ -29,7 +29,7 @@ fn standard_miot_direct_poll_recovers_an_external_fan_change() {
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     block_on(rig.run(|control| async move {
         let work = control.context.live.borrow().devices[did]
             .admitted
@@ -99,7 +99,7 @@ fn p5c_direct_fan_command_reads_feedback_once_after_all_steps() {
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|control| {
         Box::pin(async move {

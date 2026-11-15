@@ -5,8 +5,6 @@ mod mqtt;
 mod request;
 
 pub use connection::connect;
-#[cfg(test)]
-pub(super) use connection::start;
 pub use driver::SessionDriver;
 pub use request::{
     DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout, SendDecision,

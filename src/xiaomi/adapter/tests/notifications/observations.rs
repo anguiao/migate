@@ -131,11 +131,9 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
             .insert(("group-2".into(), 2, 1), json!(true));
     }
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     let peer = Rc::new(CloudPeer::default());
     block_on(rig.run(|c| async move {
         let peer_run = peer.clone();
@@ -257,11 +255,9 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
 fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail() {
     let rig = super::super::support::repair_rig(0, false);
     let listener = Async::<TcpListener>::bind(([127, 0, 0, 1], 0)).unwrap();
-    rig.source.context.notification_connector.set(
-        super::super::super::notifications::NotificationConnector::Plaintext(
-            listener.get_ref().local_addr().unwrap(),
-        ),
-    );
+    rig.network
+        .notification_address
+        .set(Some(listener.get_ref().local_addr().unwrap()));
     let peer = Rc::new(CloudPeer::default());
     let property = "device/member-a/up/properties_changed/2/1";
     peer.state

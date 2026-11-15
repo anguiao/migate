@@ -64,7 +64,9 @@ impl AppSource {
     /// Deliver a source read through the real observation ordering boundary.
     pub(crate) fn read_power(&self, value: bool) {
         let (work, id, binding) = self.power_binding();
-        let stamp = work.observations.read_stamp(&id, binding);
+        let stamp = work
+            .observations
+            .read_stamp_input(&id, crate::xiaomi::capability::ReadInput::Property(binding));
         work.observe_read_at(
             &id,
             binding,

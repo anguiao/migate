@@ -12,7 +12,10 @@ fn retained_light_snapshot_cannot_replace_or_invalidate_a_fresh_read() {
                 .admitted
                 .clone()
                 .unwrap();
-            let stamp = work.observations.read_stamp("light:2", BRIGHTNESS);
+            let stamp = work.observations.read_stamp_input(
+                "light:2",
+                crate::xiaomi::capability::ReadInput::Property(BRIGHTNESS),
+            );
             let before = light.snapshot().lighting().unwrap().brightness_percent;
             work.notify_value_at(BRIGHTNESS, &json!(30), Some(1), true, true, 1);
             assert_eq!(
@@ -91,9 +94,9 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
 
 #[test]
 fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
-    let mut rig = Rig::light("xiaomi.light.ceil04");
+    let rig = Rig::light("xiaomi.light.ceil04");
     // Keep the deliberately held receipt alive across replacement and feedback.
-    rig.source.request_timeout = Duration::from_secs(2);
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
@@ -226,7 +229,10 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                     .clone()
                     .unwrap();
                 for value in [20, 40] {
-                    let stamp = work.observations.read_stamp("light:2", BRIGHTNESS);
+                    let stamp = work.observations.read_stamp_input(
+                        "light:2",
+                        crate::xiaomi::capability::ReadInput::Property(BRIGHTNESS),
+                    );
                     work.observe_read("light:2", BRIGHTNESS, &stamp, &json!(value))
                         .unwrap();
                     assert_eq!(

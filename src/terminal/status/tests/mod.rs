@@ -1,3 +1,9 @@
+use crate::xiaomi::{
+    adapter::{ChannelCommands, CommandStatus, PathKind, RecoveryStatus},
+    certificate::CertificateValidity,
+};
+use std::path::Path;
+
 mod logging;
 
 use super::*;

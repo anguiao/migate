@@ -1,4 +1,31 @@
 use super::*;
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    task::{Wake, Waker},
+};
+
+// The action ends after the first configuration plan. A revocation arriving
+// at that boundary must be included in the commit before Matter starts again.
+struct LateRevocation {
+    directory: PathBuf,
+    recorded: AtomicBool,
+}
+
+impl Wake for LateRevocation {
+    fn wake(self: Arc<Self>) {
+        Store::open(&self.directory)
+            .unwrap()
+            .devices()
+            .record_revocations(&[crate::configuration::Revocation {
+                key: DeviceKey::new("xiaomi", "group-1"),
+                reason: "access changed during shutdown".into(),
+            }])
+            .unwrap();
+        self.recorded.store(true, Ordering::Relaxed);
+    }
+}
 
 #[test]
 fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state() {
@@ -59,6 +86,11 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             bytes: Vec::new(),
             replies: reply,
         };
+        let runner_starts = Cell::new(0);
+        let late = Arc::new(LateRevocation {
+            directory: store.path().parent().unwrap().to_owned(),
+            recorded: AtomicBool::new(false),
+        });
         let runtime = crate::app::run_xiaomi_bridge(
             options,
             async move { Ok(handle) },
@@ -66,7 +98,18 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             input,
             output,
             future::pending::<Result<(), crate::RuntimeError>>(),
-            |_| Ok(()),
+            |event| {
+                if matches!(event, crate::matter::PairingEvent::Opened { .. }) {
+                    if late.recorded.load(Ordering::Relaxed) {
+                        assert!(
+                            store.devices().load_revocations().unwrap().is_empty(),
+                            "the new runner started before the late revocation was reconciled"
+                        );
+                    }
+                    runner_starts.set(runner_starts.get() + 1);
+                }
+                Ok(())
+            },
         );
         let assertions = async {
             let group = DeviceKey::new("xiaomi", "group-1");
@@ -127,44 +170,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             assert!(list.contains("one (name one):"), "{list}");
             assert!(list.contains("Matter: hidden or reserved;"), "{list}");
 
-            // A small cfg(test) observer records whether the real UDP socket was
-            // free at each snapshot and can inject a late confirmed candidate.
-            let observations = Rc::new(RefCell::new(Vec::new()));
-            let injected = Rc::new(Cell::new(false));
-            let inject_enabled = Rc::new(Cell::new(false));
-            {
-                let weak = Rc::downgrade(&c.context);
-                let observations = observations.clone();
-                let injected = injected.clone();
-                let inject_enabled = inject_enabled.clone();
-                *c.context.snapshot_observer.borrow_mut() = Some(Box::new(move || {
-                    let Some(context) = weak.upgrade() else {
-                        return;
-                    };
-                    let free = !runtime_socket_live(port);
-                    observations.borrow_mut().push(free);
-                    if inject_enabled.get() && free && !injected.get() {
-                        injected.set(true);
-                        let mut live = context.live.borrow_mut();
-                        if let Some(slot) = live.devices.get_mut("group-1") {
-                            let mut cached =
-                                slot.candidate.as_ref().unwrap().native.clone().unwrap();
-                            let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
-                            cached = crate::xiaomi::capability::NativeDescription::new(
-                                cached.model().into(),
-                                cached.instance_type().into(),
-                                super::super::support::device_with_temperature_grid(
-                                    cached.device(),
-                                    grid,
-                                ),
-                            )
-                            .unwrap();
-                            slot.candidate.as_mut().unwrap().native = Some(cached);
-                            slot.confirmed = true;
-                        }
-                    }
-                }));
-            }
+            let initial_starts = runner_starts.get();
 
             // Phase 1: a pure relation change rebuilds but must not bump any
             // configuration version. The unresolved member has no source device.
@@ -187,8 +193,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             })
             .await;
             until(|| runtime_socket_live(port)).await;
-            assert!(!injected.get());
-            assert!(observations.borrow().iter().any(|free| *free));
+            until(|| runner_starts.get() > initial_starts).await;
             assert_eq!(version(), root_before);
             let report = terminal_command(&mut terminal_input, &replies, "status").await;
             assert!(
@@ -244,20 +249,52 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             action.accepted().await.unwrap();
             let token = action.token();
             assert!(light.light_action_current(token));
+            let mut changes = light.subscribe_light_actions().unwrap();
+            let mut stopped = std::pin::pin!(changes.changed());
+            let waker = Waker::from(late.clone());
+            assert!(
+                stopped
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(&waker))
+                    .is_pending()
+            );
 
             // Phase 2: the relation returns to its confirmed members while the
-            // late native range candidate changes the published fixed shape.
-            inject_enabled.set(true);
+            // confirmed native range changes the published fixed shape.
+            {
+                let mut live = c.context.live.borrow_mut();
+                let slot = live.devices.get_mut("group-1").unwrap();
+                let candidate = slot.candidate.as_mut().unwrap();
+                let native = candidate.native.as_ref().unwrap();
+                let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
+                candidate.native = Some(
+                    crate::xiaomi::capability::NativeDescription::new(
+                        native.model().into(),
+                        native.instance_type().into(),
+                        super::super::support::device_with_temperature_grid(native.device(), grid),
+                    )
+                    .unwrap(),
+                );
+                slot.confirmed = true;
+            }
             c.cloud.lock().unwrap().catalog_groups =
                 vec![group_record("record-1", "group-1", &["one"], false)];
             c.context.request_sync();
-            until(|| version() > root_before).await;
+            until(|| {
+                let saved = store.devices().load_configuration().unwrap();
+                saved.root_version > root_before
+                    && saved
+                        .groups
+                        .iter()
+                        .any(|relation| relation.members == ["one"])
+            })
+            .await;
             assert!(
                 !light.light_action_current(token),
                 "the rebuild cancelled the active light action"
             );
             until(|| runtime_socket_live(port)).await;
-            assert!(injected.get());
+            assert!(late.recorded.load(Ordering::Relaxed));
             assert_eq!(version(), root_before + 1);
             let group_after_bounds = store
                 .devices()
@@ -328,7 +365,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             .await;
 
             // Ordinary state changes do not rebuild or touch the socket.
-            let snapshots = observations.borrow().len();
+            let starts = runner_starts.get();
             light
                 .observe_light(crate::device::LightPatch {
                     power: Some(true),
@@ -337,10 +374,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 .unwrap();
             c.context.changed.notify(usize::MAX);
             async_io::Timer::after(Duration::from_millis(20)).await;
-            assert!(
-                observations.borrow()[snapshots..].iter().all(|free| !free),
-                "state changes must not release the running Matter socket"
-            );
+            assert_eq!(runner_starts.get(), starts);
             assert_eq!(version(), root_settled);
             assert!(runtime_socket_live(port));
 
@@ -352,7 +386,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                  BEGIN SELECT RAISE(ABORT, 'injected'); END;",
             )
             .unwrap();
-            let before_failure = observations.borrow().len();
+            let before_failure = runner_starts.get();
             c.cloud.lock().unwrap().catalog_groups = vec![group_record(
                 "record-1",
                 "group-1",
@@ -360,12 +394,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 false,
             )];
             c.context.request_sync();
-            until(|| {
-                observations.borrow()[before_failure..]
-                    .iter()
-                    .any(|free| *free)
-            })
-            .await;
+            until(|| runner_starts.get() > before_failure).await;
             until(|| runtime_socket_live(port)).await;
             assert_eq!(version(), root_settled);
             assert_eq!(

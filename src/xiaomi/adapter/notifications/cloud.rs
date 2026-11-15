@@ -275,16 +275,6 @@ pub(super) async fn prepare_properties(
     context.changed.notify(usize::MAX);
     Ok(())
 }
-#[cfg(test)]
-use super::tests::support::connect;
-#[cfg(not(test))]
-async fn connect(
-    context: &Context,
-    credentials: &XiaomiRecord,
-) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
-    let _ = context;
-    crate::xiaomi::cloud::connect_notifications(credentials).await
-}
 async fn changed_credentials(context: &Context, key: &ConnectionKey) {
     loop {
         let changed = context.changed.listen();
@@ -306,8 +296,6 @@ async fn changed_credentials(context: &Context, key: &ConnectionKey) {
 pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError> {
     let mut backoff = Backoff::new(10, 600);
     loop {
-        #[cfg(test)]
-        context.mqtt_retry_deadline.set(None);
         let changed = context.changed.listen();
         let credentials = context.credentials_changed.listen();
         let Some((key, record)) = connection_credentials(&context) else {
@@ -322,10 +310,13 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
             .await;
             continue;
         };
-        let connecting = future::or(async { Some(connect(&context, &record).await) }, async {
-            changed_credentials(&context, &key).await;
-            None
-        })
+        let connecting = future::or(
+            async { Some(context.network.notifications(&record).await) },
+            async {
+                changed_credentials(&context, &key).await;
+                None
+            },
+        )
         .await;
         drop(record);
         let Some(result) = connecting else {
@@ -468,8 +459,6 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
             continue;
         }
         let due = context.clock.now() + backoff.failed();
-        #[cfg(test)]
-        context.mqtt_retry_deadline.set(Some(due));
         future::or(
             context.clock.wait_until(due),
             changed_credentials(&context, &key),

@@ -73,6 +73,7 @@ fn failed_poll_waits_for_the_next_period() {
         1,
         "127.0.0.1:54321".parse().unwrap(),
         Token::parse("00112233445566778899aabbccddeeff").unwrap(),
+        crate::xiaomi::lan::TIMEOUT,
     ));
     let (read, _) = state
         .reserve(
@@ -342,4 +343,31 @@ fn a_returned_ordinary_read_keeps_priority_over_a_pending_baseline() {
 #[test]
 fn a_returned_ordinary_lease_keeps_priority_over_a_pending_baseline() {
     returned_ordinary_demand_survives_a_pending_baseline(true);
+}
+
+impl RefreshState {
+    pub(in crate::xiaomi::adapter) fn snapshot(&self) -> RefreshSnapshot {
+        RefreshSnapshot {
+            pending: self.pending.iter().cloned().collect(),
+            inflight: self.inflight.keys().cloned().collect(),
+            problems: self.problems.clone(),
+        }
+    }
+    pub(in crate::xiaomi::adapter) fn exhaust_pending(
+        &mut self,
+        id: &str,
+        binding: PropertyBinding,
+    ) {
+        self.pending
+            .iter_mut()
+            .find(|read| read.id == id && read.input == ReadInput::Property(binding))
+            .unwrap()
+            .attempts = 3;
+    }
+}
+
+pub(in crate::xiaomi::adapter) struct RefreshSnapshot {
+    pub(in crate::xiaomi::adapter) pending: Vec<Refresh>,
+    pub(in crate::xiaomi::adapter) inflight: BTreeSet<PropertyKey>,
+    pub(in crate::xiaomi::adapter) problems: BTreeMap<PropertyKey, String>,
 }

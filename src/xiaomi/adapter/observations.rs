@@ -100,10 +100,6 @@ impl Observations {
             .or_default()
             .refresh += 1;
     }
-    #[cfg(test)]
-    pub(super) fn read_stamp(&self, id: &str, binding: PropertyBinding) -> ReadStamp {
-        self.read_stamp_input(id, ReadInput::Property(binding))
-    }
     pub(super) fn read_stamp_input(&self, id: &str, input: ReadInput) -> ReadStamp {
         let mut channels = self.channels.borrow_mut();
         let counts = channels.entry(input_key(id, input)).or_default();

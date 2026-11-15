@@ -4,8 +4,8 @@ use crate::xiaomi::capability::PropertyBinding;
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
 fn observation_rig(members: &[&str]) -> Rig {
-    let mut rig = Rig::new(true, members);
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = Rig::new(true, members);
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     rig
 }
 

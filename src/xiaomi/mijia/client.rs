@@ -24,8 +24,6 @@ pub struct MijiaClient {
     client: HttpClient,
     pub(super) base_url: String,
     timeout: Duration,
-    #[cfg(test)]
-    fixed_nonce: Option<([u8; 8], u32)>,
 }
 
 impl MijiaClient {
@@ -48,8 +46,6 @@ impl MijiaClient {
             client,
             base_url: base_url.trim_end_matches('/').to_owned(),
             timeout,
-            #[cfg(test)]
-            fixed_nonce: None,
         })
     }
 
@@ -62,7 +58,7 @@ impl MijiaClient {
         timeout: Duration,
     ) -> Result<Envelope, CloudError> {
         let data = data.to_string();
-        let (random, minutes) = self.nonce(operation)?;
+        let (random, minutes) = Self::nonce(operation)?;
         let (nonce, signature) = signed_fields(&session.security_key, random, minutes, path, &data);
         let form = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("data", &data)
@@ -127,11 +123,7 @@ impl MijiaClient {
         Ok(envelope)
     }
 
-    fn nonce(&self, operation: &'static str) -> Result<([u8; 8], u32), CloudError> {
-        #[cfg(test)]
-        if let Some(nonce) = self.fixed_nonce {
-            return Ok(nonce);
-        }
+    fn nonce(operation: &'static str) -> Result<([u8; 8], u32), CloudError> {
         let seconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| CloudError::protocol(operation))?

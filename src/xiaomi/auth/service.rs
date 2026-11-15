@@ -36,21 +36,6 @@ impl AuthService {
         self.mijia.clone()
     }
 
-    #[cfg(test)]
-    pub(in crate::xiaomi) fn for_adapter_test(
-        store: XiaomiStore,
-        cloud: CloudClient,
-        base: &str,
-    ) -> Self {
-        Self {
-            store,
-            cloud,
-            account: AccountClient::for_test(base, std::time::Duration::from_secs(1)),
-            mijia: MijiaClient::for_test(base, std::time::Duration::from_secs(1)),
-            now: current_time,
-        }
-    }
-
     pub fn local_status(&self) -> Result<AuthReport, AuthError> {
         let stored = self.load_validated()?;
         Ok(self.report_for(stored.as_ref()))

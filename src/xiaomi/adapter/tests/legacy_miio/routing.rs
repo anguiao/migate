@@ -167,14 +167,8 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
         cloud.cert_status = 503;
     }
     rig.clock.advance(Duration::from_secs(7200));
-    let (restored, ready) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
-    restored.context.lan_port.set(peer.address.port());
+    let (restored, ready) = rig.reopen_adapter();
+    rig.network.lan_port.set(peer.address.port());
     rig.source = restored;
     rig.ready = ready;
     block_on(rig.run(|control| {

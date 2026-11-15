@@ -12,10 +12,4 @@ impl MijiaClient {
             .unwrap();
         client
     }
-
-    pub(in crate::xiaomi::mijia) fn for_signed_test(base: &str, timeout: Duration) -> Self {
-        let mut client = Self::for_test(base, timeout);
-        client.fixed_nonce = Some(([0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77], 28_333_333));
-        client
-    }
 }

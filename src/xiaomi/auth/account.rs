@@ -4,11 +4,12 @@ mod oauth;
 
 use crate::xiaomi::{cloud::AuthorizationAttempt, mijia::MijiaSession};
 use http::{AccountFlow, account_json, endpoint};
-use isahc::{cookies::Cookie, http::header::HeaderValue};
+use isahc::{HttpClient, HttpClientBuilder, cookies::Cookie, http::header::HeaderValue};
 use serde_json::Value;
 use std::{
     error::Error as StdError,
     fmt,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
@@ -193,8 +194,7 @@ impl fmt::Debug for AccountCredentials {
 #[derive(Clone)]
 pub struct AccountClient {
     timeout: Duration,
-    #[cfg(test)]
-    test_port: Option<u16>,
+    client_builder: Arc<dyn Fn() -> HttpClientBuilder + Send + Sync>,
 }
 impl Default for AccountClient {
     fn default() -> Self {
@@ -205,16 +205,7 @@ impl AccountClient {
     pub fn new() -> Self {
         Self {
             timeout: REQUEST_TIMEOUT,
-            #[cfg(test)]
-            test_port: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(in crate::xiaomi) fn for_test(base: &str, timeout: Duration) -> Self {
-        Self {
-            timeout,
-            test_port: Some(Url::parse(base).unwrap().port().unwrap()),
+            client_builder: Arc::new(HttpClient::builder),
         }
     }
 

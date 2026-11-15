@@ -30,13 +30,7 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
         .devices()
         .commit_configuration(&previous, &[])
         .unwrap();
-    let (restored, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (restored, _) = rig.reopen_adapter();
     let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
     assert_eq!(app.frozen().len(), 1);
     let plan = app.plan().unwrap().unwrap();
@@ -300,13 +294,7 @@ fn startup_reparses_cached_source_before_committing_new_capabilities() {
         .devices()
         .commit_configuration(&before, &[])
         .unwrap();
-    let (restored, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (restored, _) = rig.reopen_adapter();
     let identity = before.device(&key).unwrap();
     assert!(
         identity
@@ -380,13 +368,7 @@ fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay(
             reason: "confirmed removal".into(),
         }])
         .unwrap();
-    let (restored, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (restored, _) = rig.reopen_adapter();
     let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
     assert_eq!(app.frozen().len(), 1);
     assert!(!app.frozen()[0].device.description().has_battery());
@@ -518,13 +500,7 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         .commit_configuration(&state, &[])
         .unwrap();
     for _ in 0..2 {
-        let (source, ready) = XiaomiAdapter::build(
-            rig.store.clone(),
-            rig.source.cloud.clone(),
-            rig.discovery.clone(),
-            rig.clock.clone(),
-        )
-        .unwrap();
+        let (source, ready) = rig.reopen_adapter();
         block_on(poll_once(ready.wait())).unwrap().unwrap();
         let registry = &source.context.registry;
         assert_eq!(registry.list().len(), 3);
@@ -668,7 +644,7 @@ fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails()
         }
         drop(database);
         let store = crate::storage::Store::open(directory.path()).unwrap();
-        let result = XiaomiAdapter::build(store, client, discovery, clock);
+        let result = TestNetwork::new(None).build(store, client, discovery, clock);
         if corrupt_credentials {
             let (adapter, ready) = result.unwrap();
             block_on(poll_once(ready.wait())).unwrap().unwrap();
@@ -710,13 +686,7 @@ fn stopped_ha_or_missing_certificate_preserves_topology_and_maintenance() {
             saved.hub.as_mut().unwrap().certificate_pem = None;
         }
         rig.store.xiaomi().fixture_replace(&saved).unwrap();
-        let (adapter, ready) = XiaomiAdapter::build(
-            rig.store.clone(),
-            rig.source.cloud.clone(),
-            rig.discovery.clone(),
-            rig.clock.clone(),
-        )
-        .unwrap();
+        let (adapter, ready) = rig.reopen_adapter();
         block_on(poll_once(ready.wait())).unwrap().unwrap();
         assert!(adapter.context.live.borrow().scope.is_some());
         assert!(adapter.context.live.borrow().devices.contains_key("one"));

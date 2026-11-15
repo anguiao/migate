@@ -45,32 +45,13 @@ impl Clock for SystemClock {
     }
 }
 impl XiaomiAdapter {
-    pub(super) fn build(
-        store: Store,
-        cloud: CloudClient,
-        discovery: Discovery,
-        clock: Arc<dyn Clock>,
-    ) -> Result<(Self, TopologyReady), AdapterError> {
-        #[cfg(not(test))]
-        let auth = AuthService::new(store.xiaomi(), cloud.clone())
-            .map_err(crate::xiaomi::auth::AuthError::Cloud)?;
-        #[cfg(test)]
-        let base = if cloud.test_base_url().starts_with("http://127.0.0.1:") {
-            cloud.test_base_url()
-        } else {
-            "http://127.0.0.1:9"
-        };
-        #[cfg(test)]
-        let auth = AuthService::for_adapter_test(store.xiaomi(), cloud.clone(), base);
-        Self::build_with_auth(store, cloud, discovery, clock, auth)
-    }
-
-    pub(super) fn build_with_auth(
+    pub(super) fn with_services(
         store: Store,
         cloud: CloudClient,
         discovery: Discovery,
         clock: Arc<dyn Clock>,
         auth: AuthService,
+        network: Rc<dyn super::network::Network>,
     ) -> Result<(Self, TopologyReady), AdapterError> {
         let credentials = auth.saved_bridge_credentials()?;
         let snapshot = store.xiaomi().current_snapshot();
@@ -174,26 +155,13 @@ impl XiaomiAdapter {
                 Vec::new()
             }),
             notifications: RefCell::new(None),
-            #[cfg(test)]
-            mqtt_retry_deadline: Cell::new(None),
             credentials_changed: Event::new(),
-            #[cfg(test)]
-            notification_connector: Cell::new(
-                super::notifications::NotificationConnector::Disabled,
-            ),
             priority: Cell::new(super::routing::PathPriority::LocalFirst),
             mijia: auth.mijia_client(),
-            #[cfg(test)]
-            cloud: cloud.clone(),
+            network,
             lan_discovery: crate::xiaomi::lan::Discovery::default(),
             lan_scope_invalid: Cell::new(false),
             lan_network_changed: Event::new(),
-            #[cfg(test)]
-            lan_port: Cell::new(54321),
-            #[cfg(test)]
-            lan_test_endpoints: RefCell::new(BTreeMap::new()),
-            #[cfg(test)]
-            lan_timeout: Cell::new(Duration::from_secs(10)),
             ha_sync: RefCell::new(if ha_stopped {
                 super::credentials::HaSync::Paused
             } else {
@@ -221,8 +189,6 @@ impl XiaomiAdapter {
             store,
             tasks: TaskSet::default(),
             configuration_changed: Rc::new(Event::new()),
-            #[cfg(test)]
-            snapshot_observer: RefCell::new(None),
             changed: Event::new(),
             status: RefCell::new(AdapterStatus {
                 auth: report,
@@ -300,10 +266,6 @@ impl XiaomiAdapter {
                 auth,
                 discovery,
                 context,
-                #[cfg(test)]
-                test_ca: None,
-                #[cfg(test)]
-                request_timeout: Duration::from_secs(10),
             },
             TopologyReady(ready),
         ))

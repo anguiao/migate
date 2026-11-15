@@ -122,7 +122,7 @@ pub(crate) fn dynamic_mock_server(
     (format!("http://{address}"), receiver)
 }
 
-fn write_response(mut stream: TcpStream, response: MockResponse) {
+fn write_response(mut stream: Box<dyn HttpStream>, response: MockResponse) {
     if let Some(gate) = response.gate
         && gate.recv().is_err()
     {
@@ -136,15 +136,20 @@ fn write_response(mut stream: TcpStream, response: MockResponse) {
         thread::sleep(response.delay);
         let _ = stream.write_all(response.wire.as_bytes());
     }
+    let _ = stream.finish();
     if let Some(finished) = response.finished {
         finished();
     }
 }
 
-fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> {
+fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<Box<dyn HttpStream>> {
     loop {
         match listener.accept() {
-            Ok((stream, _)) => return Some(stream),
+            Ok((stream, _)) => {
+                if let Some(stream) = http_stream(stream) {
+                    return Some(stream);
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
                     return None;
@@ -156,9 +161,7 @@ fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<TcpStream> 
     }
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<ReceivedRequest> {
-    stream.set_nonblocking(false).ok()?;
-    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+fn read_request(stream: &mut impl Read) -> Option<ReceivedRequest> {
     let mut bytes = Vec::new();
     let mut buffer = [0; 4096];
     let (header_end, content_length) = loop {
@@ -228,4 +231,33 @@ pub(crate) fn sign_csr(
     request
         .signed_by(&issuer)
         .map(|certificate| certificate.pem())
+}
+
+trait HttpStream: Read + Write + Send {
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.flush()
+    }
+}
+
+impl HttpStream for TcpStream {}
+
+impl HttpStream for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn finish(&mut self) -> std::io::Result<()> {
+        self.conn.send_close_notify();
+        self.flush()
+    }
+}
+
+fn http_stream(stream: TcpStream) -> Option<Box<dyn HttpStream>> {
+    stream.set_nonblocking(false).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    let mut header = [0];
+    if stream.peek(&mut header).ok()? == 0 {
+        return None;
+    }
+    if header[0] == 0x16 {
+        Some(Box::new(super::account_tls::accept(stream)))
+    } else {
+        Some(Box::new(stream))
+    }
 }

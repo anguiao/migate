@@ -30,13 +30,7 @@ fn restored_relays_wait_for_power_and_mode_only_on_published_channels() {
     let configuration = rig.store.devices().load_configuration().unwrap();
     let mode = PropertyBinding { siid: 2, piid: 2 };
     for bindings in [[POWER, mode], [mode, POWER]] {
-        let (restored, _) = XiaomiAdapter::build(
-            rig.store.clone(),
-            rig.source.cloud.clone(),
-            rig.discovery.clone(),
-            rig.clock.clone(),
-        )
-        .unwrap();
+        let (restored, _) = rig.reopen_adapter();
         let source = restored.source_handle();
         let restarted = crate::app::App::open(source.clone(), rig.store.clone()).unwrap();
         assert_eq!(restarted.frozen().len(), 1);
@@ -344,13 +338,7 @@ fn group_waits_for_its_actual_member_sources_without_unrelated_hidden_brightness
             })
             .await;
             let configuration = c.store.devices().load_configuration().unwrap();
-            let (restored, _) = XiaomiAdapter::build(
-                c.store.clone(),
-                c.context.cloud.clone(),
-                c.discovery.clone(),
-                c.clock.clone(),
-            )
-            .unwrap();
+            let (restored, _) = c.reopen_adapter();
             let source = restored.source_handle();
             assert!(!source.initial_reads_ready(&configuration));
             if physical {

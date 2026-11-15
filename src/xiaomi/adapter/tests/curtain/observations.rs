@@ -48,8 +48,8 @@ fn external_stop_converges_without_writes_and_cached_target_does_not_resume_it()
 
 #[test]
 fn retained_snapshot_can_seed_unknown_position_without_cancelling_its_baseline() {
-    let mut rig = rig();
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = rig();
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = peer();
@@ -244,8 +244,8 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
 
 #[test]
 fn curtain_baselines_are_independent_when_notification_arrives_with_last_suback() {
-    let mut rig = rig();
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = rig();
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = peer();

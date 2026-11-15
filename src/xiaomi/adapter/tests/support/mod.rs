@@ -3,7 +3,7 @@ pub(super) use crate::device::{Command, DeviceRegistry};
 use crate::xiaomi::capability::NativeDescription;
 pub(super) use crate::xiaomi::capability::tests::source::SourceFixture;
 pub(super) use crate::xiaomi::{
-    central::{decode_mips, encode_mips, test_support::Broker},
+    central::tests::support::{Broker, decode_mips, encode_mips},
     discovery::SERVICE_TYPE,
 };
 pub(super) use crate::{
@@ -11,11 +11,11 @@ pub(super) use crate::{
     device::{Availability, DeviceKey, Power},
     storage::Store,
     xiaomi::{
-        central::test_support::TlsFixture,
+        central::tests::support::TlsFixture,
         cloud::CloudClient,
         discovery::Discovery,
         mijia::group_id,
-        test_support::{MockResponse, dynamic_mock_server},
+        tests::support::{MockResponse, dynamic_mock_server},
     },
 };
 pub(super) use async_io::Async;
@@ -42,6 +42,7 @@ pub(super) use std::{
 
 mod cloud_peer;
 mod groups;
+mod network;
 mod peer;
 mod rig;
 
@@ -52,6 +53,7 @@ pub(super) use groups::{
     MEMBER_COLOR, MEMBER_MODE, confirmed_for, group_instance, group_record, ls2307_instance,
     repair_ready, repair_rig,
 };
+pub(super) use network::TestNetwork;
 pub(super) use peer::{Peer, peer_run, response, topic_key};
 pub(super) use rig::{Control, Rig};
 

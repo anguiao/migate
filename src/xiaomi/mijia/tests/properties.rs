@@ -2,7 +2,7 @@ use super::support::*;
 use super::*;
 use crate::xiaomi::{
     capability::PropertyBinding,
-    test_support::{MockResponse, mock_server},
+    tests::support::{MockResponse, mock_server},
 };
 use futures_lite::future;
 use serde_json::{Value, json};

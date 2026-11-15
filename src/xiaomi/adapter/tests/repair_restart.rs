@@ -29,13 +29,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         let before = c.store.devices().load_configuration().unwrap();
         let key = DeviceKey::new("xiaomi", "group-1");
         let original = c.context.registry.get(&key).unwrap();
-        let (restored, ready) = XiaomiAdapter::build(
-            c.store.clone(),
-            c.context.cloud.clone(),
-            c.discovery.clone(),
-            c.clock.clone(),
-        )
-        .unwrap();
+        let (restored, ready) = c.reopen_adapter();
         ready.wait().await.unwrap();
         let registry = restored.context.registry.clone();
         let group = registry.get(&key).unwrap();
@@ -174,13 +168,7 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
         })
         .await;
         let before = c.store.devices().load_configuration().unwrap();
-        let (restored, ready) = XiaomiAdapter::build(
-            c.store.clone(),
-            c.context.cloud.clone(),
-            c.discovery.clone(),
-            c.clock.clone(),
-        )
-        .unwrap();
+        let (restored, ready) = c.reopen_adapter();
         ready.wait().await.unwrap();
         let registry = restored.context.registry.clone();
         let member = registry.get(&DeviceKey::new("xiaomi", "member-a")).unwrap();

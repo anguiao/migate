@@ -11,7 +11,7 @@ use crate::{
     xiaomi::{
         auth::FailureReason,
         central::SessionHandle,
-        cloud::{NotificationDriver, NotificationError, NotificationEvent, NotificationHandle},
+        cloud::{NotificationError, NotificationEvent, NotificationHandle},
     },
 };
 use event_listener::Event;
@@ -26,10 +26,6 @@ pub(super) use cloud::CloudSession;
 use cloud::{connection_key, connections, prepare_properties, reconcile_online};
 use selection::selections;
 
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-pub(super) use tests::support::NotificationConnector;
 #[derive(Clone)]
 pub(super) enum NotificationSource {
     Local(SessionHandle),

@@ -33,11 +33,10 @@ fn retry_new_credentials_after_temporary_failure(
     };
     rig.store.lan().save(&record).unwrap();
     let context = rig.source.context.clone();
-    context.lan_port.set(peer.address.port());
-    context.lan_timeout.set(Duration::from_millis(80));
-    context
-        .lan_discovery
-        .configure_test(peer.address, Duration::from_millis(20));
+    rig.network.lan_port.set(peer.address.port());
+    rig.network.lan_timeout.set(Duration::from_millis(80));
+    rig.network
+        .discover_at(peer.address, Duration::from_millis(20));
     let new_info = CloudDeviceInfo {
         did: record.did.clone(),
         model: record.model.clone(),
@@ -218,19 +217,12 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
         cloud.cert_status = 503;
     }
     rig.clock.advance(Duration::from_secs(7200));
-    let (adapter, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
     assert!(context.status.borrow().auth.certificate.unwrap().not_after < rig.clock.wall());
-    context.lan_port.set(peer.address.port());
-    context
-        .lan_discovery
-        .configure_test(peer.address, Duration::from_millis(20));
+    rig.network.lan_port.set(peer.address.port());
+    rig.network
+        .discover_at(peer.address, Duration::from_millis(20));
     block_on(async {
         future::or(
             async {
@@ -373,11 +365,10 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
     let peer = FakeDevice::new(token.clone(), replacement.clone());
     peer.reject_read.store(true, Ordering::Relaxed);
     let context = rig.source.context.clone();
-    context.lan_port.set(peer.address.port());
-    context.lan_timeout.set(Duration::from_millis(100));
-    context
-        .lan_discovery
-        .configure_test(peer.address, Duration::from_millis(20));
+    rig.network.lan_port.set(peer.address.port());
+    rig.network.lan_timeout.set(Duration::from_millis(100));
+    rig.network
+        .discover_at(peer.address, Duration::from_millis(20));
     context
         .live
         .borrow_mut()
@@ -465,13 +456,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         );
                         context.revoke("656878122", "test revocation").unwrap();
                         assert_eq!(rig.store.lan().load(&scope, "656878122").unwrap(), None);
-                        let (restored, _) = XiaomiAdapter::build(
-                            rig.store.clone(),
-                            rig.source.cloud.clone(),
-                            rig.discovery.clone(),
-                            rig.clock.clone(),
-                        )
-                        .unwrap();
+                        let (restored, _) = rig.reopen_adapter();
                         assert!(
                             restored
                                 .context
@@ -518,19 +503,12 @@ fn discovered_new_address_is_saved_only_after_authenticated_read() {
         token,
     };
     rig.store.lan().save(&record).unwrap();
-    let (adapter, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
-    context.lan_port.set(peer.address.port());
-    context.lan_timeout.set(Duration::from_millis(40));
-    context
-        .lan_discovery
-        .configure_test(peer.address, Duration::from_millis(20));
+    rig.network.lan_port.set(peer.address.port());
+    rig.network.lan_timeout.set(Duration::from_millis(40));
+    rig.network
+        .discover_at(peer.address, Duration::from_millis(20));
     block_on(async {
         future::or(
             async {
@@ -599,17 +577,16 @@ fn discovered_address_error_controls_recovery(rejected: bool) {
     };
     rig.store.lan().save(&record).unwrap();
     let context = rig.source.context.clone();
-    context.lan_port.set(peer.address.port());
-    context.lan_timeout.set(Duration::from_millis(80));
+    rig.network.lan_port.set(peer.address.port());
+    rig.network.lan_timeout.set(Duration::from_millis(80));
     if let Some(old) = &old {
-        context
-            .lan_test_endpoints
+        rig.network
+            .lan_endpoints
             .borrow_mut()
             .insert(record.address, old.address);
     }
-    context
-        .lan_discovery
-        .configure_test(peer.address, Duration::from_millis(20));
+    rig.network
+        .discover_at(peer.address, Duration::from_millis(20));
 
     block_on(async {
         future::or(
@@ -721,23 +698,16 @@ fn occupied_address_recovers(old: &FakeDevice, expected_old_business: usize, tok
         token,
     };
     rig.store.lan().save(&record).unwrap();
-    let (adapter, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
-    context.lan_port.set(target.address.port());
-    context.lan_timeout.set(Duration::from_millis(500));
-    context
-        .lan_test_endpoints
+    rig.network.lan_port.set(target.address.port());
+    rig.network.lan_timeout.set(Duration::from_millis(500));
+    rig.network
+        .lan_endpoints
         .borrow_mut()
         .insert(record.address, old.address);
-    context
-        .lan_discovery
-        .configure_test(target.address, Duration::from_millis(20));
+    rig.network
+        .discover_at(target.address, Duration::from_millis(20));
     block_on(async {
         future::or(
             async {
@@ -830,22 +800,15 @@ fn identity_mismatch_without_discovery_stops_without_retries() {
         token,
     };
     rig.store.lan().save(&record).unwrap();
-    let (adapter, _) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
-    context
-        .lan_test_endpoints
+    rig.network
+        .lan_endpoints
         .borrow_mut()
         .insert(record.address, old.address);
-    context.lan_timeout.set(Duration::from_millis(500));
-    context
-        .lan_discovery
-        .configure_test(discovery.local_addr().unwrap(), Duration::from_millis(20));
+    rig.network.lan_timeout.set(Duration::from_millis(500));
+    rig.network
+        .discover_at(discovery.local_addr().unwrap(), Duration::from_millis(20));
     block_on(async {
         future::or(
             async {

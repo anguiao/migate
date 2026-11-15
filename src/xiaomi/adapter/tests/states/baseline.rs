@@ -45,8 +45,8 @@ fn native_motion_needs_both_subscriptions_but_keeps_illuminance_and_read_snapsho
 
 #[test]
 fn native_motion_readiness_does_not_wait_for_optional_battery_subscription() {
-    let mut rig = motion_rig();
-    rig.source.request_timeout = Duration::from_secs(2);
+    let rig = motion_rig();
+    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = motion_peer();

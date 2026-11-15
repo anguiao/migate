@@ -1,3 +1,5 @@
+pub(in crate::xiaomi::central) use super::connection::start;
+
 mod cancellation;
 mod devices;
 mod io;
@@ -12,11 +14,10 @@ use super::request::Response;
 use super::{
     CentralEvent, SessionDriver, SessionHandle, Timing, Transport,
     request::{RequestKind, Shared, parse_response},
-    start,
 };
 use crate::xiaomi::{
     capability::PropertyBinding,
-    central::{CentralError, test_support::TlsFixture, tls, wire},
+    central::{CentralError, tests::support::TlsFixture, tls, wire},
     mqtt::{Frames, encode_packet},
 };
 use async_io::Async;

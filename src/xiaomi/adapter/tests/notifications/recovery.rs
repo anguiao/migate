@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immediately() {
     let (rig, listener, peer) = with_cloud_peer(&["one"]);
+    let network = rig.network.clone();
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -14,14 +15,15 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
         future::or(peer.run(&listener), async {
             until(|| peer.state.borrow().connects.len() == 1).await;
             for (index, seconds) in [10, 20, 40, 80, 160, 320, 600].into_iter().enumerate() {
+                until(|| network.notification_results.get() == index + 1).await;
                 let due = c.clock.now() + Duration::from_secs(seconds);
-                until(|| c.context.mqtt_retry_deadline.get() == Some(due)).await;
-                c.clock.advance(Duration::from_secs(seconds));
+                advance_to(&c.clock, due).await;
                 until(|| peer.state.borrow().connects.len() == index + 2).await;
                 assert!(!c.context.http_paused.get());
             }
+            until(|| network.notification_results.get() == 8).await;
             let capped = c.clock.now() + Duration::from_secs(600);
-            until(|| c.context.mqtt_retry_deadline.get() == Some(capped)).await;
+            until(|| c.clock.deadlines.lock().unwrap().contains(&capped)).await;
             let mut record = c.store.xiaomi().load().unwrap().unwrap();
             record.ha.authorization.tokens.access_token = "replacement-token".into();
             c.store
@@ -31,9 +33,9 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             c.context.adopt_credentials(record);
             until(|| peer.state.borrow().connects.len() == 9).await;
             assert_eq!(peer.state.borrow().connects[8], "replacement-token");
+            until(|| network.notification_results.get() == 9).await;
             let due = c.clock.now() + Duration::from_secs(10);
-            until(|| c.context.mqtt_retry_deadline.get() == Some(due)).await;
-            c.clock.advance(Duration::from_secs(10));
+            advance_to(&c.clock, due).await;
 
             until(|| cloud_active(&c, "one")).await;
             let old = c
@@ -47,8 +49,7 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             peer.send(Packet::Disconnect(Disconnect::new()));
             until(|| c.context.notifications.borrow().is_none()).await;
             let due = c.clock.now() + Duration::from_secs(10);
-            until(|| c.context.mqtt_retry_deadline.get() == Some(due)).await;
-            c.clock.advance(Duration::from_secs(10));
+            advance_to(&c.clock, due).await;
             until(|| cloud_active(&c, "one")).await;
             let one = function(&c.context.registry, "one", "outlet:2");
             let binding = crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 };

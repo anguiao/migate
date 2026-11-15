@@ -5,7 +5,7 @@ use crate::{
     xiaomi::{
         adapter::model::{LanState, PathKind},
         capability::PropertyBinding,
-        lan::{Token, test_support::LegacyDevice},
+        lan::{Token, tests::support::LegacyDevice},
     },
 };
 use std::sync::atomic::Ordering;
@@ -47,7 +47,7 @@ fn setup() -> (Rig, LegacyDevice) {
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     (rig, peer)
 }
@@ -190,10 +190,7 @@ fn v13_direct_low_speed_sends_only_set_bh_mode_without_a_high_speed_write() {
 #[test]
 fn plain_on_preserves_low_speed_before_and_after_power_feedback() {
     let (rig, direct) = setup();
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(500));
+    rig.network.lan_timeout.set(Duration::from_millis(500));
     let (rig, listener, cloud) = with_cloud_rig(rig);
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
@@ -709,10 +706,7 @@ fn direct_business_and_field_failures_do_not_revoke_shared_or_standard_access() 
 #[test]
 fn direct_outage_switches_shared_and_low_to_cloud_and_recovery_rebaselines_directly() {
     let (rig, direct) = setup();
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(100));
+    rig.network.lan_timeout.set(Duration::from_millis(100));
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud
@@ -838,10 +832,7 @@ fn direct_outage_switches_shared_and_low_to_cloud_and_recovery_rebaselines_direc
 #[test]
 fn an_unsent_direct_low_speed_start_can_use_the_cloud() {
     let (rig, direct) = setup();
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(200));
+    rig.network.lan_timeout.set(Duration::from_millis(200));
     let (rig, listener, cloud) = with_cloud_rig(rig);
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
@@ -893,10 +884,7 @@ fn an_unsent_direct_low_speed_start_can_use_the_cloud() {
 #[test]
 fn sent_direct_low_speed_timeout_stays_uncertain_and_is_not_replayed_on_cloud() {
     let (rig, direct) = setup();
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(100));
+    rig.network.lan_timeout.set(Duration::from_millis(100));
     let (rig, listener, cloud) = with_cloud_rig(rig);
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
@@ -981,18 +969,13 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
         })
         .unwrap();
     {
-        let mut endpoints = rig.source.context.lan_test_endpoints.borrow_mut();
+        let mut endpoints = rig.network.lan_endpoints.borrow_mut();
         endpoints.insert(old_address, old.address);
         endpoints.insert(new_address, new.address);
     }
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(100));
-    rig.source
-        .context
-        .lan_discovery
-        .configure_test(new.address, Duration::from_millis(20));
+    rig.network.lan_timeout.set(Duration::from_millis(100));
+    rig.network
+        .discover_at(new.address, Duration::from_millis(20));
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|c| async move {
         let blow = function(&c, BLOW);
@@ -1088,15 +1071,9 @@ fn v13_offline_cold_start_keeps_identity_functions_and_reads_a_new_baseline() {
         cloud.cert_status = 503;
     }
     rig.clock.advance(Duration::from_secs(7200));
-    let (restored, ready) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
-    restored.context.lan_port.set(peer.address.port());
-    restored.context.lan_timeout.set(Duration::from_millis(100));
+    let (restored, ready) = rig.reopen_adapter();
+    rig.network.lan_port.set(peer.address.port());
+    rig.network.lan_timeout.set(Duration::from_millis(100));
     rig.source = restored;
     rig.ready = ready;
     rig.clock.automatic.store(true, Ordering::Relaxed);

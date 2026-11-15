@@ -160,10 +160,6 @@ impl SourceHandle {
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
     pub(crate) fn snapshot(&self) -> SourceFacts {
-        #[cfg(test)]
-        if let Some(observer) = self.0.snapshot_observer.borrow_mut().as_mut() {
-            observer();
-        }
         let live = self.0.live.borrow();
         let scope = live.scope.clone();
         // A directory target that has not produced its matching description

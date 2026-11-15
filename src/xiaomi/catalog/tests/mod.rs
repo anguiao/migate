@@ -12,7 +12,7 @@ use crate::{
         cloud::CloudErrorKind,
         discovery::Gateway,
         mijia::group_id,
-        test_support::{MockResponse, mock_server},
+        tests::support::{MockResponse, mock_server},
     },
 };
 use futures_lite::future::block_on;

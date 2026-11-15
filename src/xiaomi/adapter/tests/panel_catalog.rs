@@ -264,13 +264,7 @@ fn cached_alias_never_restores_as_a_physical_device_even_when_catalog_is_offline
     db.execute("UPDATE bridge_configuration SET json=json_set(json, '$.split_devices', json(?1)) WHERE id=1", [json!([{"did":"left-alias","parent_did":"panel","siid":10,"name":"Left load"}]).to_string()]).unwrap();
     drop(db);
     rig.cloud.lock().unwrap().catalog_status = 503;
-    let (source, ready) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
+    let (source, ready) = rig.reopen_adapter();
     assert!(
         source
             .context

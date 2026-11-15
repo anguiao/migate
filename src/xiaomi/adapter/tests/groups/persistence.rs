@@ -175,14 +175,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         );
         let status = crate::terminal::AuthStatus::new(report, "/bin/migate".into(), "/data".into());
         let startup_port = free_udp_port();
-        let failing = XiaomiAdapter::build(
-            store.clone(),
-            c.context.cloud.clone(),
-            c.discovery.clone(),
-            c.context.clock.clone(),
-        )
-        .unwrap()
-        .0;
+        let failing = c.reopen_adapter().0;
         let failing_handle = crate::xiaomi::adapter::SourceHandle(failing.context.clone());
         let recovered_view = crate::app::App::open(failing_handle.clone(), store.clone()).unwrap();
         assert!(recovered_view.current().published.get(&group).is_none());
@@ -240,14 +233,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         // interleave.
         let db = rusqlite::Connection::open(store.path()).unwrap();
         db.execute_batch("DROP TRIGGER fail_identity;").unwrap();
-        let restored = XiaomiAdapter::build(
-            store.clone(),
-            c.context.cloud.clone(),
-            c.discovery.clone(),
-            c.context.clock.clone(),
-        )
-        .unwrap()
-        .0;
+        let restored = c.reopen_adapter().0;
         {
             let live = restored.context.live.borrow();
             assert!(
@@ -452,14 +438,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
 
         // A fresh restart restores the withdrawn relation, the published member
         // with unknown state and the reserved group identity.
-        let restored = XiaomiAdapter::build(
-            store.clone(),
-            c.context.cloud.clone(),
-            c.discovery.clone(),
-            c.context.clock.clone(),
-        )
-        .unwrap()
-        .0;
+        let restored = c.reopen_adapter().0;
         {
             let live = restored.context.live.borrow();
             assert!(

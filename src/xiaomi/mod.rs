@@ -14,7 +14,4 @@ mod mqtt;
 pub(crate) mod property;
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-pub(crate) use tests::support as test_support;
+pub(crate) mod tests;

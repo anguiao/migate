@@ -190,13 +190,7 @@ fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
         }
         record.recovery.stop = Some(RecoveryStop::Rejected);
         rig.store.xiaomi().fixture_replace(&record).unwrap();
-        let (adapter, _) = XiaomiAdapter::build(
-            rig.store.clone(),
-            rig.source.cloud.clone(),
-            rig.discovery.clone(),
-            rig.clock.clone(),
-        )
-        .unwrap();
+        let (adapter, _) = rig.reopen_adapter();
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(future::or(adapter.run(|_| {}), async {
             async_io::Timer::after(Duration::from_millis(80)).await;

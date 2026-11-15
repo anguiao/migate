@@ -3,16 +3,12 @@ use super::{
     state::{AccessRefresh, AccessRequest, Backoff, Context, Session},
 };
 use crate::xiaomi::{
-    central::{self, CentralError, CentralEvent, SessionHandle},
+    central::{CentralError, CentralEvent, SessionHandle},
     discovery::{Discovery, DiscoveryChanges, GatewayRoute},
 };
 use futures_lite::future;
 use std::{rc::Rc, time::Duration};
-pub(super) async fn run(
-    context: Rc<Context>,
-    discovery: Discovery,
-    #[cfg(test)] test: (Option<String>, Duration),
-) -> Result<(), AdapterError> {
+pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<(), AdapterError> {
     let mut changes = discovery.subscribe();
     let mut route = None;
     let mut backoff = Backoff::new(1, 30);
@@ -75,14 +71,7 @@ pub(super) async fn run(
         for selected in routes {
             context.set_gateway(GatewayStatus::Connecting(selected.did.clone()));
             let address = selected.address;
-            #[cfg(test)]
-            let result = if let Some(ca) = &test.0 {
-                central::test_support::connect(address, &credentials, ca, test.1).await
-            } else {
-                central::connect(address, &credentials).await
-            };
-            #[cfg(not(test))]
-            let result = central::connect(address, &credentials).await;
+            let result = context.network.gateway(address, &credentials).await;
             match result {
                 Ok(session) => {
                     if discovery.snapshot().gateways.iter().any(|gateway| {

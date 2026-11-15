@@ -14,22 +14,17 @@ use std::{
 
 pub(super) async fn probe(
     record: &LanRecord,
-    address: SocketAddr,
+    target: (SocketAddr, Duration),
     binding: PropertyBinding,
     mapping: Option<&'static Mapping>,
-    timeout: Duration,
 ) -> Result<Client, RequestError> {
+    let (address, timeout) = target;
     let client = Client::new(
         record.did.parse().expect("LAN DID validated"),
         address,
         record.token.clone(),
+        timeout,
     );
-    #[cfg(test)]
-    let client = {
-        let mut client = client;
-        client.set_timeout(timeout);
-        client
-    };
     let invalid = |failure| RequestError {
         stage: SendStage::Sent,
         failure,

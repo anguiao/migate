@@ -3,7 +3,7 @@ use super::*;
 mod cookies;
 use crate::xiaomi::{
     cloud::CLIENT_ID,
-    test_support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
+    tests::support::{MockResponse, ReceivedRequest, dynamic_mock_server, mock_server},
 };
 use futures_lite::future::block_on;
 use serde_json::json;
@@ -835,5 +835,18 @@ fn sts_success_with_a_service_cookie_preserves_empty_and_normal_bodies() {
         assert_eq!(restored.session().service_token(), SERVICE);
         assert_eq!(restored.session().ssecurity(), SECURITY);
         assert_eq!(requests.try_iter().count(), 2);
+    }
+}
+
+impl AccountClient {
+    pub(in crate::xiaomi) fn for_test(base: &str, timeout: Duration) -> Self {
+        let address: std::net::SocketAddr = base.strip_prefix("http://").unwrap().parse().unwrap();
+        assert!(address.ip().is_loopback());
+        Self {
+            timeout,
+            client_builder: Arc::new(move || {
+                crate::xiaomi::tests::account_tls::client_builder(address)
+            }),
+        }
     }
 }

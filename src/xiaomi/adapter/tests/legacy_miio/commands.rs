@@ -182,16 +182,12 @@ fn two_mcn02_devices_share_mapping_and_sent_timeout_is_not_replayed() {
                 token: token.clone(),
             })
             .unwrap();
-        rig.source
-            .context
-            .lan_test_endpoints
+        rig.network
+            .lan_endpoints
             .borrow_mut()
             .insert(address, endpoint);
     }
-    rig.source
-        .context
-        .lan_timeout
-        .set(Duration::from_millis(100));
+    rig.network.lan_timeout.set(Duration::from_millis(100));
     rig.clock.automatic.store(true, Ordering::Relaxed);
     rig.cloud
         .lock()
@@ -299,7 +295,7 @@ fn invalid_legacy_write_is_rejected_before_any_udp_send() {
     use crate::xiaomi::{capability::PropertyBinding, lan::Client};
     let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
     let peer = LegacyDevice::new(token.clone(), 308540429);
-    let client = Client::new(308540429, peer.address, token);
+    let client = Client::new(308540429, peer.address, token, crate::xiaomi::lan::TIMEOUT);
     let source = crate::xiaomi::capability::tests::source::SourceFixture::new(
         "308540429",
         "lumi.acpartner.mcn02",
@@ -330,7 +326,7 @@ fn malformed_legacy_ack_is_an_uncertain_sent_response() {
     let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
     let peer = LegacyDevice::new(token.clone(), 308540429);
     *peer.ack.lock().unwrap() = json!(["unexpected"]);
-    let client = Client::new(308540429, peer.address, token);
+    let client = Client::new(308540429, peer.address, token, crate::xiaomi::lan::TIMEOUT);
     let source = crate::xiaomi::capability::tests::source::SourceFixture::new(
         "308540429",
         "lumi.acpartner.mcn02",

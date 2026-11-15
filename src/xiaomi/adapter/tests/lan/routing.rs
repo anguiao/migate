@@ -12,7 +12,7 @@ fn direct_property_batches_correlate_results_and_preserve_each_rejection() {
     let peer = FakeDevice::new(token.clone(), token.clone());
     peer.reverse_write_results.store(true, Ordering::Relaxed);
     peer.write_codes.lock().unwrap().insert((2, 4), -4004);
-    let client = Client::new(656878122, peer.address, token);
+    let client = Client::new(656878122, peer.address, token, crate::xiaomi::lan::TIMEOUT);
     let properties = [
         (PropertyBinding { siid: 2, piid: 1 }, json!(true)),
         (PropertyBinding { siid: 2, piid: 4 }, json!(true)),
@@ -70,7 +70,7 @@ fn offline_p5c_reads_and_controls_existing_fan_bindings_and_preserves_rejection(
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|control| {
         Box::pin(async move {
@@ -181,7 +181,7 @@ fn hub_restoration_keeps_sent_direct_receipt_and_fallback_uses_direct_then_cloud
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(direct.address.port());
+    rig.network.lan_port.set(direct.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     rig.cloud.lock().unwrap().online.insert(did.into());
     block_on(rig.run(|control| {
@@ -289,7 +289,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
         token: token.clone(),
     };
     rig.store.lan().save(&record).unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     rig.cloud.lock().unwrap().online.insert(did.into());
     block_on(rig.run(|control| {
@@ -318,8 +318,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
             })
             .await;
             control.clock.automatic.store(false, Ordering::Relaxed);
-            let mut fresh = Client::new(656878122, peer.address, token);
-            fresh.set_timeout(Duration::from_millis(500));
+            let fresh = Client::new(656878122, peer.address, token, Duration::from_millis(500));
             control
                 .context
                 .live
@@ -393,7 +392,7 @@ fn old_direct_read_cannot_override_a_new_cloud_read() {
             token,
         })
         .unwrap();
-    rig.source.context.lan_port.set(peer.address.port());
+    rig.network.lan_port.set(peer.address.port());
     rig.clock.automatic.store(true, Ordering::Relaxed);
     {
         let mut cloud = rig.cloud.lock().unwrap();
@@ -496,9 +495,8 @@ fn a_held_direct_read_does_not_block_the_next_read_for_another_device() {
                 token: token.clone(),
             })
             .unwrap();
-        rig.source
-            .context
-            .lan_test_endpoints
+        rig.network
+            .lan_endpoints
             .borrow_mut()
             .insert(address, endpoint);
     }

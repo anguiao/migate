@@ -14,11 +14,7 @@ use crate::{
     },
 };
 use futures_lite::future;
-use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    rc::Rc,
-    time::Duration,
-};
+use std::{net::Ipv4Addr, rc::Rc};
 
 mod identity;
 mod properties;
@@ -68,8 +64,6 @@ struct LanProfile {
     protocol: LanProtocol,
     mapping: Option<&'static Mapping>,
 }
-#[cfg(not(test))]
-const PORT: u16 = 54321;
 
 #[derive(Default)]
 pub(super) struct LanSlot {
@@ -108,33 +102,6 @@ pub(super) async fn run(context: Rc<Context>) -> Result<(), AdapterError> {
 }
 
 impl Context {
-    fn lan_port(&self) -> u16 {
-        #[cfg(test)]
-        {
-            self.lan_port.get()
-        }
-        #[cfg(not(test))]
-        {
-            PORT
-        }
-    }
-    fn lan_endpoint(&self, address: std::net::Ipv4Addr) -> SocketAddr {
-        #[cfg(test)]
-        if let Some(endpoint) = self.lan_test_endpoints.borrow().get(&address) {
-            return *endpoint;
-        }
-        SocketAddrV4::new(address, self.lan_port()).into()
-    }
-    fn lan_timeout(&self) -> Duration {
-        #[cfg(test)]
-        {
-            self.lan_timeout.get()
-        }
-        #[cfg(not(test))]
-        {
-            Duration::from_secs(10)
-        }
-    }
     pub(super) fn legacy_mapping(&self, did: &str) -> Option<&'static Mapping> {
         let live = self.live.borrow();
         live.devices
@@ -436,10 +403,9 @@ impl Context {
         loop {
             let result = Box::pin(probe(
                 &candidate,
-                self.lan_endpoint(candidate.address),
+                self.network.lan_target(candidate.address),
                 profile.binding,
                 profile.mapping,
-                self.lan_timeout(),
             ))
             .await;
             match result {
@@ -485,18 +451,19 @@ impl Context {
                             error.failure,
                             Failure::Identity | Failure::Io | Failure::Timeout
                         )
-                        && let Some(address) =
-                            self.lan_discovery.address(did.parse().unwrap()).await
+                        && let Some(address) = self
+                            .network
+                            .discover_lan(&self.lan_discovery, did.parse().unwrap())
+                            .await
                         && address != candidate.address
                     {
                         let mut moved = candidate.clone();
                         moved.address = address;
                         match Box::pin(probe(
                             &moved,
-                            self.lan_endpoint(address),
+                            self.network.lan_target(address),
                             profile.binding,
                             profile.mapping,
-                            self.lan_timeout(),
                         ))
                         .await
                         {

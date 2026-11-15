@@ -5,7 +5,7 @@ use crate::{
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity},
         cloud::CloudClient,
-        test_support::{MockResponse, dynamic_mock_server, mock_server, sign_csr},
+        tests::support::{MockResponse, dynamic_mock_server, mock_server, sign_csr},
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};

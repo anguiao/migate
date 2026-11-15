@@ -6,8 +6,6 @@ use super::{
     work::DeviceWork,
 };
 use crate::xiaomi::capability::SourceDescription;
-#[cfg(test)]
-use crate::xiaomi::cloud::CloudClient;
 use crate::{
     configuration::{DerivedConfiguration, Scope},
     device::{DeviceRegistry, PhysicalDevice},
@@ -237,24 +235,13 @@ pub(super) struct Context {
     pub(super) relations: RefCell<super::relations::Relations>,
     pub(super) split_devices: RefCell<Vec<crate::configuration::SplitDevice>>,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,
-    #[cfg(test)]
-    pub(super) mqtt_retry_deadline: Cell<Option<Duration>>,
     pub(super) credentials_changed: Event,
-    #[cfg(test)]
-    pub(super) notification_connector: Cell<super::notifications::NotificationConnector>,
     pub(super) priority: Cell<super::routing::PathPriority>,
     pub(super) mijia: MijiaClient,
-    #[cfg(test)]
-    pub(super) cloud: CloudClient,
+    pub(super) network: Rc<dyn super::network::Network>,
     pub(super) lan_discovery: crate::xiaomi::lan::Discovery,
     pub(super) lan_scope_invalid: Cell<bool>,
     pub(super) lan_network_changed: Event,
-    #[cfg(test)]
-    pub(super) lan_port: Cell<u16>,
-    #[cfg(test)]
-    pub(super) lan_test_endpoints: RefCell<BTreeMap<std::net::Ipv4Addr, std::net::SocketAddr>>,
-    #[cfg(test)]
-    pub(super) lan_timeout: Cell<Duration>,
     pub(super) ha_sync: RefCell<HaSync>,
     pub(super) ha_changed: Event,
     pub(super) mijia_rejected: RefCell<Option<u64>>,
@@ -272,8 +259,6 @@ pub(super) struct Context {
     pub(super) store: Store,
     pub(super) tasks: TaskSet,
     pub(super) configuration_changed: Rc<Event>,
-    #[cfg(test)]
-    pub(super) snapshot_observer: RefCell<Option<Box<dyn FnMut()>>>,
     pub(super) changed: Event,
     pub(super) status: RefCell<AdapterStatus>,
     pub(super) cloud_problem: RefCell<Option<String>>,

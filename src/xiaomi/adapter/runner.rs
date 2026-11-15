@@ -9,18 +9,12 @@ use crate::{
 };
 use futures_lite::future;
 use std::rc::Rc;
-#[cfg(test)]
-use std::time::Duration;
 /// One shared home session and one persistent command consumer per function.
 pub struct XiaomiAdapter {
     pub(super) cloud: CloudClient,
     pub(super) auth: AuthService,
     pub(super) discovery: Discovery,
     pub(super) context: Rc<Context>,
-    #[cfg(test)]
-    pub(super) test_ca: Option<String>,
-    #[cfg(test)]
-    pub(super) request_timeout: Duration,
 }
 impl XiaomiAdapter {
     pub fn source_handle(&self) -> super::SourceHandle {
@@ -32,7 +26,16 @@ impl XiaomiAdapter {
         cloud: CloudClient,
         discovery: Discovery,
     ) -> Result<(Self, TopologyReady), AdapterError> {
-        Self::build(store, cloud, discovery, bootstrap::system_clock())
+        let auth = AuthService::new(store.xiaomi(), cloud.clone())
+            .map_err(crate::xiaomi::auth::AuthError::Cloud)?;
+        Self::with_services(
+            store,
+            cloud,
+            discovery,
+            bootstrap::system_clock(),
+            auth,
+            Rc::new(super::network::XiaomiNetwork),
+        )
     }
     pub async fn run(self, mut on_status: impl FnMut(AdapterStatus)) -> Result<(), AdapterError> {
         let mut reported = self.context.diagnostics();
@@ -69,12 +72,7 @@ impl XiaomiAdapter {
     }
     async fn run_inner(&self) -> Result<(), AdapterError> {
         future::or(
-            local::run(
-                self.context.clone(),
-                self.discovery.clone(),
-                #[cfg(test)]
-                (self.test_ca.clone(), self.request_timeout),
-            ),
+            local::run(self.context.clone(), self.discovery.clone()),
             future::or(
                 cloud::run(&self.cloud, &self.discovery, self.context.clone()),
                 future::or(

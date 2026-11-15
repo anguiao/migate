@@ -1,6 +1,6 @@
 use super::support::*;
 use super::*;
-use crate::xiaomi::test_support::{dynamic_mock_server, mock_server};
+use crate::xiaomi::tests::support::{dynamic_mock_server, mock_server};
 use futures_lite::future;
 use serde_json::{Value, json};
 use std::time::Duration;

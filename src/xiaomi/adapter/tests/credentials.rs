@@ -1034,17 +1034,7 @@ fn stopped_ha_stays_stopped_after_adapter_restart_while_mijia_and_hub_work() {
     let mut rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
     rig.store.xiaomi().stop_ha_refresh().unwrap();
-    let (mut restarted, ready) = XiaomiAdapter::build(
-        rig.store.clone(),
-        rig.source.cloud.clone(),
-        rig.discovery.clone(),
-        rig.clock.clone(),
-    )
-    .unwrap();
-    restarted.test_ca = rig.source.test_ca.clone();
-    restarted.request_timeout = rig.source.request_timeout;
-    rig.source = restarted;
-    rig.ready = ready;
+    (rig.source, rig.ready) = rig.reopen_adapter();
     block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;
