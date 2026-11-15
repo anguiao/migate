@@ -231,7 +231,6 @@ fn multi_key_panel_with_only_one_valid_relay_keeps_split_or_numbered_name() {
         multi
             .device()
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .filter(|issue| issue.target().starts_with("relay:"))

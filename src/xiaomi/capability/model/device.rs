@@ -70,7 +70,7 @@ pub struct ParsedDevice {
     refresh_trigger: Option<PropertyBinding>,
     battery: Option<BatteryBinding>,
     battery_issue: Option<String>,
-    recognition: Option<RecognitionMetadata>,
+    recognition: RecognitionMetadata,
 }
 impl PartialEq for ParsedDevice {
     fn eq(&self, other: &Self) -> bool {
@@ -99,23 +99,27 @@ impl ParsedDevice {
         refresh_trigger: Option<PropertyBinding>,
         battery: Option<BatteryBinding>,
     ) -> Result<Self, CapabilityError> {
-        Self::build(key, functions, refresh_trigger, battery, None)
+        Self::from_parts(
+            key,
+            functions,
+            refresh_trigger,
+            battery,
+            None,
+            RecognitionMetadata {
+                category: "test".into(),
+                core: Vec::new(),
+                patches: Vec::new(),
+                diagnostics: Vec::new(),
+            },
+        )
     }
-    pub(crate) fn new_with_battery_diagnostic(
+    pub(crate) fn from_parts(
         key: DeviceKey,
         functions: Vec<ParsedFunction>,
         refresh_trigger: Option<PropertyBinding>,
         battery: Option<BatteryBinding>,
         battery_issue: Option<String>,
-    ) -> Result<Self, CapabilityError> {
-        Self::build(key, functions, refresh_trigger, battery, battery_issue)
-    }
-    fn build(
-        key: DeviceKey,
-        functions: Vec<ParsedFunction>,
-        refresh_trigger: Option<PropertyBinding>,
-        battery: Option<BatteryBinding>,
-        battery_issue: Option<String>,
+        recognition: RecognitionMetadata,
     ) -> Result<Self, CapabilityError> {
         super::super::validate_source_identity(&key)?;
         if functions.is_empty() {
@@ -226,42 +230,35 @@ impl ParsedDevice {
                 return Err(CapabilityError::InvalidDescription("state topology"));
             }
         }
-        Ok(Self {
-            key,
-            functions,
-            refresh_trigger,
-            battery,
-            battery_issue,
-            recognition: None,
-        })
-    }
-    pub(crate) fn with_recognition(
-        mut self,
-        metadata: RecognitionMetadata,
-    ) -> Result<Self, CapabilityError> {
         let valid = |value: &str| !value.is_empty() && !value.chars().any(char::is_control);
-        if !valid(&metadata.category)
-            || metadata
+        if !valid(&recognition.category)
+            || recognition
                 .core
                 .iter()
-                .any(|id| !self.functions.iter().any(|f| f.id() == id))
-            || metadata.patches.iter().any(|patch| {
+                .any(|id| !functions.iter().any(|f| f.id() == id))
+            || recognition.patches.iter().any(|patch| {
                 !valid(&patch.id)
                     || !valid(&patch.stage)
-                    || !self.functions.iter().any(|f| f.id() == patch.target)
+                    || !functions.iter().any(|f| f.id() == patch.target)
             })
-            || metadata
+            || recognition
                 .diagnostics
                 .iter()
                 .any(|issue| !valid(&issue.target) || !valid(&issue.reason))
         {
             return Err(CapabilityError::InvalidDescription("recognition metadata"));
         }
-        self.recognition = Some(metadata);
-        Ok(self)
+        Ok(Self {
+            key,
+            functions,
+            refresh_trigger,
+            battery,
+            battery_issue,
+            recognition,
+        })
     }
-    pub fn recognition(&self) -> Option<&RecognitionMetadata> {
-        self.recognition.as_ref()
+    pub fn recognition(&self) -> &RecognitionMetadata {
+        &self.recognition
     }
     pub fn key(&self) -> &DeviceKey {
         &self.key

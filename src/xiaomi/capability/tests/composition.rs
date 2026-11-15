@@ -262,7 +262,7 @@ fn shared_control_binding_conflict_removes_both_claimants_only() {
             .collect::<Vec<_>>(),
         ["light:11"]
     );
-    let issues = parsed.recognition().unwrap().diagnostics();
+    let issues = parsed.recognition().diagnostics();
     for id in ["fan:2", "fan:10"] {
         assert!(
             issues.iter().any(|issue| issue.target() == id
@@ -271,7 +271,7 @@ fn shared_control_binding_conflict_removes_both_claimants_only() {
             "{issues:?}"
         );
     }
-    assert!(parsed.recognition().unwrap().patches().is_empty());
+    assert!(parsed.recognition().patches().is_empty());
 }
 
 #[test]
@@ -297,7 +297,7 @@ fn invalid_optional_swing_and_motion_report_specific_access_failures() {
             .iter()
             .any(|f| f.id() == "fan:3" && f.fan().unwrap().swing().is_none())
     );
-    let issues = parsed.recognition().unwrap().diagnostics();
+    let issues = parsed.recognition().diagnostics();
     for id in ["fan:3", "motion:9"] {
         assert!(
             issues
@@ -317,7 +317,6 @@ fn a_dmaker_identity_with_an_unrelated_generic_fan_does_not_claim_the_wind_patch
     let parsed = super::super::parse_device_for_model(key(), "dmaker.fan.other", &input).unwrap();
     let issue = parsed
         .recognition()
-        .unwrap()
         .diagnostics()
         .iter()
         .find(|issue| issue.target() == "fan:3")
@@ -360,7 +359,6 @@ fn cp7pd_refresh_patch_is_reported_only_when_master_binding_is_valid() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .patches()
             .iter()
             .any(|patch| patch.id() == "cuco.cp7pd.refresh")
@@ -370,7 +368,6 @@ fn cp7pd_refresh_patch_is_reported_only_when_master_binding_is_valid() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .patches()
             .iter()
             .any(|patch| patch.id() == "cuco.cp7pd.channels")
@@ -378,7 +375,6 @@ fn cp7pd_refresh_patch_is_reported_only_when_master_binding_is_valid() {
     assert!(
         !parsed
             .recognition()
-            .unwrap()
             .patches()
             .iter()
             .any(|patch| patch.id() == "cuco.cp7pd.refresh")
@@ -386,7 +382,6 @@ fn cp7pd_refresh_patch_is_reported_only_when_master_binding_is_valid() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|issue| issue.target() == "cp7pd master" && issue.reason().contains("write"))
@@ -409,7 +404,6 @@ fn invalid_alternative_speed_is_diagnosed_while_the_valid_input_is_used() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|issue| issue.target() == "fan:3"
@@ -431,7 +425,6 @@ fn incompatible_ls2307_patch_identity_does_not_block_the_standard_light() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|issue| issue.reason().contains("devcea.ls2307.rgb"))
@@ -464,7 +457,6 @@ fn cp7pd_patch_preserves_an_additional_standard_outlet_channel() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .patches()
             .iter()
             .all(|patch| patch.target() != "outlet:42")

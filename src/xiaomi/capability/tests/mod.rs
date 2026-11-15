@@ -153,7 +153,6 @@ fn assert_cp7pd_partial(description: &Value, failed_siid: u32, reason: &str) {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|issue| issue.reason().contains(reason))

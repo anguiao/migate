@@ -119,8 +119,7 @@ fn v13_round_trips_two_shared_fans_and_their_low_speed_operations() {
     assert_eq!(fans.len(), 2);
     assert!(
         fans.iter()
-            .all(|fan| fan["speed"]["shared"]["channel"].is_string()
-                && fan["speed"]["shared"].get("direct_command").is_none())
+            .all(|fan| fan["speed"]["shared"]["channel"].is_string())
     );
 
     let unchanged = next(
@@ -130,29 +129,6 @@ fn v13_round_trips_two_shared_fans_and_their_low_speed_operations() {
     );
     assert!(!unchanged.changed && !unchanged.rebuild);
     assert_eq!(unchanged.configuration.devices, restored.devices);
-}
-
-#[test]
-fn previous_v13_configuration_restores_the_same_identity_and_bindings() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(directory.path()).unwrap();
-    let planned = save_v13(&store);
-    let current: Value = serde_json::from_str(&raw(&store)).unwrap();
-    let mut previous = current.clone();
-    for (id, mode) in [("fan:3:2", "coolwind"), ("fan:3:4", "venting")] {
-        shared_binding(&mut previous, id)["direct_command"] = json!({
-            "method": "set_bh_mode",
-            "args": [{"type": "string", "value": mode}, {"type": "integer", "value": 1}]
-        });
-    }
-    corrupt(&store, &previous);
-    let restored = load(&store);
-    assert_eq!(restored, planned);
-    save(&store, &restored);
-    assert_eq!(
-        serde_json::from_str::<Value>(&raw(&store)).unwrap(),
-        current
-    );
 }
 
 #[test]

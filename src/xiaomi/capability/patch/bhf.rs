@@ -260,7 +260,7 @@ pub(super) fn validate_shared_applied(
 
 pub(in crate::xiaomi::capability) fn shared_feedback_target(device: &ParsedDevice) -> Option<&str> {
     let mut targets = device
-        .recognition()?
+        .recognition()
         .patches()
         .iter()
         .filter(|patch| patch.id() == SHARED_PATCH.id && patch.stage() == SHARED_PATCH.stage)
@@ -329,12 +329,11 @@ pub(super) fn validate_bindings(
 ) -> Result<(), &'static str> {
     let supported = model == MODEL && matches(model, urn);
     let metadata = device.recognition();
-    if device.recognition().is_some_and(|metadata| {
-        metadata
-            .patches()
-            .iter()
-            .any(|patch| patch.id() == SHARED_PATCH.id && patch.stage() == SHARED_PATCH.stage)
-    }) {
+    if metadata
+        .patches()
+        .iter()
+        .any(|patch| patch.id() == SHARED_PATCH.id && patch.stage() == SHARED_PATCH.stage)
+    {
         let target = shared_feedback_target(device)
             .ok_or("Xiaomi bhf shared feedback patch target is invalid")?;
         let function = device
@@ -384,13 +383,11 @@ pub(super) fn validate_bindings(
 }
 
 fn has_patch(
-    metadata: Option<&super::super::RecognitionMetadata>,
+    metadata: &super::super::RecognitionMetadata,
     patch: BuiltinPatch,
     target: &str,
 ) -> bool {
-    metadata.is_some_and(|metadata| {
-        metadata.patches().iter().any(|applied| {
-            applied.id() == patch.id && applied.stage() == patch.stage && applied.target() == target
-        })
+    metadata.patches().iter().any(|applied| {
+        applied.id() == patch.id && applied.stage() == patch.stage && applied.target() == target
     })
 }

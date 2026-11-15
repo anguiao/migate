@@ -314,7 +314,7 @@ fn compatible_new_model_and_urn_commit_complete_source_with_partial_support() {
         assert!(after.functions.iter().any(|function| function.id == "fan:80"));
         let native = after.native.as_ref().unwrap();
         assert_eq!(native.model(), "example.light.next");
-        assert!(native.device().recognition().unwrap().diagnostics().iter()
+        assert!(native.device().recognition().diagnostics().iter()
             .any(|issue| issue.target() == "light:81"));
         let raw = committed.descriptions.iter().find(|raw| raw.key == key).unwrap();
         assert_eq!(raw.instance, instance);

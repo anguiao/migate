@@ -49,30 +49,27 @@ pub(super) fn validate_native(
     }
     bhf::validate_bindings(device, model, urn)?;
     cp7pd::validate_trigger(device, model, urn)?;
-    if let Some(metadata) = device.recognition() {
-        for applied in metadata.patches() {
-            let function = device
-                .functions()
-                .iter()
-                .find(|function| function.id() == applied.target())
-                .unwrap();
-            let matches =
-                |rule: BuiltinPatch| rule.id == applied.id() && rule.stage == applied.stage();
-            if matches(bhf::SHARED_PATCH) {
-                bhf::validate_shared_applied(model, urn, function)?;
-            } else if matches(bhf::FAN_PATCH) || matches(bhf::MODE_PATCH) {
-                bhf::validate_applied(model, urn, function)?;
-            } else if matches(mcn04::PATCH) {
-                mcn04::validate_applied(model, urn, function)?;
-            } else if matches(ls2307::PATCH) {
-                ls2307::validate_applied(model, urn, function)?;
-            } else if matches(dmaker::PATCH) {
-                dmaker::validate_applied(model, urn, function)?;
-            } else if matches(cp7pd::CHANNELS) || matches(cp7pd::REFRESH) {
-                cp7pd::validate_applied(model, urn, function, device, matches(cp7pd::REFRESH))?;
-            } else {
-                return Err("Xiaomi applied patch is invalid");
-            }
+    for applied in device.recognition().patches() {
+        let function = device
+            .functions()
+            .iter()
+            .find(|function| function.id() == applied.target())
+            .unwrap();
+        let matches = |rule: BuiltinPatch| rule.id == applied.id() && rule.stage == applied.stage();
+        if matches(bhf::SHARED_PATCH) {
+            bhf::validate_shared_applied(model, urn, function)?;
+        } else if matches(bhf::FAN_PATCH) || matches(bhf::MODE_PATCH) {
+            bhf::validate_applied(model, urn, function)?;
+        } else if matches(mcn04::PATCH) {
+            mcn04::validate_applied(model, urn, function)?;
+        } else if matches(ls2307::PATCH) {
+            ls2307::validate_applied(model, urn, function)?;
+        } else if matches(dmaker::PATCH) {
+            dmaker::validate_applied(model, urn, function)?;
+        } else if matches(cp7pd::CHANNELS) || matches(cp7pd::REFRESH) {
+            cp7pd::validate_applied(model, urn, function, device, matches(cp7pd::REFRESH))?;
+        } else {
+            return Err("Xiaomi applied patch is invalid");
         }
     }
     mcn04::validate_bindings(device, model, urn)?;

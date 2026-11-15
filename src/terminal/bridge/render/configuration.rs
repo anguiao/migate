@@ -32,20 +32,9 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
         if let Some(native) = &record.native {
             let device = native.device();
             let recognition = device.recognition();
-            let category = recognition
-                .map(|metadata| metadata.category())
-                .unwrap_or_else(|| {
-                    native
-                        .instance_type()
-                        .split(':')
-                        .nth(3)
-                        .expect("a native instance has a validated URN")
-                });
-            lines.push(format!("  Category: {category}."));
+            lines.push(format!("  Category: {}.", recognition.category()));
             for function in device.functions() {
-                let role = if recognition
-                    .is_some_and(|metadata| metadata.core().iter().any(|id| id == function.id()))
-                {
+                let role = if recognition.core().iter().any(|id| id == function.id()) {
                     "core"
                 } else {
                     "additional"
@@ -85,22 +74,20 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
                     binding.siid, binding.piid
                 ));
             }
-            if let Some(metadata) = recognition {
-                for patch in metadata.patches() {
-                    lines.push(format!(
-                        "  Patch {}: {} ({}).",
-                        patch.id(),
-                        patch.target(),
-                        patch.stage()
-                    ));
-                }
-                for issue in metadata.diagnostics() {
-                    lines.push(format!(
-                        "  Recognition issue {}: {}.",
-                        issue.target(),
-                        issue.reason()
-                    ));
-                }
+            for patch in recognition.patches() {
+                lines.push(format!(
+                    "  Patch {}: {} ({}).",
+                    patch.id(),
+                    patch.target(),
+                    patch.stage()
+                ));
+            }
+            for issue in recognition.diagnostics() {
+                lines.push(format!(
+                    "  Recognition issue {}: {}.",
+                    issue.target(),
+                    issue.reason()
+                ));
             }
             if let Some(profile) = native.legacy_profile() {
                 let patch = profile.patch();

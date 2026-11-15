@@ -177,7 +177,7 @@ fn invalid_heating_or_target_temperature_descriptions_are_not_admitted() {
                 .all(|function| function.id() != HEATER),
             "{name}"
         );
-        let diagnostics = parsed.recognition().unwrap().diagnostics();
+        let diagnostics = parsed.recognition().diagnostics();
         assert!(
             diagnostics
                 .iter()

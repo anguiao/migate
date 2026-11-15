@@ -198,7 +198,6 @@ fn ls2307_identity_does_not_discard_an_independent_outlet() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|issue| issue.reason().contains("devcea.ls2307.rgb"))
@@ -249,7 +248,7 @@ fn unrepresentable_mired_ranges_are_rejected_at_construction_and_cache_restore()
                 .temperature()
                 .is_none()
         );
-        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
+        assert!(!parsed.recognition().diagnostics().is_empty());
         let mut encoded = valid.clone();
         let temperature =
             &mut encoded["devices"][0]["native"]["functions"][0]["lighting"]["temperature"];

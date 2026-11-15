@@ -171,6 +171,18 @@ fn cp7pd_channel_validity_does_not_depend_on_diagnostic_text() {
     planned(&store, vec![original.clone()]);
     let saved = stored(&store);
 
+    let with_metadata = |metadata| {
+        let device = original.device();
+        crate::xiaomi::capability::ParsedDevice::from_parts(
+            device.key().clone(),
+            device.functions().to_vec(),
+            device.refresh_trigger(),
+            device.battery().cloned(),
+            device.battery_issue().map(str::to_owned),
+            metadata,
+        )
+        .unwrap()
+    };
     for diagnostics in [
         vec![],
         vec![RecognitionDiagnostic {
@@ -178,7 +190,7 @@ fn cp7pd_channel_validity_does_not_depend_on_diagnostic_text() {
             reason: "changed explanation".into(),
         }],
     ] {
-        let mut metadata = original.device().recognition().unwrap().clone();
+        let mut metadata = original.device().recognition().clone();
         metadata.diagnostics = diagnostics.clone();
         let mut encoded = saved.clone();
         encoded["devices"][0]["native"]["recognition"]["diagnostics"] =
@@ -197,11 +209,7 @@ fn cp7pd_channel_validity_does_not_depend_on_diagnostic_text() {
                 .functions(),
             original.device().functions()
         );
-        let device = original
-            .device()
-            .clone()
-            .with_recognition(metadata)
-            .unwrap();
+        let device = with_metadata(metadata);
         assert!(
             NativeDescription::new(
                 original.model().into(),
@@ -212,18 +220,14 @@ fn cp7pd_channel_validity_does_not_depend_on_diagnostic_text() {
         );
     }
 
-    let mut metadata = original.device().recognition().unwrap().clone();
+    let mut metadata = original.device().recognition().clone();
     metadata.diagnostics.clear();
     metadata.patches.push(AppliedPatch {
         id: "cuco.cp7pd.refresh".into(),
         target: "outlet:3".into(),
         stage: "feedback".into(),
     });
-    let device = original
-        .device()
-        .clone()
-        .with_recognition(metadata)
-        .unwrap();
+    let device = with_metadata(metadata);
     assert!(
         NativeDescription::new(
             original.model().into(),
@@ -251,12 +255,14 @@ fn missing_required_fields_are_rejected() {
     let valid = stored(&store);
     for pointer in [
         "/scope",
+        "/descriptions/0/name",
         "/root_version",
         "/devices",
         "/groups",
         "/split_devices",
         "/devices/0/native",
         "/devices/0/functions",
+        "/devices/0/native/recognition",
         "/devices/0/unique_id",
     ] {
         let mut changed = valid.clone();

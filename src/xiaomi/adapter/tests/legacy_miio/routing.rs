@@ -158,7 +158,6 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
             .unwrap()
             .device()
             .recognition()
-            .unwrap()
             .core()
             .is_empty()
     );
@@ -171,7 +170,6 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
             .unwrap()
             .device()
             .recognition()
-            .unwrap()
             .core(),
         ["air-conditioner:2"]
     );

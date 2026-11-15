@@ -95,7 +95,6 @@ fn relay_requires_a_readable_unambiguous_wired_wireless_mode() {
         assert!(
             parsed
                 .recognition()
-                .unwrap()
                 .diagnostics()
                 .iter()
                 .any(|d| d.target() == "relay:3")
@@ -134,7 +133,6 @@ fn malformed_relay_does_not_remove_other_services() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|d| d.target() == "relay:3")

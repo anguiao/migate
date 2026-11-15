@@ -559,12 +559,13 @@ fn specific_battery_parse_diagnostics_survive_save_and_load() {
     let diagnostic_only = crate::xiaomi::capability::NativeDescription::new(
         native.model().into(),
         native.instance_type().into(),
-        crate::xiaomi::capability::ParsedDevice::new_with_battery_diagnostic(
+        crate::xiaomi::capability::ParsedDevice::from_parts(
             native.device().key().clone(),
             native.device().functions().to_vec(),
             None,
             None,
             Some("battery capability not declared".into()),
+            native.device().recognition().clone(),
         )
         .unwrap(),
     )

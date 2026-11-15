@@ -307,7 +307,6 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
                         .unwrap()
                         .device()
                         .recognition()
-                        .unwrap()
                         .core()
                         .is_empty()
                 );
@@ -339,7 +338,6 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
                         .unwrap()
                         .device()
                         .recognition()
-                        .unwrap()
                         .category()
                         == "light"
                 })
@@ -354,13 +352,7 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
                     before.configuration.root_version
                 );
                 assert_eq!(
-                    new.native
-                        .as_ref()
-                        .unwrap()
-                        .device()
-                        .recognition()
-                        .unwrap()
-                        .core(),
+                    new.native.as_ref().unwrap().device().recognition().core(),
                     ["light:2", "light:4"]
                 );
                 assert_eq!(

@@ -131,7 +131,7 @@ fn parser_and_cached_bindings_reject_unrepresentable_mired_ranges() {
                 .is_none(),
             "{min}..{max}"
         );
-        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
+        assert!(!parsed.recognition().diagnostics().is_empty());
         assert!(
             TemperatureBinding::new(
                 temperature.property(),
@@ -204,7 +204,6 @@ fn ls2307_combines_exact_rgb_and_mode_binding_without_scene_inference() {
         assert!(
             parsed
                 .recognition()
-                .unwrap()
                 .diagnostics()
                 .iter()
                 .any(|issue| issue.reason().contains("devcea.ls2307.rgb")),
@@ -228,7 +227,6 @@ fn ls2307_without_mode_feedback_keeps_dimming_but_does_not_infer_white_mode() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .diagnostics()
             .iter()
             .any(|issue| issue.target() == "light:2" && issue.reason().contains("mode"))
@@ -275,7 +273,7 @@ fn incomplete_invalid_or_ambiguous_light_descriptions_are_rejected() {
             FunctionKind::Light(LightProfile::OnOff),
             "{field}"
         );
-        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
+        assert!(!parsed.recognition().diagnostics().is_empty());
     }
     let mut optional = original.clone();
     optional["services"][1]["properties"]
@@ -436,7 +434,7 @@ fn unsupported_light_profiles_are_rejected_with_a_clear_reason() {
             assert!(result.unwrap_err().to_string().contains(reason));
         } else {
             let parsed = result.unwrap();
-            assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
+            assert!(!parsed.recognition().diagnostics().is_empty());
             assert_eq!(
                 parsed.functions()[0].kind(),
                 FunctionKind::Light(if brightness {
@@ -478,7 +476,7 @@ fn present_invalid_optional_properties_are_rejected_and_scene_modes_are_ignored(
             "{kind} {field}"
         );
         assert!(parsed.functions()[0].lighting().unwrap().color().is_none());
-        assert!(!parsed.recognition().unwrap().diagnostics().is_empty());
+        assert!(!parsed.recognition().diagnostics().is_empty());
     }
     let mut mode_only = profile_description(true, true, true, false);
     mode_only["services"][1]["properties"]

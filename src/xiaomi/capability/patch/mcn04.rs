@@ -103,12 +103,10 @@ pub(super) fn validate_bindings(
             .is_some_and(|ac| ac.mcn04().is_some())
         {
             validate_applied(model, urn, function)?;
-            if !device.recognition().is_some_and(|metadata| {
-                metadata.patches().iter().any(|patch| {
-                    patch.id() == PATCH.id
-                        && patch.stage() == PATCH.stage
-                        && patch.target() == function.id()
-                })
+            if !device.recognition().patches().iter().any(|patch| {
+                patch.id() == PATCH.id
+                    && patch.stage() == PATCH.stage
+                    && patch.target() == function.id()
             }) {
                 return Err("Xiaomi mcn04 patch metadata is missing");
             }

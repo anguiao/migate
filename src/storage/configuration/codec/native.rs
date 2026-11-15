@@ -29,8 +29,7 @@ pub(super) struct WireNative {
     battery: Option<WireMeasurement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     battery_issue: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    recognition: Option<RecognitionMetadata>,
+    recognition: RecognitionMetadata,
     functions: Vec<WireFunction>,
 }
 
@@ -189,9 +188,6 @@ struct WireSharedFanSpeed {
     channel: SharedFanChannel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cloud_action: Option<ActionBinding>,
-    // Older configurations copied the built-in command here. The channel owns the mapping.
-    #[serde(rename = "direct_command", default, skip_serializing)]
-    _old_direct_command: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -390,7 +386,7 @@ impl WireNative {
             refresh_trigger: native.device().refresh_trigger().map(WireBinding::from),
             battery: native.device().battery().map(WireMeasurement::from_battery),
             battery_issue: native.device().battery_issue().map(str::to_owned),
-            recognition: native.device().recognition().cloned(),
+            recognition: native.device().recognition().clone(),
             functions: native
                 .device()
                 .functions()
@@ -414,19 +410,15 @@ impl WireNative {
             .into_iter()
             .map(|function| function.into_parsed(source))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut device = ParsedDevice::new_with_battery_diagnostic(
+        let device = ParsedDevice::from_parts(
             source.key.clone(),
             functions,
             refresh_trigger,
             battery,
             self.battery_issue,
+            self.recognition,
         )
         .map_err(|_| "Stored native description is invalid")?;
-        if let Some(recognition) = self.recognition {
-            device = device
-                .with_recognition(recognition)
-                .map_err(|_| "Stored native description is invalid")?;
-        }
         NativeDescription::new(self.model, self.instance_type, device)
             .map_err(|_| "Stored native description is invalid")
     }

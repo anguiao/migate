@@ -200,14 +200,14 @@ pub fn parse_device_for_model(
         patches,
         diagnostics,
     };
-    ParsedDevice::new_with_battery_diagnostic(
+    ParsedDevice::from_parts(
         key,
         functions,
         refresh_trigger,
         battery,
         battery_issue,
-    )?
-    .with_recognition(metadata)
+        metadata,
+    )
 }
 
 fn validate_source_identity(key: &crate::device::DeviceKey) -> Result<(), CapabilityError> {

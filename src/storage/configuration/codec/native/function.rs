@@ -83,7 +83,6 @@ impl WireFunction {
                         shared: WireSharedFanSpeed {
                             channel: speed.channel,
                             cloud_action: speed.cloud_action,
-                            _old_direct_command: None,
                         },
                     })
                 },
@@ -311,7 +310,7 @@ impl WireFunction {
                 .map_err(|_| "Stored heater binding is invalid")?;
                 let mut bindings = HeaterBindings::new(power.into(), temperature)
                     .map_err(|_| "Stored heater binding is invalid")?;
-                // The original instance already stores the enum tables, including in older records.
+                // The original MIoT instance supplies the feedback enum tables.
                 let feedback = |binding: WireBinding| {
                     source
                         .heater_feedback(binding.into())

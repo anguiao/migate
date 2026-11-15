@@ -48,23 +48,6 @@ fn persists_the_complete_original_miot_description() {
 }
 
 #[test]
-fn loading_a_cache_without_source_names_preserves_saved_device_names() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    seed(&store, vec![fixture("did", "cuco.plug.v3", OUTLET)]);
-    let previous = load(&store);
-    let mut stored: Value = serde_json::from_str(&raw(&store)).unwrap();
-    stored["descriptions"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("name");
-    corrupt(&store, &stored);
-    let restored = load(&store);
-    assert_eq!(restored.devices, previous.devices);
-    assert_eq!(restored.descriptions[0].name, None);
-}
-
-#[test]
 fn rejects_missing_or_mismatched_raw_source_without_modifying_storage() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();

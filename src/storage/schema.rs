@@ -1,8 +1,4 @@
-//! Current database schema creation and validation.
-//!
-//! Only the schema version 13 format is created, read and restored. Older or
-//! unknown formats are rejected without modifying the database file; the
-//! previous schema is deliberately not migrated.
+//! Creation and validation of the current database schema.
 
 use rusqlite::Connection;
 
@@ -17,9 +13,7 @@ pub(super) fn validate(connection: &Connection) -> Result<(), &'static str> {
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(|_| "Database version cannot be read")?;
     if version != CURRENT_VERSION {
-        return Err(
-            "Database version is not supported; use a compatible version or upgrade the existing data directory",
-        );
+        return Err("Database version is not supported. Choose a new data directory.");
     }
     Ok(())
 }

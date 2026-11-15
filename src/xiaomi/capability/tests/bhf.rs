@@ -106,7 +106,7 @@ fn an_invalid_cloud_low_action_only_disables_that_path() {
         .unwrap();
     assert!(blow.cloud_action.is_none());
     assert_eq!(blow.channel, SharedFanChannel::Blow);
-    let diagnostics = parsed.recognition().unwrap().diagnostics();
+    let diagnostics = parsed.recognition().diagnostics();
     assert!(
         diagnostics.iter().any(|issue| {
             issue.target() == "fan:3:2" && issue.reason().contains("low-speed action")

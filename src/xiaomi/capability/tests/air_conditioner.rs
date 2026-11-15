@@ -397,7 +397,6 @@ fn mcn04_requires_its_real_private_feedback_and_records_patch() {
     assert!(
         parsed
             .recognition()
-            .unwrap()
             .patches()
             .iter()
             .any(|patch| patch.id() == "lumi.mcn04.air-conditioner"

@@ -202,18 +202,4 @@ fn mcn02_profile_is_reconstructed_from_an_existing_configuration_without_persist
         store.matter().get(PERSISTENT_SUBSCRIPTIONS_START).unwrap(),
         Some(b"subscription".to_vec())
     );
-
-    legacy["devices"][0]["native"]
-        .as_object_mut()
-        .unwrap()
-        .remove("recognition");
-    corrupt(&store, &legacy);
-    assert!(
-        load(&store).devices[0]
-            .native
-            .as_ref()
-            .unwrap()
-            .legacy_profile()
-            .is_some()
-    );
 }

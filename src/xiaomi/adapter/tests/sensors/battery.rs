@@ -91,12 +91,13 @@ fn changed_battery_diagnostic_reuses_runtime_and_is_visible_immediately() {
                 .battery_problem
                 .clone();
             let old = before.native.clone();
-            let changed = crate::xiaomi::capability::ParsedDevice::new_with_battery_diagnostic(
+            let changed = crate::xiaomi::capability::ParsedDevice::from_parts(
                 old.device().key().clone(),
                 old.device().functions().to_vec(),
                 old.device().refresh_trigger(),
                 old.device().battery().cloned(),
                 Some("updated battery diagnostic".into()),
+                old.device().recognition().clone(),
             )
             .unwrap();
             let native = crate::xiaomi::capability::NativeDescription::new(

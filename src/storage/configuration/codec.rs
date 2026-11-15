@@ -77,7 +77,7 @@ struct WireDescription {
     source: String,
     device_id: String,
     model: String,
-    #[serde(default)]
+    #[serde(deserialize_with = "Option::deserialize")]
     name: Option<String>,
     instance_type: String,
     instance: serde_json::Value,

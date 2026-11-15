@@ -24,18 +24,12 @@ fn mcn02_profile_is_derived_from_the_native_description_and_reported_as_core() {
     assert_eq!(profile.patch().id(), "lumi.mcn02.legacy-miio");
     assert_eq!(profile.patch().target(), "air-conditioner:2");
     assert_eq!(profile.patch().stage(), "direct transport");
-    assert_eq!(
-        source.device().recognition().unwrap().core(),
-        ["air-conditioner:2"]
-    );
-    assert!(source.device().recognition().unwrap().patches().is_empty());
+    assert_eq!(source.device().recognition().core(), ["air-conditioner:2"]);
+    assert!(source.device().recognition().patches().is_empty());
 
     let generic = SourceFixture::new("one", "other.air-conditioner", instance);
     assert!(generic.legacy_profile().is_none());
-    assert_eq!(
-        generic.device().recognition().unwrap().core(),
-        ["air-conditioner:2"]
-    );
+    assert_eq!(generic.device().recognition().core(), ["air-conditioner:2"]);
 }
 
 #[test]

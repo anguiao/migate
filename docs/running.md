@@ -248,6 +248,7 @@ unbind-sensor 234567890 air-conditioner:3
 | 日志提示忽略了无法加载的 Matter 数据 | 保留数据目录，等待 Home 恢复订阅；若重新出现配对窗口，按下节使用原目录重新配对。恢复范围见[已知限制](known-limitations.md#home-显示与恢复)。 |
 | 提示需要重新登录 | 停止网桥，使用原数据目录执行 `auth check` 查看受影响的凭据，再用同一目录执行 `auth login` 并重启。遇到额外安全验证时先按「米家账号」处理。 |
 | 提示 `Stored Xiaomi credentials are invalid` | 停止网桥，在原数据目录执行 `auth logout` 后重新 `auth login`；Matter 身份与 Home 配对会保留，直连凭据需重新获取。 |
+| 提示 `Database version is not supported` | 保留原目录，用 `--data-dir` 指向新的空目录。按下方「数据目录与重新配对」重新登录并配对。 |
 | 提示数据目录正在使用 | 停止使用该目录的另一个 MiGate 进程，再重试；不要删除锁文件。 |
 | Apple Home 无法发现网桥 | 确认配对窗口仍有效、Mac 未休眠，且网络允许 mDNS 和 Matter UDP 通信。 |
 
