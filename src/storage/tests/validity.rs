@@ -71,32 +71,6 @@ fn outlet_and_light(store: &Store) {
 }
 
 #[test]
-fn stored_cp7pd_rejects_an_incorrect_channel_property_with_valid_function_ids() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let planned = planned(
-        &store,
-        vec![native(
-            "multi",
-            "cuco.plug.cp7pd",
-            serde_json::from_str(MULTI).unwrap(),
-        )],
-    );
-    assert_eq!(store.devices().load_configuration().unwrap(), planned);
-    let mut changed = stored(&store);
-    let channel = changed["devices"][0]["native"]["functions"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|function| function["id"] == "outlet:3")
-        .unwrap();
-    assert_eq!(channel["power"], json!({"siid":3,"piid":1}));
-    channel["power"]["piid"] = json!(2);
-    overwrite(&store, &changed);
-    assert!(store.devices().load_configuration().is_err());
-}
-
-#[test]
 fn stored_core_function_must_belong_to_its_own_device() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
@@ -132,6 +106,10 @@ fn stored_cp7pd_needs_its_exact_type_trigger_and_channel_bindings() {
     );
     let valid = stored(&store);
     assert!(store.devices().load_configuration().is_ok());
+    assert_eq!(
+        valid["devices"][0]["native"]["functions"][0]["id"],
+        "outlet:3"
+    );
     for (pointer, value) in [
         ("/devices/0/native/model", json!("vendor.plug")),
         (
@@ -140,6 +118,7 @@ fn stored_cp7pd_needs_its_exact_type_trigger_and_channel_bindings() {
         ),
         ("/devices/0/native/refresh_trigger", Value::Null),
         ("/devices/0/native/functions/0/power/siid", json!(7)),
+        ("/devices/0/native/functions/0/power/piid", json!(2)),
     ] {
         let mut changed = valid.clone();
         *changed.pointer_mut(pointer).unwrap() = value;

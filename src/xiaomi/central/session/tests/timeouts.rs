@@ -1,17 +1,18 @@
 use super::*;
 
 #[test]
-fn default_request_timeout_is_ten_seconds() {
-    assert_eq!(Timing::default().request, Duration::from_secs(10));
-}
-
-#[test]
 fn refresh_read_timeout_does_not_shorten_other_requests() {
-    for request_timeout in [Duration::from_secs(10), Duration::from_millis(25)] {
-        let handle = queued_handle(Timing {
-            request: request_timeout,
-            keepalive: None,
-        });
+    for (timing, request_timeout) in [
+        (Timing::default(), Duration::from_secs(10)),
+        (
+            Timing {
+                request: Duration::from_millis(25),
+                keepalive: None,
+            },
+            Duration::from_millis(25),
+        ),
+    ] {
+        let handle = queued_handle(timing);
         let binding = PropertyBinding { siid: 2, piid: 1 };
         let before = Instant::now();
         drop(handle.read_property_value_with_timeout(

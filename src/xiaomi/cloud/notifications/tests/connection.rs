@@ -1,23 +1,6 @@
 use super::*;
 
 #[test]
-fn notification_handle_connection_identity_is_shared_only_by_clones() {
-    let make = || {
-        NotificationDriver::new(
-            Box::new(futures_lite::io::Cursor::new(Vec::new())),
-            mqtt::Frames::default(),
-            "account".into(),
-            timing(),
-            mqtt::MAX_FRAME_SIZE,
-        )
-    };
-    let (one, _driver) = make();
-    let (two, _other_driver) = make();
-    assert!(one.same_connection(&one.clone()));
-    assert!(!one.same_connection(&two));
-}
-
-#[test]
 fn notification_connect_suback_and_messages_follow_wire_order() {
     let events = Rc::new(RefCell::new(Vec::new()));
     let collected = events.clone();
@@ -58,7 +41,13 @@ fn notification_connect_suback_and_messages_follow_wire_order() {
         move |handle, driver| async move {
             let stop = handle.clone();
             let work = async {
-                handle.subscribe_property("target", POWER).await.unwrap();
+                let timeout = Duration::from_secs(10);
+                let before = std::time::Instant::now();
+                let subscription = handle.subscribe_property("target", POWER);
+                let deadline = handle.shared.queue.borrow().back().unwrap().deadline;
+                assert!(deadline >= before + timeout);
+                assert!(deadline <= std::time::Instant::now() + timeout);
+                subscription.await.unwrap();
                 handle.subscribe_online("target").await.unwrap();
             };
             let drive = driver.run(move |event| {
@@ -87,12 +76,6 @@ fn notification_connect_suback_and_messages_follow_wire_order() {
             }
         ]
     );
-}
-
-#[test]
-fn default_notification_timing_matches_protocol_bounds() {
-    assert_eq!(Timing::default().request, Duration::from_secs(10));
-    assert_eq!(Timing::default().keepalive, Some(Duration::from_secs(60)));
 }
 
 #[test]

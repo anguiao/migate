@@ -734,10 +734,10 @@ fn sts_error_cannot_be_overridden_by_a_service_cookie() {
         (500, "{}", AccountErrorKind::Network),
         (
             200,
-            r#"{"notificationUrl":"https://account.xiaomi.com/pass/notification?secret=1"}"#,
+            "&&&START&&& \n{\"notificationUrl\":\"https://account.xiaomi.com/pass/notification?secret=1\"}",
             AccountErrorKind::VerificationRequired,
         ),
-        (200, r#"{"code":70016}"#, AccountErrorKind::Rejected),
+        (200, " \n{\"code\":70016}", AccountErrorKind::Rejected),
     ] {
         let login = json!({"code":0,"userId":UID,"ssecurity":SECURITY,"location":"https://sts.api.io.mi.com/sts"}).to_string();
         let (base, requests) = mock_server(vec![
@@ -811,36 +811,6 @@ fn verification_redirects_are_typed_at_each_account_stage_without_following() {
         (AccountStage::Sts, AccountErrorKind::VerificationRequired)
     );
     assert_eq!(requests.try_iter().count(), 3);
-}
-
-#[test]
-fn sts_errors_with_leading_json_whitespace_cannot_be_overridden_by_a_service_cookie() {
-    let mut outcomes = Vec::new();
-    for body in [
-        " \n{\"code\":70016}",
-        "&&&START&&& \n{\"notificationUrl\":\"https://account.xiaomi.com/pass/notification?ticket=secret\"}",
-    ] {
-        let login = json!({"code":0,"userId":UID,"ssecurity":SECURITY,"location":"https://sts.api.io.mi.com/sts"}).to_string();
-        let (base, requests) = mock_server(vec![
-            MockResponse::json(200, &login),
-            response(
-                200,
-                "Set-Cookie: serviceToken=service-secret; Path=/\r\n",
-                body,
-            ),
-        ]);
-        let client = AccountClient::for_test(&base, Duration::from_secs(1));
-        let outcome = block_on(client.restore(&credentials()));
-        outcomes.push(outcome.err().map(|error| (error.stage(), error.kind())));
-        assert_eq!(requests.try_iter().count(), 2);
-    }
-    assert_eq!(
-        outcomes,
-        [
-            Some((AccountStage::Sts, AccountErrorKind::Rejected)),
-            Some((AccountStage::Sts, AccountErrorKind::VerificationRequired)),
-        ]
-    );
 }
 
 #[test]

@@ -71,67 +71,61 @@ fn recognition_metadata_survives_storage_and_metadata_only_changes_reuse_runtime
 }
 
 #[test]
-fn single_measurements_and_mixed_controls_round_trip_with_current_parent_layout() {
-    for wanted in ["temperature:3:1001", "humidity:3:1008", "mixed"] {
-        let directory = tempfile::tempdir().unwrap();
-        let store = crate::storage::Store::open(directory.path()).unwrap();
-        let original = sensor("sensor");
-        let mut instance = original.raw.instance;
-        if wanted == "mixed" {
-            instance["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:sample:1");
-            instance["services"][1]["iid"] = json!(40);
-            let outlet: Value = serde_json::from_str(OUTLET).unwrap();
-            instance["services"]
-                .as_array_mut()
-                .unwrap()
-                .push(outlet["services"][1].clone());
-        } else {
-            let piid = if wanted.starts_with("temperature") {
-                1001
-            } else {
-                1008
-            };
-            instance["services"][2]["properties"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|property| property["iid"] == piid);
-        }
-        let native = SourceFixture::new("sensor", "sample", instance);
-        let planned = next(
-            &CommittedConfiguration::empty(),
-            scope("account", "home"),
-            vec![native],
-        )
-        .configuration;
-        save(&store, &planned);
-        let restored = load(&store);
-        assert_eq!(planned, restored);
-        assert!(
-            restored.devices[0]
-                .functions
-                .iter()
-                .all(|function| function.endpoint != restored.devices[0].endpoint)
-        );
-        assert!(
-            restored.devices[0]
-                .native
-                .as_ref()
-                .unwrap()
-                .device()
-                .battery()
-                .is_some()
-        );
-        let unchanged = next(
+fn mixed_controls_measurements_and_battery_round_trip_without_replanning() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(directory.path()).unwrap();
+    let original = sensor("sensor");
+    let mut instance = original.raw.instance;
+    instance["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:sample:1");
+    instance["services"][1]["iid"] = json!(40);
+    let outlet: Value = serde_json::from_str(OUTLET).unwrap();
+    instance["services"]
+        .as_array_mut()
+        .unwrap()
+        .push(outlet["services"][1].clone());
+    let native = SourceFixture::new("sensor", "sample", instance);
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        vec![native],
+    )
+    .configuration;
+    save(&store, &planned);
+    let restored = load(&store);
+    assert_eq!(planned, restored);
+    assert_eq!(
+        restored.devices[0]
+            .functions
+            .iter()
+            .map(|function| function.id.as_str())
+            .collect::<Vec<_>>(),
+        ["outlet:2", "temperature:3:1001", "humidity:3:1008"]
+    );
+    assert!(
+        restored.devices[0]
+            .functions
+            .iter()
+            .all(|function| function.endpoint != restored.devices[0].endpoint)
+    );
+    assert!(
+        restored.devices[0]
+            .native
+            .as_ref()
+            .unwrap()
+            .device()
+            .battery()
+            .is_some()
+    );
+    let unchanged = next(
+        &restored,
+        scope("account", "home"),
+        vec![SourceFixture::committed(
             &restored,
-            scope("account", "home"),
-            vec![SourceFixture::committed(
-                &restored,
-                &restored.devices[0].key.id,
-            )],
-        );
-        assert!(!unchanged.changed);
-        assert!(!unchanged.rebuild);
-    }
+            &restored.devices[0].key.id,
+        )],
+    );
+    assert!(!unchanged.changed);
+    assert!(!unchanged.rebuild);
 }
 
 #[test]

@@ -272,16 +272,6 @@ fn timestamp_only_battery_updates_keep_the_value_without_creating_measurements()
 }
 
 #[test]
-fn multiple_physical_devices_keep_isolated_battery_state() {
-    let first = battery_sensor();
-    let second = battery_sensor();
-    first.observe_battery(10.0, Some(1), 2).unwrap();
-    second.observe_battery(90.0, Some(3), 4).unwrap();
-    assert_eq!(first.battery_snapshot().unwrap().value, Some(10.0));
-    assert_eq!(second.battery_snapshot().unwrap().value, Some(90.0));
-}
-
-#[test]
 fn co2_is_a_read_only_measurement_with_its_own_state_and_timestamps() {
     let mut functions = sensor_description().functions().to_vec();
     functions.push(FunctionDescription {

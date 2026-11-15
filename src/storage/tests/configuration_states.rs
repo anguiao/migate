@@ -5,65 +5,65 @@ use crate::xiaomi::capability::tests::source::SourceFixture;
 use serde_json::json;
 
 #[test]
-fn state_bindings_and_endpoint_identities_round_trip_for_each_model() {
-    for (model, text) in [
+fn restoring_state_devices_preserves_their_bindings_and_child_endpoints() {
+    let samples = [
         (
             "isa.magnet.dw2hl",
             include_str!("../../../tests/fixtures/miot/isa-dw2hl.json"),
+            "contact:2:2",
         ),
         (
             "linp.magnet.m1",
             include_str!("../../../tests/fixtures/miot/linp-m1.json"),
+            "contact:2:1004",
         ),
         (
             "xiaomi.motion.pir1",
             include_str!("../../../tests/fixtures/miot/xiaomi-pir1.json"),
+            "motion:2:1024",
         ),
         (
             "linp.sensor_occupy.hb01",
             include_str!("../../../tests/fixtures/miot/linp-hb01.json"),
+            "occupancy:2:1",
         ),
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let store = crate::storage::Store::open(directory.path()).unwrap();
-        let native = fixture("state", model, text);
-        let planned = next(
-            &CommittedConfiguration::empty(),
-            scope("account", "home"),
-            vec![native],
-        )
-        .configuration;
-        save(&store, &planned);
-        drop(store);
-        let reopened = crate::storage::Store::open(directory.path()).unwrap();
-        let restored = load(&reopened);
-        assert_eq!(restored, planned);
-        let entry = &restored.devices[0];
-        assert!(
-            entry
-                .native
-                .as_ref()
-                .unwrap()
-                .device()
-                .functions()
-                .iter()
-                .any(|function| function.kind().is_state_sensor()),
-            "{model}"
-        );
-        assert!(
-            entry
-                .functions
-                .iter()
-                .all(|function| function.endpoint != entry.endpoint)
-        );
-        let unchanged = next(
-            &restored,
-            scope("account", "home"),
-            vec![SourceFixture::committed(&restored, &entry.key.id)],
-        );
-        assert!(!unchanged.changed);
-        assert!(!unchanged.rebuild);
+    ];
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::storage::Store::open(directory.path()).unwrap();
+    let devices = samples
+        .iter()
+        .map(|(model, text, _)| fixture(model, model, text))
+        .collect();
+    let planned = next(
+        &CommittedConfiguration::empty(),
+        scope("account", "home"),
+        devices,
+    )
+    .configuration;
+    save(&store, &planned);
+    drop(store);
+
+    let reopened = crate::storage::Store::open(directory.path()).unwrap();
+    let restored = load(&reopened);
+    assert_eq!(restored, planned);
+    for (model, _, expected) in samples {
+        let key = crate::device::DeviceKey::new("xiaomi", model);
+        let entry = restored.device(&key).unwrap();
+        let function = entry
+            .functions
+            .iter()
+            .find(|function| function.id == expected)
+            .unwrap();
+        assert_ne!(function.endpoint, entry.endpoint, "{model}");
     }
+    let sources = restored
+        .devices
+        .iter()
+        .map(|entry| SourceFixture::committed(&restored, &entry.key.id))
+        .collect();
+    let unchanged = next(&restored, scope("account", "home"), sources);
+    assert!(!unchanged.changed);
+    assert!(!unchanged.rebuild);
 }
 
 #[test]

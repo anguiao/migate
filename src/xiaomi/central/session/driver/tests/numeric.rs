@@ -214,27 +214,6 @@ fn numeric_notifications_reuse_received_property_generation() {
 }
 
 #[test]
-fn unrelated_batch_results_do_not_claim_business_result_progress() {
-    block_on(async {
-        let (handle, mut driver, budget, _) = rig();
-        let write = handle.set_properties("target", &[(BINDING, json!(50))], |_| {});
-        driver.drain_requests().unwrap();
-        let mid = *driver.pending.keys().next().unwrap();
-        write_ready(&mut driver, &budget, usize::MAX).await;
-        reply(
-            &mut driver,
-            mid,
-            json!({"result":[{"did":"foreign","siid":2,"piid":1,"code":0}]}),
-        );
-        let outcome = write.await;
-        assert_eq!(outcome.stage, RequestStage::MayHaveBeenSent);
-        let result = outcome.result.unwrap();
-        assert!(result.protocol_error);
-        assert_eq!(result.items, vec![Err(CentralError::Protocol)]);
-    });
-}
-
-#[test]
 fn guarded_batch_withdrawal_is_unsent_and_does_not_fire_first_send() {
     block_on(async {
         let (handle, mut driver, budget, written) = rig();
@@ -279,22 +258,31 @@ fn invalid_general_property_inputs_fail_before_queuing() {
 }
 
 #[test]
-fn unsolicited_batch_result_marks_invalid_without_losing_known_success() {
-    block_on(async {
-        let (handle, mut driver, budget, _) = rig();
-        let write = handle.set_properties("target", &[(BINDING, json!(50))], |_| {});
-        driver.drain_requests().unwrap();
-        let mid = *driver.pending.keys().next().unwrap();
-        write_ready(&mut driver, &budget, usize::MAX).await;
-        reply(
-            &mut driver,
-            mid,
-            json!({"result":[{"did":"target","siid":2,"piid":1,"code":0},{"did":"target","siid":9,"piid":1,"code":0}]}),
-        );
-        let outcome = write.await;
-        assert_eq!(outcome.stage, RequestStage::BusinessResult);
-        let result = outcome.result.unwrap();
-        assert!(result.protocol_error);
-        assert_eq!(result.items, vec![Ok(())]);
-    });
+fn unsolicited_results_only_advance_the_request_when_a_known_item_matches() {
+    for (items, stage, expected) in [
+        (
+            json!([{"did":"foreign","siid":2,"piid":1,"code":0}]),
+            RequestStage::MayHaveBeenSent,
+            Err(CentralError::Protocol),
+        ),
+        (
+            json!([{"did":"target","siid":2,"piid":1,"code":0},{"did":"target","siid":9,"piid":1,"code":0}]),
+            RequestStage::BusinessResult,
+            Ok(()),
+        ),
+    ] {
+        block_on(async {
+            let (handle, mut driver, budget, _) = rig();
+            let write = handle.set_properties("target", &[(BINDING, json!(50))], |_| {});
+            driver.drain_requests().unwrap();
+            let mid = *driver.pending.keys().next().unwrap();
+            write_ready(&mut driver, &budget, usize::MAX).await;
+            reply(&mut driver, mid, json!({"result": items}));
+            let outcome = write.await;
+            assert_eq!(outcome.stage, stage);
+            let result = outcome.result.unwrap();
+            assert!(result.protocol_error);
+            assert_eq!(result.items, [expected]);
+        });
+    }
 }

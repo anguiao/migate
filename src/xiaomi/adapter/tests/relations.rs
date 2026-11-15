@@ -43,27 +43,6 @@ fn catalog(devices: Vec<CloudCatalogDevice>) -> CloudDeviceCatalog {
 }
 
 #[test]
-fn confirmed_group_is_active_and_preserves_members() {
-    let mut relations = Relations::default();
-    let update = relations.apply(
-        &catalog(vec![device(
-            "group-1",
-            CloudGroupStatus::Confirmed(membership("group-1", &["member-2", "member-3"], false)),
-        )]),
-        &scope(),
-        &home(&["member-2", "member-3"]),
-    );
-    assert_eq!(update.active.len(), 1);
-    assert!(update.withdrawn.is_empty());
-    assert_eq!(update.active[0].record_did, "group-1");
-    assert_eq!(
-        update.active[0].membership.members,
-        ["member-2", "member-3"]
-    );
-    assert!(!update.active[0].membership.is_physical);
-}
-
-#[test]
 fn present_record_with_missing_membership_keeps_the_last_relation() {
     for status in [CloudGroupStatus::NotGroup, CloudGroupStatus::Failed] {
         let mut relations = Relations::default();
@@ -277,12 +256,13 @@ fn mixed_home_members_keep_the_full_confirmed_list_and_stay_active() {
         &scope(),
         &home(&["member-2"]),
     );
-    // The approved spec scopes a group when it contains at least one member of
-    // the selected home; foreign or unknown members stay in the confirmed list.
     assert!(update.errors.is_empty(), "{:?}", update.errors);
+    assert!(update.withdrawn.is_empty());
     assert_eq!(update.active.len(), 1);
+    assert_eq!(update.active[0].record_did, "mixed-record");
+    assert!(!update.active[0].membership.is_physical);
     assert_eq!(
         update.active[0].membership.members,
-        vec!["member-2".to_string(), "elsewhere".to_string()]
+        ["member-2", "elsewhere"]
     );
 }

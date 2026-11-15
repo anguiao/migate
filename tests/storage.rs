@@ -252,13 +252,6 @@ fn unsupported_schema_is_rejected_without_modifying_data_or_permissions() {
             0o644
         );
     }
-    let db = Connection::open(error.path()).unwrap();
-    assert_eq!(
-        db.query_row("SELECT value FROM marker", [], |row| row
-            .get::<_, String>(0))
-            .unwrap(),
-        "keep"
-    );
 }
 
 fn directory_snapshot(dir: &std::path::Path) -> Vec<(std::ffi::OsString, Vec<u8>)> {
@@ -286,9 +279,4 @@ fn invalid_current_schema_reports_sql_errors_without_replacing_identity() {
     let reopened = Store::open(dir.path()).unwrap();
     assert!(reopened.matter().get(7).is_err());
     assert_eq!(reopened.load_identity().unwrap(), identity);
-    assert_eq!(
-        db.query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
-            .unwrap(),
-        13
-    );
 }

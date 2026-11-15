@@ -501,30 +501,21 @@ fn property_reads_and_writes_time_out_during_headers_or_body_without_replay() {
 fn invalid_property_targets_fail_before_sending_http() {
     let (base, requests) = mock_server(vec![MockResponse::json(200, "{}")]);
     let cloud = crate::xiaomi::mijia::MijiaClient::for_test(&base, Duration::from_secs(1));
-    for (token, did, binding) in [
-        ("token", "", POWER),
-        ("token", "bad\n", POWER),
-        ("token", "target", PropertyBinding { siid: 0, piid: 1 }),
-        ("token", "target", PropertyBinding { siid: 2, piid: 0 }),
+    for (did, binding) in [
+        ("", POWER),
+        ("bad\n", POWER),
+        ("target", PropertyBinding { siid: 0, piid: 1 }),
+        ("target", PropertyBinding { siid: 2, piid: 0 }),
     ] {
         for error in [
-            future::block_on(cloud.read_property_value(&token_session(token), did, binding))
+            future::block_on(cloud.read_property_value(&token_session("token"), did, binding))
                 .unwrap_err(),
-            future::block_on(cloud.set_property(&token_session(token), did, binding, true))
+            future::block_on(cloud.set_property(&token_session("token"), did, binding, true))
                 .unwrap_err(),
         ] {
             assert_eq!(error.kind(), &CloudErrorKind::InvalidInput);
         }
     }
-    assert!(
-        crate::xiaomi::mijia::MijiaSession::new(
-            "account".into(),
-            "".into(),
-            "c2VjdXJpdHk=".into(),
-            "agent".into()
-        )
-        .is_err()
-    );
     assert!(requests.try_recv().is_err());
 }
 

@@ -79,34 +79,7 @@ fn notifications_coalesce_and_same_values_do_not_increment_revision() {
 }
 
 #[test]
-fn the_same_power_target_can_be_submitted_again_after_observation() {
-    block_on(async {
-        let (physical, mut receiver) = ready_device();
-        let device = &physical.functions()[0];
-        let mut changes = device.subscribe();
-        let command = device.execute(Command::On);
-        futures_lite::pin!(command);
-        assert!(poll_once(command.as_mut()).await.is_none());
-        let request = next_power(&mut receiver).await.unwrap();
-        assert!(request.target);
-        assert_eq!(device.snapshot().power(), Some(Power::Off));
-        device.observe(true);
-        request.accept().unwrap();
-        assert_eq!(command.await.unwrap().power(), Some(Power::On));
-        assert_eq!(changes.changed().await.power(), Some(Power::On));
-
-        let command = device.execute(Command::On);
-        futures_lite::pin!(command);
-        assert!(poll_once(command.as_mut()).await.is_none());
-        device.observe(true);
-        next_power(&mut receiver).await.unwrap().accept().unwrap();
-        command.await.unwrap();
-        assert!(poll_once(changes.changed()).await.is_none());
-    });
-}
-
-#[test]
-fn request_acceptance_does_not_infer_or_publish_power_state() {
+fn power_receipts_wait_for_observation_and_repeating_an_observed_target_still_sends() {
     block_on(async {
         let (physical, mut receiver) = ready_device();
         let device = &physical.functions()[0];
@@ -123,6 +96,16 @@ fn request_acceptance_does_not_infer_or_publish_power_state() {
         device.observe(true);
         assert_eq!(device.snapshot().power(), Some(Power::On));
         assert_eq!(changes.changed().await.power(), Some(Power::On));
+
+        let command = device.execute(Command::On);
+        futures_lite::pin!(command);
+        assert!(poll_once(command.as_mut()).await.is_none());
+        device.observe(true);
+        let repeated = next_power(&mut receiver).await.unwrap();
+        assert!(repeated.target);
+        repeated.accept().unwrap();
+        command.await.unwrap();
+        assert!(poll_once(changes.changed()).await.is_none());
     });
 }
 

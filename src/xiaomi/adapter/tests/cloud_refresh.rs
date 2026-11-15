@@ -28,27 +28,6 @@ fn directory_uses_mijia_session_and_signed_form() {
     }));
 }
 
-#[test]
-fn published_cloud_only_device_is_refreshed_without_a_local_subscription() {
-    let rig = Rig::new(true, &["one"]);
-    rig.cloud.lock().unwrap().online.insert("one".into());
-    block_on(rig.run(|c| async move {
-        until(|| !c.cloud.lock().unwrap().property_reads.is_empty()).await;
-        until(|| {
-            function(&c.context.registry, "one", "outlet:2")
-                .snapshot()
-                .power()
-                == Some(Power::Off)
-        })
-        .await;
-        assert!(c.context.live.borrow().session.is_none());
-        assert_eq!(
-            c.cloud.lock().unwrap().property_reads,
-            [("one".into(), 2, 1)]
-        );
-    }));
-}
-
 fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.live.borrow().devices[did]
         .admitted
@@ -183,6 +162,11 @@ fn refreshes_during_a_cloud_read_coalesce_and_invalidate_its_old_value() {
     }
     block_on(rig.run(|c| async move {
         until(|| cloud_reads(&c, "one", 2) == 1).await;
+        assert!(c.context.live.borrow().session.is_none());
+        assert_eq!(
+            c.cloud.lock().unwrap().property_reads,
+            [("one".into(), 2, 1)]
+        );
         let one = function(&c.context.registry, "one", "outlet:2");
         let work = work(&c, "one");
         for _ in 0..10 {

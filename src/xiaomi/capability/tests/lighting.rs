@@ -50,6 +50,7 @@ fn standard_lights_are_admitted_as_one_main_function() {
         assert_eq!(parsed.functions().len(), 1);
         let function = &parsed.functions()[0];
         assert_eq!(function.id(), "light:2");
+        assert!(function.label().len() <= 32, "{model}");
         assert!(function.kind().is_light());
         let lighting = function.lighting().unwrap();
         let brightness = lighting.brightness().unwrap();
@@ -82,32 +83,6 @@ fn standard_parser_uses_capabilities_instead_of_a_model_allowlist() {
     let mut instance = description("xiaomi.light.ceil04");
     instance["type"] = json!("urn:miot-spec-v2:device:light:0000A001:unknown-light:7");
     assert!(parse_device_for_model(key(), "unknown.light.v7", &instance).is_ok());
-}
-
-#[test]
-fn light_groups_parse_with_their_real_standard_light_capabilities() {
-    let instance = description("xiaomi.light.ceil04");
-    for (did, model) in [
-        ("group.42", "mijia.light.group3"),
-        ("group.42", "unknown.light.v7"),
-        ("42", "mijia.light.group3"),
-    ] {
-        let parsed = parse_device_for_model(
-            crate::device::DeviceKey::new("xiaomi", did),
-            model,
-            &instance,
-        )
-        .unwrap_or_else(|error| panic!("{did} {model}: {error}"));
-        assert_eq!(parsed.functions().len(), 1);
-        assert!(
-            parsed.functions()[0]
-                .lighting()
-                .unwrap()
-                .brightness()
-                .is_some()
-        );
-    }
-    assert!(parse_device_for_model(key(), "unknown.light.group3", &instance).is_ok());
 }
 
 #[test]
@@ -307,23 +282,6 @@ fn lights_without_a_qualifying_power_service_are_rejected() {
     let mut sensor_only = original;
     sensor_only["services"].as_array_mut().unwrap().remove(1);
     assert!(parse_device(key(), &sensor_only).is_err());
-}
-
-#[test]
-fn two_qualified_light_services_publish_distinct_functions() {
-    let mut combined = description("xiaomi.light.ceil04");
-    let mut duplicate = combined["services"][1].clone();
-    duplicate["iid"] = json!(8);
-    combined["services"].as_array_mut().unwrap().push(duplicate);
-    assert_eq!(
-        parse_device(key(), &combined)
-            .unwrap()
-            .functions()
-            .iter()
-            .map(|f| f.id())
-            .collect::<Vec<_>>(),
-        ["light:2", "light:8"]
-    );
 }
 
 fn profile_description(on: bool, brightness: bool, ct: bool, rgb: bool) -> Value {

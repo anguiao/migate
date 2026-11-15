@@ -1,15 +1,13 @@
 use super::*;
 
 #[test]
-fn all_light_samples_read_and_subscribe_every_property() {
-    for model in [
-        "devcea.light.ls2307",
-        "yeelink.light.light3",
-        "yeelink.light.ml9",
-        "yeelink.light.spot2",
-        "xiaomi.light.ceil04",
-        "xiaomi.light.bar2",
-        "lemesh.light.wy0c15",
+fn standard_and_extended_lights_read_and_subscribe_their_exact_properties() {
+    for (model, expected) in [
+        ("xiaomi.light.ceil04", &[(2, 1), (2, 2), (2, 3)][..]),
+        (
+            "devcea.light.ls2307",
+            &[(2, 1), (2, 2), (2, 3), (4, 1), (4, 2)][..],
+        ),
     ] {
         block_on(Rig::light(model).run(|c| async move {
             c.announce();
@@ -45,10 +43,6 @@ fn all_light_samples_read_and_subscribe_every_property() {
                         && control.context.active_notification("one") == Some(PathKind::Local)
                 })
                 .await;
-                let mut expected = vec![(2, 1), (2, 2), (2, 3)];
-                if model == "devcea.light.ls2307" {
-                    expected.extend([(4, 1), (4, 2)]);
-                }
                 until(|| peer.count("get", "one", 0) >= expected.len()).await;
                 for operation in ["get", "subscribe"] {
                     let seen = peer.state.borrow();

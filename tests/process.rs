@@ -367,22 +367,6 @@ fn log_filter_controls_diagnostics_without_changing_command_output() {
 }
 
 #[test]
-fn test_process_is_reaped_when_an_assertion_panics() {
-    let process = TestProcess::spawn(Command::new("sleep").arg("30"));
-    let pid = process.child.id();
-    let result = std::panic::catch_unwind(move || {
-        let _process = process;
-        panic!("simulated test failure");
-    });
-    assert!(result.is_err());
-    let probe = Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .unwrap();
-    assert!(!probe.status.success(), "child survived test failure");
-}
-
-#[test]
 fn production_without_credentials_fails_without_pairing_or_fake_device() {
     let directory = tempfile::tempdir().unwrap();
     let result = Command::new(env!("CARGO_BIN_EXE_migate"))

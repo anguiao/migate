@@ -1055,14 +1055,15 @@ fn stopped_ha_stays_stopped_after_adapter_restart_while_mijia_and_hub_work() {
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
             assert!(!control.context.token_usable());
-            assert!(control.context.cloud_candidate("one", true).is_ok());
+            until(|| control.context.cloud_candidate("one", true).is_ok()).await;
             function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
+            let homes = control.cloud.lock().unwrap().homes;
             control.clock.advance(Duration::from_secs(600));
-            async_io::Timer::after(Duration::from_millis(20)).await;
+            until(|| control.cloud.lock().unwrap().homes > homes).await;
             assert_eq!(control.cloud.lock().unwrap().ha_homes, 0);
             assert_eq!(control.cloud.lock().unwrap().tokens, 0);
             assert_eq!(control.cloud.lock().unwrap().certs, 0);

@@ -132,47 +132,7 @@ fn standard_peer() -> Rc<Peer> {
 }
 
 #[test]
-fn direct_low_speed_success_records_an_accepted_receipt() {
-    let (rig, _peer) = setup(v13());
-    block_on(rig.run(|c| async move {
-        let blow = function(&c, BLOW);
-        eventually(|| {
-            c.context.direct_candidate(DID).is_ok()
-                && blow
-                    .snapshot()
-                    .fan()
-                    .is_some_and(|fan| fan.speed.value == Some(2))
-        })
-        .await;
-        blow.begin_fan(FanCommand::Speed(1))
-            .unwrap()
-            .accepted()
-            .await
-            .unwrap();
-        let status = c
-            .context
-            .diagnostics()
-            .devices
-            .into_iter()
-            .find(|device| device.did == DID)
-            .unwrap();
-        let last = status
-            .commands
-            .into_iter()
-            .find(|command| command.channel == BLOW)
-            .unwrap()
-            .last
-            .unwrap();
-        assert_eq!(last.actual_path, Some(PathKind::Direct));
-        assert!(
-            matches!(last.steps[0].receipt, StepReceipt::Accepted),
-            "a successful direct low-speed command needs an Accepted receipt: {last:?}"
-        );
-    }));
-}
-
-#[test]
-fn direct_low_speed_success_schedules_related_reads_without_manual_refresh() {
+fn direct_low_speed_success_records_its_receipt_and_refreshes_related_properties() {
     let (rig, peer) = setup(v13());
     block_on(rig.run(|c| async move {
         let blow = function(&c, BLOW);
@@ -197,6 +157,25 @@ fn direct_low_speed_success_schedules_related_reads_without_manual_refresh() {
             .accepted()
             .await
             .unwrap();
+        let status = c
+            .context
+            .diagnostics()
+            .devices
+            .into_iter()
+            .find(|device| device.did == DID)
+            .unwrap();
+        let last = status
+            .commands
+            .into_iter()
+            .find(|command| command.channel == BLOW)
+            .unwrap()
+            .last
+            .unwrap();
+        assert_eq!(last.actual_path, Some(PathKind::Direct));
+        assert!(
+            matches!(last.steps[0].receipt, StepReceipt::Accepted),
+            "a successful direct low-speed command needs an Accepted receipt: {last:?}"
+        );
         let expected = [HEATING, TARGET, BLOW_POWER, VENTILATION_POWER, MODE];
         let mut fresh = Vec::new();
         for _ in 0..10 {

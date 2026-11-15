@@ -369,11 +369,15 @@ fn plan_with_revocations(
 }
 
 #[test]
-fn new_identity_starts_at_version_one() {
+fn new_identity_allocates_version_one_and_imports_a_bounded_label() {
     let native = outlet_native("outlet", 2);
     let facts = facts(
         scope(),
-        vec![source("outlet", native, Some("Kitchen"))],
+        vec![source(
+            "outlet",
+            native,
+            Some("米家厨房吸顶灯超长名称需要按字节边界截断"),
+        )],
         Vec::new(),
     );
     let mut identities = BTreeMap::new();
@@ -384,7 +388,7 @@ fn new_identity_starts_at_version_one() {
     let device = plan.configuration.device(&key("outlet")).unwrap();
     assert_eq!(device.configuration_version, 1);
     assert_eq!(device.endpoint, 2);
-    assert_eq!(device.label, "Kitchen");
+    assert_eq!(device.label, "米家厨房吸顶灯超长名");
     assert_eq!(
         device.functions,
         [CommittedFunction {
@@ -614,85 +618,6 @@ fn version_overflow_is_explicit() {
 }
 
 #[test]
-fn empty_saved_label_survives_plan_and_validation() {
-    let native = outlet_native("outlet", 2);
-    let mut previous = committed("outlet", native.clone(), "", 1);
-    previous.label = String::new();
-    let current = CommittedConfiguration {
-        temperature_bindings: Default::default(),
-        relay_channels: Vec::new(),
-        split_devices: Vec::new(),
-        scope: Some(scope()),
-        root_version: 2,
-        descriptions: vec![native.raw.clone()],
-        devices: vec![previous.clone()],
-        groups: Vec::new(),
-    };
-    assert!(
-        current.validate().is_ok(),
-        "an allocated identity always has a saved name, even an empty one"
-    );
-    let facts = facts(
-        scope(),
-        vec![source("outlet", native, Some("Renamed in Mi Home"))],
-        Vec::new(),
-    );
-    let plan = plan(current, facts, BTreeMap::new()).unwrap();
-    assert!(plan.changed);
-    assert!(!plan.rebuild);
-    assert_eq!(
-        plan.configuration.device(&key("outlet")).unwrap().label,
-        previous.label
-    );
-    assert_eq!(plan.derived.served[&key("outlet")].description.label(), "");
-    assert!(plan.configuration.validate().is_ok());
-}
-
-#[test]
-fn revoked_startup_removal_bumps_versions_against_the_committed_graph() {
-    let native = outlet_native("outlet", 2);
-    let current = CommittedConfiguration {
-        temperature_bindings: Default::default(),
-        relay_channels: Vec::new(),
-        split_devices: Vec::new(),
-        scope: Some(scope()),
-        root_version: 2,
-        descriptions: vec![native.raw.clone()],
-        devices: vec![committed("outlet", native, "Kitchen", 1)],
-        groups: Vec::new(),
-    };
-    // Startup facts exclude the revoked device; the tombstone stays durable.
-    let facts = facts(scope(), Vec::new(), Vec::new());
-    let plan = plan_with_revocations(
-        current,
-        facts,
-        BTreeMap::new(),
-        vec![Revocation {
-            key: key("outlet"),
-            reason: "confirmed removal".into(),
-        }],
-    )
-    .unwrap();
-    assert!(plan.rebuild);
-    assert!(plan.derived.published.is_empty());
-    assert_eq!(
-        plan.operations,
-        [PlanOperation {
-            key: key("outlet"),
-            kind: OperationKind::Removed,
-        }]
-    );
-    assert_eq!(
-        plan.configuration
-            .device(&key("outlet"))
-            .unwrap()
-            .configuration_version,
-        2
-    );
-    assert_eq!(plan.configuration.root_version, 3);
-}
-
-#[test]
 fn stale_revoked_member_cannot_affect_candidate_group_profile_or_shape() {
     let group_native = ct_light_native("group", 2700, 6500);
     let member_native = ct_light_native("member", 3000, 6000);
@@ -761,23 +686,6 @@ fn stale_revoked_member_cannot_affect_candidate_group_profile_or_shape() {
     assert_eq!(plan.configuration.root_version, 3);
     assert!(plan.rebuild);
     plan.configuration.validate().unwrap();
-}
-
-#[test]
-fn new_identity_imports_a_bounded_utf8_directory_name() {
-    let name = "米家厨房吸顶灯超长名称需要按字节边界截断";
-    let mut identities = BTreeMap::new();
-    identities.insert(key("outlet"), unique("outlet"));
-    let facts = facts(
-        scope(),
-        vec![source("outlet", outlet_native("outlet", 2), Some(name))],
-        Vec::new(),
-    );
-    let plan = plan(CommittedConfiguration::empty(), facts, identities).unwrap();
-    let label = &plan.configuration.device(&key("outlet")).unwrap().label;
-    assert_eq!(label, "米家厨房吸顶灯超长名");
-    assert!(label.len() <= 32);
-    assert!(!label.ends_with('\u{fffd}'));
 }
 
 #[test]

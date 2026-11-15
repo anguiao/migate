@@ -4,7 +4,6 @@ mod composition;
 mod curtain;
 mod fan;
 mod heater;
-mod labels;
 pub(crate) mod model_fixture;
 mod relay;
 
@@ -232,6 +231,7 @@ fn cp7pd_rejects_wrong_vendor_namespace_and_semantics() {
         assert_cp7pd_partial(&description, siid, "cuco.plug.cp7pd");
     }
     let mut description = model_description("cuco.plug.cp7pd");
+    assert!(super::parse_device_for_model(key(), "cuco.plug.v3", &description).is_err());
     description["type"] = json!("urn:miot-spec-v2:device:outlet:0000A002:other-cp7pd:1");
     assert!(super::parse_device_for_model(key(), "cuco.plug.cp7pd", &description).is_err());
 }
@@ -364,6 +364,7 @@ fn minimal_description() -> Value {
 fn public_spec_selects_main_switch_and_ignores_indicator_and_vendor_switches() {
     let outlet = parse_device(key(), &public_description()).unwrap();
     assert_eq!(*outlet.key(), key());
+    assert!(outlet.functions()[0].label().len() <= 32);
     assert_eq!(outlet.functions()[0].kind(), FunctionKind::Outlet);
     assert_eq!(
         outlet.functions()[0].power().unwrap(),
@@ -454,14 +455,22 @@ fn multiple_functional_power_properties_are_ambiguous() {
     let mut second = description["services"][0].clone();
     second["iid"] = json!(43);
     description["services"].as_array_mut().unwrap().push(second);
+    let parsed = parse_device(key(), &description).unwrap();
     assert_eq!(
-        parse_device(key(), &description)
-            .unwrap()
+        parsed
             .functions()
             .iter()
-            .map(|f| f.id())
+            .map(|function| function.id())
             .collect::<Vec<_>>(),
         ["outlet:42", "outlet:43"]
+    );
+    assert!(
+        super::NativeDescription::new(
+            "vendor.plug".into(),
+            description["type"].as_str().unwrap().into(),
+            parsed
+        )
+        .is_ok()
     );
 }
 

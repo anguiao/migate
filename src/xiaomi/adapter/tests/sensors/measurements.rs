@@ -569,7 +569,7 @@ fn invalid_observations_and_read_failures_preserve_each_independent_value() {
 }
 
 #[test]
-fn multiple_sensors_keep_their_own_values() {
+fn battery_and_measurement_updates_stay_on_their_own_device() {
     block_on(Rig::sensors(&["one", "two"]).run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());
@@ -577,6 +577,8 @@ fn multiple_sensors_keep_their_own_values() {
         peer.value("one", HUMIDITY, json!(22.0));
         peer.value("two", TEMPERATURE, json!(33.0));
         peer.value("two", HUMIDITY, json!(44.0));
+        peer.value("one", BATTERY, json!(11));
+        peer.value("two", BATTERY, json!(88));
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
@@ -587,11 +589,22 @@ fn multiple_sensors_keep_their_own_values() {
                     && measurement(&control.context, "two", "humidity:3:1008").value == Some(44.0)
             })
             .await;
+            until(|| {
+                battery(&control.context, "one").and_then(|b| b.value) == Some(11.0)
+                    && battery(&control.context, "two").and_then(|b| b.value) == Some(88.0)
+            })
+            .await;
+            peer.notify_value("two", BATTERY, json!(77), false);
             peer.notify_value_at("two", TEMPERATURE, json!(35.0), Some(2), false);
             until(|| {
                 measurement(&control.context, "two", "temperature:3:1001").value == Some(35.0)
             })
             .await;
+            until(|| battery(&control.context, "two").and_then(|b| b.value) == Some(77.0)).await;
+            assert_eq!(
+                battery(&control.context, "one").and_then(|b| b.value),
+                Some(11.0)
+            );
             assert_eq!(
                 measurement(&control.context, "one", "temperature:3:1001").value,
                 Some(11.0)

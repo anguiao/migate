@@ -337,84 +337,56 @@ fn rejected_write_keeps_a_prior_inflight_read_valid() {
 #[test]
 fn old_read_before_the_receipt_does_not_suppress_accepted_power() {
     use crate::xiaomi::capability::PropertyBinding;
-    block_on(Rig::new(true, &["one"]).run(|c| async move {
-        c.announce();
-        let peer = Rc::new(Peer::default());
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            initialized(control, &peer, &["one"]).await;
-            let work = control.context.live.borrow().devices["one"]
-                .admitted
-                .clone()
-                .unwrap();
-            let binding = PropertyBinding { siid: 2, piid: 1 };
-            until(|| {
-                work.function_observer("outlet:2").is_some()
-                    && !work.refresh.borrow().contains("outlet:2", binding)
+    for pushless in [false, true] {
+        block_on(Rig::new(true, &["one"]).run(|c| async move {
+            c.announce();
+            let peer = Rc::new(Peer::default());
+            if pushless {
+                peer.state.borrow_mut().pushless.insert("one".into());
+            }
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                until(|| {
+                    control
+                        .context
+                        .registry
+                        .get(&DeviceKey::new("xiaomi", "one"))
+                        .and_then(|device| device.function("outlet:2"))
+                        .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
+                })
+                .await;
+                let work = control.context.live.borrow().devices["one"]
+                    .admitted
+                    .clone()
+                    .unwrap();
+                let binding = PropertyBinding { siid: 2, piid: 1 };
+                until(|| {
+                    work.function_observer("outlet:2").is_none() == pushless
+                        && !work.refresh.borrow().contains("outlet:2", binding)
+                })
+                .await;
+                peer.state.borrow_mut().hold_reads = true;
+                peer.state.borrow_mut().hold_writes = true;
+                let before = peer.count("get", "one", 2);
+                work.refresh_property("outlet:2", binding);
+                until(|| peer.count("get", "one", 2) == before + 1).await;
+                let outlet = function(&control.context.registry, "one", "outlet:2");
+                let mut action = Box::pin(outlet.execute(Command::On));
+                assert!(poll_once(action.as_mut()).await.is_none());
+                until(|| peer.count("rpcReq", "one", 2) == 1).await;
+                peer.state.borrow_mut().hold_reads = false;
+                peer.release_property("one", binding, json!({"value":false}))
+                    .await;
+                until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
+                peer.release("one", 2, accepted("one", 2, 0)).await;
+                assert_eq!(action.await.unwrap().power(), Some(Power::On));
+                if pushless {
+                    until(|| peer.count("get", "one", 2) >= before + 2).await;
+                }
             })
             .await;
-            peer.state.borrow_mut().hold_reads = true;
-            peer.state.borrow_mut().hold_writes = true;
-            let before = peer.count("get", "one", 2);
-            work.refresh_property("outlet:2", binding);
-            until(|| peer.count("get", "one", 2) == before + 1).await;
-            let outlet = function(&control.context.registry, "one", "outlet:2");
-            let mut action = Box::pin(outlet.execute(Command::On));
-            assert!(poll_once(action.as_mut()).await.is_none());
-            until(|| peer.count("rpcReq", "one", 2) == 1).await;
-            peer.release_property("one", binding, json!({"value":false}))
-                .await;
-            until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
-            peer.release("one", 2, accepted("one", 2, 0)).await;
-            assert_eq!(action.await.unwrap().power(), Some(Power::On));
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn pushless_old_read_before_the_receipt_does_not_suppress_accepted_power() {
-    use crate::xiaomi::capability::PropertyBinding;
-    block_on(Rig::new(true, &["one"]).run(|c| async move {
-        c.announce();
-        let peer = Rc::new(Peer::default());
-        peer.state.borrow_mut().pushless.insert("one".into());
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                control
-                    .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
-                    .and_then(|device| device.function("outlet:2"))
-                    .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
-            })
-            .await;
-            let work = control.context.live.borrow().devices["one"]
-                .admitted
-                .clone()
-                .unwrap();
-            let binding = PropertyBinding { siid: 2, piid: 1 };
-            until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
-            peer.state.borrow_mut().hold_reads = true;
-            peer.state.borrow_mut().hold_writes = true;
-            let before = peer.count("get", "one", 2);
-            work.refresh_property("outlet:2", binding);
-            until(|| peer.count("get", "one", 2) == before + 1).await;
-            let outlet = function(&control.context.registry, "one", "outlet:2");
-            let mut action = Box::pin(outlet.execute(Command::On));
-            assert!(poll_once(action.as_mut()).await.is_none());
-            until(|| peer.count("rpcReq", "one", 2) == 1).await;
-            peer.state.borrow_mut().hold_reads = false;
-            peer.release_property("one", binding, json!({"value":false}))
-                .await;
-            until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
-            peer.release("one", 2, accepted("one", 2, 0)).await;
-            assert_eq!(action.await.unwrap().power(), Some(Power::On));
-            until(|| peer.count("get", "one", 2) >= before + 2).await;
-        })
-        .await;
-    }));
+        }));
+    }
 }
 
 #[test]

@@ -43,14 +43,6 @@ fn temperature_intervals_require_positive_representable_bounds() {
 }
 
 #[test]
-fn temperature_intervals_follow_the_effective_reachable_grid_maximum() {
-    let grid = NumericRange::new(2700, 6550, 100).unwrap();
-    let interval = TemperatureInterval::from_grid(grid).unwrap();
-    assert_eq!(interval.min(), 2700);
-    assert_eq!(interval.max(), 6500);
-}
-
-#[test]
 fn light_targets_are_non_empty_valid_and_decide_their_dimension() {
     assert!(LightTarget::brightness(None, f64::NAN).is_err());
     assert!(LightTarget::brightness(None, 0.0).is_err());

@@ -2,30 +2,6 @@ use super::{super::aggregate, support::*};
 use crate::device::{LightMode, Power, Rgb};
 
 #[test]
-fn one_representative_supplies_temperature_rgb_and_mode() {
-    let members = vec![
-        with_light(
-            member("a", Power::On),
-            light(
-                None,
-                Some(3000),
-                Some(0x0000ff),
-                Some(LightMode::Temperature),
-            ),
-        ),
-        with_light(
-            member("b", Power::On),
-            light(None, Some(4000), Some(0xff0000), Some(LightMode::Rgb)),
-        ),
-    ];
-    let (power, state) = aggregate(&extended(), &members, 2);
-    assert_eq!(power, Power::On);
-    assert_eq!(state.temperature_kelvin, Some(3000));
-    assert_eq!(state.color, Rgb::from_packed(0x0000ff));
-    assert_eq!(state.mode, Some(LightMode::Temperature));
-}
-
-#[test]
 fn valid_on_member_precedes_a_valid_off_member() {
     let members = vec![
         with_light(
@@ -70,6 +46,7 @@ fn member_order_does_not_change_the_representative() {
     let first = aggregate(&extended(), &forward, 2);
     let second = aggregate(&extended(), &reversed, 2);
     assert_eq!(first, second);
+    assert_eq!(first.0, Power::On);
     assert_eq!(first.1.temperature_kelvin, Some(3000));
     assert_eq!(first.1.color, Rgb::from_packed(0x0000ff));
     assert_eq!(first.1.mode, Some(LightMode::Temperature));

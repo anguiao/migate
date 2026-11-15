@@ -263,6 +263,8 @@ fn identical_new_ha_generation_retires_old_connection_and_its_events() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
+            let one = function(&c.context.registry, "one", "outlet:2");
+            until(|| one.snapshot().power() == Some(Power::Off)).await;
             let old_key = c.context.ha_key().unwrap();
             let old_handle = c
                 .context
@@ -278,6 +280,15 @@ fn identical_new_ha_generation_retires_old_connection_and_its_events() {
                 .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
                 .unwrap();
             c.context.reload_credentials();
+            c.context.property_value_event(
+                &super::super::super::notifications::NotificationSource::Cloud(old_handle.clone()),
+                "one",
+                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
+                &json!(true),
+                None,
+                false,
+            );
+            assert_eq!(one.snapshot().power(), Some(Power::Off));
             c.context
                 .token_rejected(
                     &old_key,
@@ -293,7 +304,6 @@ fn identical_new_ha_generation_retires_old_connection_and_its_events() {
                 peer.state.borrow().connects[0],
                 peer.state.borrow().connects[1]
             );
-            let one = function(&c.context.registry, "one", "outlet:2");
             let before = one.snapshot();
             c.context.property_value_event(
                 &super::super::super::notifications::NotificationSource::Cloud(old_handle),
@@ -306,42 +316,6 @@ fn identical_new_ha_generation_retires_old_connection_and_its_events() {
             assert_eq!(one.snapshot(), before);
             peer.property("one", 2, true);
             until(|| one.snapshot().power() == Some(Power::On)).await;
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn refreshed_credentials_reject_old_notification() {
-    let (rig, listener, peer) = with_cloud_peer(&["one"]);
-    block_on(rig.run(|c| async move {
-        future::or(peer.run(&listener), async {
-            until(|| cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "outlet:2");
-            until(|| one.snapshot().power() == Some(Power::Off)).await;
-            let old_handle = c
-                .context
-                .notifications
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .handle
-                .clone();
-            let record = c.store.xiaomi().load().unwrap().unwrap();
-            c.store
-                .xiaomi()
-                .fixture_update_tokens(&record.ha_authorization().unwrap().tokens)
-                .unwrap();
-            c.context.reload_credentials();
-            c.context.property_value_event(
-                &super::super::super::notifications::NotificationSource::Cloud(old_handle),
-                "one",
-                crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-                &json!(true),
-                None,
-                false,
-            );
-            assert_eq!(one.snapshot().power(), Some(Power::Off));
         })
         .await;
     }));

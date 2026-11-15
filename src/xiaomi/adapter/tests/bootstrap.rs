@@ -489,14 +489,6 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
 }
 
 #[test]
-fn prepared_accounts_can_deliver_an_empty_registry() {
-    block_on(Rig::new(false, &[]).run(|mut c| async move {
-        c.ready.take().unwrap().wait().await.unwrap();
-        assert!(c.context.registry.list().is_empty());
-    }));
-}
-
-#[test]
 fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
     let rig = Rig::light("xiaomi.light.ceil04");
     let mut state = rig.store.devices().load_configuration().unwrap();

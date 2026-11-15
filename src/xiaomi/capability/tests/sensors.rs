@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::device::{FunctionKind, MeasurementRange};
-use crate::xiaomi::capability::ParsedDevice;
 use crate::xiaomi::capability::{MeasurementUnit, NumericFormat};
 use serde_json::{Value, json};
 
@@ -41,34 +40,6 @@ fn measurement_property_mut(description: &mut Value, piid: u32) -> &mut Value {
         .iter_mut()
         .find(|property| property["iid"] == piid)
         .unwrap()
-}
-
-#[test]
-fn measurements_are_independent_of_each_other_and_the_host_category() {
-    for host in [
-        "urn:miot-spec-v2:device:temperature-humidity-sensor:0000A00A:sample:1",
-        "urn:miot-spec-v2:device:night-light:0000A0AB:sample:1",
-        "urn:miot-spec-v2:device:air-conditioner:0000A004:sample:1",
-    ] {
-        for wanted in [[true, false], [false, true], [true, true]] {
-            let mut description = sensor_description();
-            description["type"] = json!(host);
-            measurement_service_mut(&mut description)["properties"]
-                .as_array_mut()
-                .unwrap()
-                .retain(|property| match property["iid"].as_u64().unwrap() {
-                    1001 => wanted[0],
-                    1008 => wanted[1],
-                    _ => true,
-                });
-            let device = parse_device(sensor_key(), &description).unwrap();
-            assert_eq!(
-                device.functions().len(),
-                wanted.into_iter().filter(|value| *value).count()
-            );
-            assert!(device.is_read_only());
-        }
-    }
 }
 
 #[test]
@@ -182,32 +153,6 @@ fn standard_sensor_admits_independent_temperature_and_humidity_bindings() {
     assert_eq!(
         humidity.kind(),
         FunctionKind::Humidity(MeasurementRange::new(0.0, 100.0).unwrap())
-    );
-}
-
-#[test]
-fn official_t6_uses_the_standard_temperature_property_semantics() {
-    // The fixture is the fetched official static description, not a
-    // hand-written candidate. Its service is temperature-humidity-sensor with
-    // property temperature:00000020 and relative-humidity:0000000C.
-    let description = sensor_description();
-    assert!(
-        description["services"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|service| service["type"]
-                .as_str()
-                .is_some_and(|urn| urn.contains("service:temperature-humidity-sensor:00007814")))
-    );
-    let device = parse_device(sensor_key(), &description).unwrap();
-    assert_eq!(device.functions().len(), 2);
-    assert_eq!(
-        device.functions()[0].measurement().unwrap().property(),
-        PropertyBinding {
-            siid: 3,
-            piid: 1001
-        }
     );
 }
 
@@ -486,43 +431,6 @@ fn battery_values_follow_the_declared_integer_percentage_range() {
             "{invalid}"
         );
     }
-}
-
-#[test]
-fn a_control_can_share_a_physical_battery_binding() {
-    use crate::xiaomi::capability::ParsedFunction;
-    let battery = parse_device(sensor_key(), &sensor_description())
-        .unwrap()
-        .battery()
-        .unwrap()
-        .clone();
-    let outlet = ParsedFunction::outlet("outlet:2", "Main", PropertyBinding { siid: 2, piid: 1 });
-    assert!(
-        ParsedDevice::new_with_battery(sensor_key(), vec![outlet], None, Some(battery),).is_ok()
-    );
-}
-
-#[test]
-fn battery_diagnostics_are_part_of_committed_metadata() {
-    let mut missing = sensor_description();
-    missing["services"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|service| {
-            !service["type"]
-                .as_str()
-                .is_some_and(|urn| urn.contains("service:battery:"))
-        });
-    let diagnosed = parse_device(sensor_key(), &missing).unwrap();
-    let stored = ParsedDevice::new(
-        diagnosed.key().clone(),
-        diagnosed.functions().to_vec(),
-        diagnosed.refresh_trigger(),
-    )
-    .unwrap();
-    assert_ne!(diagnosed, stored);
-    assert!(diagnosed.battery_issue().is_some());
-    assert!(stored.battery_issue().is_none());
 }
 
 #[test]

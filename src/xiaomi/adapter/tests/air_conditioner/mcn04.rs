@@ -48,16 +48,13 @@ fn mcn04_state_report_updates_valid_fields_atomically_and_preserves_invalid_fiel
 }
 
 #[test]
-fn mcn04_range_is_unknown_until_a_source_reports_it() {
-    block_on(mcn04_rig().run(|c| async move {
-        let function = function(&c.context.registry, "one", ID);
-        assert!(function.air_conditioner_constraints().is_none());
-    }));
-}
-
-#[test]
 fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range() {
     block_on(mcn04_rig().run(|c| async move {
+        assert!(
+            function(&c.context.registry, "one", ID)
+                .air_conditioner_constraints()
+                .is_none()
+        );
         c.announce();
         let control = &c;
         c.peer(mcn04_peer(), |peer| async move {

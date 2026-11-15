@@ -82,27 +82,6 @@ fn light_profile_temperature_range_and_child_labels_change_the_shape() {
 }
 
 #[test]
-fn battery_capability_is_part_of_the_fixed_physical_shape() {
-    let temperature = FunctionDescription {
-        id: "temperature".into(),
-        label: "Temperature".into(),
-        kind: FunctionKind::Temperature(
-            crate::device::MeasurementRange::new(-30.0, 100.0).unwrap(),
-        ),
-    };
-    let humidity = FunctionDescription {
-        id: "humidity".into(),
-        label: "Humidity".into(),
-        kind: FunctionKind::Humidity(crate::device::MeasurementRange::new(0.0, 100.0).unwrap()),
-    };
-    let functions = [temperature, humidity];
-    assert_ne!(
-        fixed_shape(&functions),
-        fixed_shape_with_battery(functions.iter(), true)
-    );
-}
-
-#[test]
 fn co2_fixed_shape_compares_the_published_single_precision_bounds() {
     let measurement = |max| FunctionDescription {
         id: "co2".into(),

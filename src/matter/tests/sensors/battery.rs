@@ -65,27 +65,6 @@ fn battery_capability_adds_power_source_to_the_parent_only() {
 }
 
 #[test]
-fn without_battery_the_parent_has_no_power_source_cluster() {
-    setup!(device, handler, _im, false);
-    handler.access(|node| {
-        let parent = node
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.id == 2)
-            .unwrap();
-        assert_eq!(
-            parent
-                .device_types
-                .iter()
-                .map(|kind| (kind.dtype, kind.drev))
-                .collect::<Vec<_>>(),
-            [(0x0013, 1)]
-        );
-        assert!(!parent.clusters.iter().any(|cluster| cluster.id == 0x002f));
-    });
-}
-
-#[test]
 fn battery_attributes_are_nullable_shared_and_fail_before_the_first_value() {
     setup!(device, handler, im, true);
     block_on(async {

@@ -243,19 +243,6 @@ fn generic_speed_selection_prefers_more_levels_and_rejects_ties_and_overflow() {
 }
 
 #[test]
-fn dmaker_without_a_mode_can_use_an_independent_standard_speed() {
-    let mut value = generic_fan(vec![generic_speed(2, json!({"value-range": [1, 4, 1]}))]);
-    value["type"] = json!("urn:miot-spec-v2:device:fan:0000A005:dmaker-other:1");
-    let parsed =
-        parse_device_for_model(DeviceKey::new("xiaomi", "fan"), "dmaker.fan.other", &value)
-            .unwrap();
-    let fan = parsed.functions()[0].fan().unwrap();
-    assert!(fan.mode().is_none());
-    assert_eq!(fan.speed().property(), PropertyBinding { siid: 2, piid: 2 });
-    assert_eq!(fan.speed().count(), 4);
-}
-
-#[test]
 fn generic_speed_requires_standard_type_permissions_and_unambiguous_ordinary_levels() {
     for permission in ["read", "write", "notify"] {
         let mut speed = generic_speed(2, json!({"value-range": [1, 3, 1]}));
@@ -326,5 +313,6 @@ fn dmaker_with_unrelated_mode_does_not_require_the_straight_wind_patch() {
             .unwrap();
     let fan = parsed.functions()[0].fan().unwrap();
     assert!(fan.mode().is_none());
+    assert_eq!(fan.speed().property(), PropertyBinding { siid: 2, piid: 2 });
     assert_eq!(fan.speed().count(), 4);
 }

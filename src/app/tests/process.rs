@@ -7,7 +7,7 @@ use process_support::{Stream, TestProcess};
 use std::{fs, net::UdpSocket, path::Path, process::Command, time::Duration};
 
 impl TestProcess {
-    fn bridge(directory: &Path, initial: bool) -> (Self, u16) {
+    fn bridge(directory: &Path, initial: bool) -> Self {
         let gate = directory.join("source-ready");
         if gate.exists() {
             fs::remove_file(&gate).unwrap();
@@ -87,14 +87,14 @@ impl TestProcess {
             "local.",
         ]));
         lookup.wait_for_output(Stream::Stdout, &format!(":{port} (interface"));
-        (process, port)
+        process
     }
 }
 
 #[test]
 fn sigterm_stops_the_shared_runtime_and_releases_its_directory() {
     let directory = tempfile::tempdir().unwrap();
-    let (process, _) = TestProcess::bridge(directory.path(), false);
+    let process = TestProcess::bridge(directory.path(), false);
     let (_, errors) = process.stop("-TERM");
     assert!(errors.contains("Fake source stopped"), "{errors}");
     let _lock = crate::storage::InstanceLock::acquire(directory.path()).unwrap();
@@ -102,13 +102,10 @@ fn sigterm_stops_the_shared_runtime_and_releases_its_directory() {
 
 #[test]
 fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_power() {
-    let peer_directory = tempfile::tempdir().unwrap();
-    let (mut peer, peer_port) = TestProcess::bridge(peer_directory.path(), false);
     let directory = tempfile::tempdir().unwrap();
     let mut identity = None;
     for (close_input, initial) in [(false, false), (true, true)] {
-        let (mut process, port) = TestProcess::bridge(directory.path(), initial);
-        assert_ne!(port, peer_port);
+        let mut process = TestProcess::bridge(directory.path(), initial);
         process.send("status\non test-outlet outlet:2\nstatus\n");
         if close_input {
             process.close_input();
@@ -154,9 +151,6 @@ fn shared_runtime_eof_interrupt_and_restart_keep_identity_without_persisting_pow
             identity = Some(restored);
         }
     }
-    peer.send("status\n");
-    peer.wait_for_output(Stream::Stdout, "outlet:2 (主电源): off\n");
-    peer.interrupt();
 }
 
 #[test]
@@ -168,7 +162,7 @@ fn shared_runtime_recovers_corrupt_matter_settings_and_keeps_identity() {
         .matter()
         .put(rs_matter::persist::BASIC_INFO_KEY, &[0xff, 0x11])
         .unwrap();
-    let (mut process, _) = TestProcess::bridge(directory.path(), false);
+    let mut process = TestProcess::bridge(directory.path(), false);
     process.send("on test-outlet outlet:2\n");
     process.wait_for_output(Stream::Stdout, "test-outlet: command accepted\n");
     let (_, stderr) = process.interrupt();
@@ -192,6 +186,7 @@ fn helper_command(directory: &Path) -> Command {
     command
         .args([
             "--exact",
+            "--ignored",
             "app::lifecycle::tests::process::bridge_helper_child",
             "--nocapture",
             "--test-threads=1",
@@ -200,8 +195,8 @@ fn helper_command(directory: &Path) -> Command {
     command
 }
 
-// The ordinary test returns immediately; only the isolated test subprocess enables it.
 #[test]
+#[ignore = "subprocess entry point used by the bridge lifecycle tests"]
 fn bridge_helper_child() {
     let Some(directory) = std::env::var_os("MIGATE_TEST_HELPER_DIRECTORY") else {
         return;

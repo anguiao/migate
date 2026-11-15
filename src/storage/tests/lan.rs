@@ -34,27 +34,6 @@ fn confirmed_records_are_scoped_and_survive_reopen() {
 }
 
 #[test]
-fn logout_erases_confirmed_lan_credentials() {
-    use crate::{configuration::Scope, storage::Store, xiaomi::lan::Token};
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let scope = Scope {
-        uid: "owner".into(),
-        home_id: "home".into(),
-    };
-    let record = crate::storage::LanRecord {
-        scope: scope.clone(),
-        did: "656878122".into(),
-        model: "dmaker.fan.p5c".into(),
-        address: "192.0.2.5".parse().unwrap(),
-        token: Token::parse("00112233445566778899aabbccddeeff").unwrap(),
-    };
-    store.lan().save(&record).unwrap();
-    store.xiaomi().logout().unwrap();
-    assert_eq!(store.lan().load(&scope, &record.did).unwrap(), None);
-}
-
-#[test]
 fn same_account_login_preserves_lan_and_logout_erases_it() {
     use crate::{
         configuration::Scope,

@@ -326,34 +326,6 @@ fn battery_subscription_denial_or_timeout_does_not_block_measurement_notificatio
 }
 
 #[test]
-fn multiple_sensors_keep_isolated_battery_values() {
-    block_on(Rig::sensors(&["one", "two"]).run(|c| async move {
-        c.announce();
-        let peer = Rc::new(Peer::default());
-        for (did, battery_value, temperature) in [("one", 11, 12.0), ("two", 88, 34.0)] {
-            peer.value(did, TEMPERATURE, json!(temperature));
-            peer.value(did, HUMIDITY, json!(40.0));
-            peer.value(did, BATTERY, json!(battery_value));
-        }
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                battery(&control.context, "one").and_then(|b| b.value) == Some(11.0)
-                    && battery(&control.context, "two").and_then(|b| b.value) == Some(88.0)
-            })
-            .await;
-            peer.notify_value("two", BATTERY, json!(77), false);
-            until(|| battery(&control.context, "two").and_then(|b| b.value) == Some(77.0)).await;
-            assert_eq!(
-                battery(&control.context, "one").and_then(|b| b.value),
-                Some(11.0)
-            );
-        })
-        .await;
-    }));
-}
-
-#[test]
 fn a_retired_source_cannot_update_battery_state() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
@@ -371,40 +343,6 @@ fn a_retired_source_cannot_update_battery_state() {
                 battery(&control.context, "sensor").and_then(|b| b.value),
                 Some(55.0)
             );
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn an_earlier_battery_read_cannot_overwrite_a_later_notification() {
-    block_on(Rig::sensors(&["sensor"]).run(|c| async move {
-        c.announce();
-        let peer = sensor_peer(20.0, 40.0);
-        peer.value("sensor", BATTERY, json!(55));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)).await;
-            let current = work(&control.context, "sensor");
-            let earlier = current.observations.read_stamp("battery", BATTERY);
-            peer.notify_value_at("sensor", BATTERY, json!(66), Some(300), false);
-            until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(66.0)).await;
-            current
-                .observe_read_at(
-                    "battery",
-                    BATTERY,
-                    &earlier,
-                    &json!(55),
-                    Observation {
-                        source: PathKind::Local,
-                        source_time: Some(100),
-                        received_at: control.clock.unix_now(),
-                    },
-                )
-                .unwrap();
-            let value = battery(&control.context, "sensor").unwrap();
-            assert_eq!(value.value, Some(66.0));
-            assert_eq!(value.source_time, Some(300));
         })
         .await;
     }));
@@ -713,7 +651,7 @@ fn a_restored_sensor_without_battery_still_reports_why_capability_is_missing() {
 }
 
 #[test]
-fn a_stale_battery_read_failure_cannot_replace_a_newer_valid_notification() {
+fn stale_battery_read_success_and_failure_preserve_the_newer_notification() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
         let peer = sensor_peer(20.0, 40.0);
@@ -722,25 +660,28 @@ fn a_stale_battery_read_failure_cannot_replace_a_newer_valid_notification() {
         c.peer(peer, |peer| async move {
             until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)).await;
             peer.state.borrow_mut().hold_reads = true;
-            peer.state
-                .borrow_mut()
-                .read_fail
-                .insert(("sensor".into(), BATTERY.siid, BATTERY.piid));
-            work(&control.context, "sensor").refresh_property("battery", BATTERY);
-            until(|| !peer.state.borrow().held.is_empty()).await;
-            peer.notify_value_at("sensor", BATTERY, json!(66), Some(300), false);
-            until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(66.0)).await;
-            peer.release_property("sensor", BATTERY, json!(0)).await;
-            for _ in 0..50 {
-                future::yield_now().await;
+            let current = work(&control.context, "sensor");
+            for (reply, level, time) in [
+                (json!({"value":55,"updateTime":100}), 66, 300),
+                (json!(0), 77, 400),
+            ] {
+                let before = peer.count("get", "sensor", BATTERY.siid);
+                current.refresh_property("battery", BATTERY);
+                until(|| peer.count("get", "sensor", BATTERY.siid) > before).await;
+                peer.notify_value_at("sensor", BATTERY, json!(level), Some(time), false);
+                until(|| {
+                    battery(&control.context, "sensor").is_some_and(|b| {
+                        b.value == Some(f64::from(level)) && b.source_time == Some(time)
+                    })
+                })
+                .await;
+                peer.release_property("sensor", BATTERY, reply).await;
+                until(|| !current.refresh.borrow().contains("battery", BATTERY)).await;
+                let value = battery(&control.context, "sensor").unwrap();
+                assert_eq!(value.value, Some(f64::from(level)));
+                assert_eq!(value.source_time, Some(time));
+                assert!(current.battery_problem().is_none());
             }
-            let value = battery(&control.context, "sensor").unwrap();
-            assert_eq!(value.value, Some(66.0));
-            assert_eq!(value.source_time, Some(300));
-            assert!(
-                work(&control.context, "sensor").battery_problem().is_none(),
-                "a stale read failure cannot create a newer diagnostic"
-            );
         })
         .await;
     }));

@@ -164,9 +164,13 @@ fn built_in_temperature_source_is_independent_of_power_and_keeps_diagnostics() {
         builtin(function),
         (TemperatureSourceState::AwaitingReading, None)
     );
-    function
+    let first = function
         .observe_heater_temperature(22.4, Some(10), 11)
         .unwrap();
+    let repeated = function
+        .observe_heater_temperature(22.4, Some(10), 11)
+        .unwrap();
+    assert_eq!(repeated.revision, first.revision);
     let TemperatureSourceState::Available(reading) = builtin(function).0 else {
         panic!("valid reading must be available")
     };

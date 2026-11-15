@@ -1,7 +1,5 @@
-use super::{compose_group_light, effective_temperature_range, narrowed_profile};
-use crate::device::{
-    DeviceKey, FunctionKey, LightProfile, LightProfileKind, NumericRange, TemperatureInterval,
-};
+use super::{compose_group_light, effective_temperature_range};
+use crate::device::{DeviceKey, FunctionKey, LightProfileKind, NumericRange, TemperatureInterval};
 use crate::xiaomi::capability::{
     NativeDescription, ParsedDevice, parse_device_for_model, parse_group,
 };
@@ -235,16 +233,6 @@ fn effective_range_falls_back_and_keeps_the_genuine_native_grid() {
             .unwrap()
             .range(),
         native_grid
-    );
-}
-
-#[test]
-fn narrowed_profile_preserves_native_rgb_but_replaces_only_the_interval() {
-    let native = LightProfile::ExtendedColor(TemperatureInterval::new(2700, 6500).unwrap());
-    let narrowed = narrowed_profile(native, TemperatureInterval::new(3000, 6000).unwrap());
-    assert_eq!(
-        narrowed,
-        LightProfile::ExtendedColor(TemperatureInterval::new(3000, 6000).unwrap())
     );
 }
 

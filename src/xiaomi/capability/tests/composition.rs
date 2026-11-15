@@ -478,9 +478,3 @@ fn cp7pd_patch_preserves_an_additional_standard_outlet_channel() {
             .all(|patch| patch.target() != "outlet:42")
     );
 }
-
-#[test]
-fn cp7pd_instance_alone_does_not_apply_the_model_specific_patch() {
-    let instance = model_description("cuco.plug.cp7pd");
-    assert!(super::super::parse_device_for_model(key(), "", &instance).is_err());
-}

@@ -1,10 +1,10 @@
 use super::*;
 
 #[test]
-fn on_off_and_dimmable_profiles_persist_static_capabilities() {
+fn each_light_profile_round_trips_its_bindings_and_endpoint_identity() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
-    let lights = [("switch", false), ("dimmer", true)]
+    let mut lights: Vec<_> = [("switch", false), ("dimmer", true)]
         .into_iter()
         .map(|(id, brightness)| {
             let mut instance: Value = serde_json::from_str(CEILING).unwrap();
@@ -18,10 +18,19 @@ fn on_off_and_dimmable_profiles_persist_static_capabilities() {
             native(id, "xiaomi.light.ceil04", instance)
         })
         .collect();
+    lights.extend([
+        fixture("ct", "xiaomi.light.ceil04", CEILING),
+        fixture("rgb", "devcea.light.ls2307", LS2307),
+    ]);
     let expected = seed(&store, lights);
     drop(store);
     let restored = load(&Store::open(dir.path()).unwrap());
     assert_eq!(restored, expected);
+    for device in &restored.devices {
+        assert_eq!(device.functions.len(), 1);
+        assert_eq!(device.functions[0].id, "light:2");
+        assert_ne!(device.functions[0].endpoint, device.endpoint);
+    }
     for (id, profile) in [
         ("switch", LightProfile::OnOff),
         ("dimmer", LightProfile::Dimmable),
@@ -39,50 +48,6 @@ fn on_off_and_dimmable_profiles_persist_static_capabilities() {
             FunctionKind::Light(profile)
         );
     }
-}
-
-#[test]
-fn all_seven_lights_restore_complete_static_bindings_and_identities() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let fixtures = [
-        ("devcea.light.ls2307", LS2307),
-        (
-            "yeelink.light.light3",
-            include_str!("../../../../tests/fixtures/miot/yeelink-light-light3.json"),
-        ),
-        (
-            "yeelink.light.ml9",
-            include_str!("../../../../tests/fixtures/miot/yeelink-light-ml9.json"),
-        ),
-        (
-            "yeelink.light.spot2",
-            include_str!("../../../../tests/fixtures/miot/yeelink-light-spot2.json"),
-        ),
-        ("xiaomi.light.ceil04", CEILING),
-        (
-            "xiaomi.light.bar2",
-            include_str!("../../../../tests/fixtures/miot/xiaomi-light-bar2.json"),
-        ),
-        (
-            "lemesh.light.wy0c15",
-            include_str!("../../../../tests/fixtures/miot/lemesh-light-wy0c15.json"),
-        ),
-    ];
-    let expected = seed(
-        &store,
-        fixtures
-            .into_iter()
-            .map(|(model, data)| fixture(model, model, data))
-            .collect(),
-    );
-    for device in &expected.devices {
-        assert_eq!(device.functions.len(), 1);
-        assert_eq!(device.functions[0].id, "light:2");
-        assert_ne!(device.functions[0].endpoint, device.endpoint);
-    }
-    drop(store);
-    assert_eq!(load(&Store::open(dir.path()).unwrap()), expected);
 }
 
 #[test]
@@ -213,7 +178,7 @@ fn ls2307_identity_does_not_discard_an_independent_outlet() {
 }
 
 #[test]
-fn unrepresentable_mired_ranges_are_rejected_at_construction_and_cache_restore() {
+fn stored_lighting_rejects_unrepresentable_mired_ranges() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     seed(
@@ -222,33 +187,6 @@ fn unrepresentable_mired_ranges_are_rejected_at_construction_and_cache_restore()
     );
     let valid: Value = serde_json::from_str(&raw(&store)).unwrap();
     for range in [[4500, 4501, 1], [10, 6500, 1]] {
-        let mut instance: Value = serde_json::from_str(CEILING).unwrap();
-        let temperature = instance["services"][1]["properties"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|property| {
-                property["type"]
-                    .as_str()
-                    .unwrap()
-                    .contains(":color-temperature:")
-            })
-            .unwrap();
-        temperature["value-range"] = json!(range);
-        let parsed = parse_device_for_model(
-            DeviceKey::new("xiaomi", "bad-range"),
-            "xiaomi.light.ceil04",
-            &instance,
-        )
-        .unwrap();
-        assert!(
-            parsed.functions()[0]
-                .lighting()
-                .unwrap()
-                .temperature()
-                .is_none()
-        );
-        assert!(!parsed.recognition().diagnostics().is_empty());
         let mut encoded = valid.clone();
         let temperature =
             &mut encoded["devices"][0]["native"]["functions"][0]["lighting"]["temperature"];

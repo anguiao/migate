@@ -347,20 +347,3 @@ fn declared_temperature_maximum_still_bounds_the_native_grid() {
         "the declared maximum is part of the accepted domain"
     );
 }
-
-#[test]
-fn native_source_model_accepts_distinct_control_services() {
-    let functions = vec![
-        ParsedFunction::outlet("outlet:2", "First", property(2, 1)),
-        ParsedFunction::outlet("outlet:3", "Second", property(3, 1)),
-    ];
-    let device = ParsedDevice::new(key(), functions, None).unwrap();
-    assert!(
-        NativeDescription::new(
-            "vendor.plug".into(),
-            "urn:miot-spec-v2:device:outlet:0000A002:vendor-v1:1".into(),
-            device,
-        )
-        .is_ok()
-    );
-}

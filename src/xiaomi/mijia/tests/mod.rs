@@ -112,6 +112,7 @@ fn session_rejects_invalid_fields_and_redacts_credentials() {
         ("bad;user", "token", "c2VjcmV0", "UA"),
         ("user", "bad\ntoken", "c2VjcmV0", "UA"),
         ("user", "bad token", "c2VjcmV0", "UA"),
+        ("user", "", "c2VjcmV0", "UA"),
         ("user", "token", "", "UA"),
         ("user", "token", "not base64", "UA"),
         ("user", "token", "c2VjcmV0", ""),
