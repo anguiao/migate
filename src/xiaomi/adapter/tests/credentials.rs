@@ -1,5 +1,6 @@
 use super::*;
 
+mod certificate_phases;
 mod ha;
 mod hub_certificate;
 mod mijia;

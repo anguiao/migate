@@ -527,10 +527,55 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
     }
 }
 
+#[derive(Default)]
+struct CertificatePhases {
+    observed: Option<(CertificateValidity, CertificateStatus)>,
+    expired: Option<i64>,
+}
+
+impl CertificatePhases {
+    fn observe(&mut self, context: &Context, validity: Option<CertificateValidity>, now: i64) {
+        let current = validity.map(|validity| (validity, validity.status(now)));
+        let previous = self.observed;
+        self.observed = current;
+        let Some((validity, status)) = current else {
+            return;
+        };
+        if status == CertificateStatus::Expired && self.expired != Some(validity.not_after) {
+            self.expired = Some(validity.not_after);
+            eligibility_changed(context, "hub certificate expired");
+        } else if let Some((old_validity, old_status)) = previous
+            && old_validity == validity
+            && old_status != status
+        {
+            if old_status == CertificateStatus::NotYetValid
+                && matches!(
+                    status,
+                    CertificateStatus::Valid | CertificateStatus::RenewalDue
+                )
+            {
+                eligibility_changed(context, "hub certificate became valid");
+            } else {
+                context.status_changed.notify(usize::MAX);
+            }
+        }
+    }
+
+    fn next(validity: Option<CertificateValidity>, now: i64) -> Option<i64> {
+        let validity = validity?;
+        match validity.status(now) {
+            CertificateStatus::NotYetValid => Some(validity.not_before),
+            CertificateStatus::Valid => Some(validity.renewal_at()),
+            CertificateStatus::RenewalDue => Some(validity.not_after),
+            CertificateStatus::Expired => None,
+        }
+    }
+}
+
 async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {
     let mut backoff = Backoff::new(1, 30);
     let mut due = context.clock.now();
-    let mut last_expiry = None;
+    let mut phases = CertificatePhases::default();
     let mut last_hub = None;
     let mut validity = None;
     let mut maintained = None;
@@ -554,13 +599,7 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
             backoff = Backoff::new(1, 30);
         }
         let now = context.clock.unix_now();
-        if let Some(validity) = validity
-            && now >= validity.not_after
-            && last_expiry != Some(validity.not_after)
-        {
-            last_expiry = Some(validity.not_after);
-            eligibility_changed(&context, "hub certificate expired");
-        }
+        phases.observe(&context, validity, now);
         let needs_renewal = validity.is_none_or(|validity| validity.renewal_due(now));
         if needs_renewal && context.token_usable() && context.clock.now() >= due {
             let key = key.unwrap();
@@ -568,30 +607,25 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
                 let renewal = auth
                     .renew_bridge_certificate(&record, key.generation, || context.clock.unix_now());
                 let mut renewal = std::pin::pin!(renewal);
-                let result = if let Some(validity) =
-                    validity.filter(|validity| validity.currently_valid(now))
-                {
+                let result = loop {
+                    let Some(next) = CertificatePhases::next(validity, context.clock.unix_now())
+                    else {
+                        break renewal.as_mut().await;
+                    };
                     match future::or(async { Some(renewal.as_mut().await) }, async {
-                        context
-                            .clock
-                            .wait_until(deadline(&context, validity.not_after))
-                            .await;
+                        context.clock.wait_until(deadline(&context, next)).await;
                         None
                     })
                     .await
                     {
-                        Some(result) => result,
+                        Some(result) => break result,
                         None => {
                             let current = saved(auth, &context)?;
                             if current.uid == record.uid && current.hub == record.hub {
-                                last_expiry = Some(validity.not_after);
-                                eligibility_changed(&context, "hub certificate expired");
+                                phases.observe(&context, validity, context.clock.unix_now());
                             }
-                            renewal.await
                         }
                     }
-                } else {
-                    renewal.await
                 };
                 Ok::<_, AdapterError>(Some(result))
             };
@@ -666,14 +700,12 @@ async fn certificates(auth: &AuthService, context: Rc<Context>) -> Result<(), Ad
             }
             continue;
         }
-        let expiry = validity
-            .filter(|validity| now < validity.not_after)
-            .map(|validity| deadline(&context, validity.not_after));
+        let phase = CertificatePhases::next(validity, now).map(|next| deadline(&context, next));
         let renewal = context.token_usable().then(|| match validity {
             Some(validity) => due.max(deadline(&context, validity.renewal_at())),
             None => due,
         });
-        let next = expiry.into_iter().chain(renewal).min();
+        let next = phase.into_iter().chain(renewal).min();
         future::or(changed, async {
             if let Some(next) = next {
                 context.clock.wait_until(next).await;
