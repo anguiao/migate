@@ -29,8 +29,31 @@ fn degraded_hub_remains_a_candidate_without_sending_automatic_sensor_reads() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            let auth_status = crate::terminal::AuthStatus::new(
+                control.context.auth_report(),
+                "/bin/migate".into(),
+                "/data".into(),
+            );
+            let terminal = crate::terminal::bridge::Context::committed(
+                control.publication.clone(),
+                &auth_status,
+            );
             control.context.hub.borrow_mut().degrade();
             control.context.update_device_availability("sensor");
+            let details = terminal
+                .handle_line("status sensor", 0)
+                .await
+                .unwrap()
+                .unwrap();
+            let routing = details.split_once("sensor routing:\n").unwrap().1;
+            for expected in [
+                "  Usable read paths: hub.",
+                "  Selected read: none.",
+                "  Notification source: hub.",
+                "  temperature:3:1001: selected read none; notification source hub.",
+            ] {
+                assert!(routing.lines().any(|line| line == expected), "{details}");
+            }
             let status = battery_status(&control.context, "sensor");
             assert_eq!(status.usable_read_paths, [PathKind::Local]);
             assert_eq!(
@@ -168,38 +191,95 @@ fn temperature_only_devices_lose_reachability_and_wait_for_a_new_recovered_notif
             c.peer(sensor_peer(21.0, 45.0), |_peer| async move {
                 let current = work(&control.context, "sensor");
                 let temperature = current.physical().function(ID).unwrap();
-                until(|| matches!(temperature.snapshot().temperature_source(), Some(TemperatureSourceState::Available(_)))
-                    && current.function_observer(ID).is_some()).await;
-                control.clock.automatic.store(false, std::sync::atomic::Ordering::Relaxed);
+                until(|| {
+                    matches!(
+                        temperature.snapshot().temperature_source(),
+                        Some(TemperatureSourceState::Available(_))
+                    ) && current.function_observer(ID).is_some()
+                })
+                .await;
+                control
+                    .clock
+                    .automatic
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
                 let historical = temperature.snapshot().measurement().unwrap();
-                let (ac, _) = PhysicalDevice::new(PhysicalDeviceDescription::new(
-                    DeviceKey::new("test", "ac"), "AC", vec![FunctionDescription {
-                        id: "ac".into(), label: "AC".into(), kind: FunctionKind::AirConditioner {
-                            temperature: TemperatureGrid::new(16, 30, 1).unwrap(), vertical_swing: false,
+                let description = PhysicalDeviceDescription::new(
+                    DeviceKey::new("test", "ac"),
+                    "AC",
+                    vec![FunctionDescription {
+                        id: "ac".into(),
+                        label: "AC".into(),
+                        kind: FunctionKind::AirConditioner {
+                            temperature: TemperatureGrid::new(16, 30, 1).unwrap(),
+                            vertical_swing: false,
                         },
                     }],
-                ).unwrap());
+                )
+                .unwrap();
+                let (ac, _) = PhysicalDevice::new(description);
                 let ac = ac.function("ac").unwrap();
-                ac.set_ambient_temperature_source(Some((temperature.function_key().clone(), Some(temperature.clone()))));
-                assert_eq!(ac.snapshot().ambient_temperature(), Some(AmbientTemperature::Available(historical)));
+                ac.set_ambient_temperature_source(Some((
+                    temperature.function_key().clone(),
+                    Some(temperature.clone()),
+                )));
+                assert_eq!(
+                    ac.snapshot().ambient_temperature(),
+                    Some(AmbientTemperature::Available(historical))
+                );
                 let observer = current.function_observer(ID).unwrap();
                 control.context.hub.borrow_mut().degrade();
                 current.revoke_observer(ID);
                 control.context.update_device_availability("sensor");
-                assert!(matches!(current.physical().availability(), Availability::Unavailable(_)), "battery={battery}");
-                assert_eq!(temperature.snapshot().temperature_source(), Some(TemperatureSourceState::Unavailable));
+                assert!(
+                    matches!(
+                        current.physical().availability(),
+                        Availability::Unavailable(_)
+                    ),
+                    "battery={battery}"
+                );
+                assert_eq!(
+                    temperature.snapshot().temperature_source(),
+                    Some(TemperatureSourceState::Unavailable)
+                );
                 assert_eq!(temperature.snapshot().measurement(), Some(historical));
-                assert_eq!(ac.snapshot().ambient_temperature(), Some(AmbientTemperature::SourceUnavailable));
+                assert_eq!(
+                    ac.snapshot().ambient_temperature(),
+                    Some(AmbientTemperature::SourceUnavailable)
+                );
 
                 current.install_observer(ID, observer.clone());
                 control.context.update_device_availability("sensor");
                 assert_eq!(current.physical().availability(), Availability::Available);
-                assert_eq!(ac.snapshot().ambient_temperature(), Some(AmbientTemperature::AwaitingReading));
-                control.context.property_value_event(&observer, "sensor", TEMPERATURE, &json!("invalid"), Some(100), false);
-                assert_eq!(ac.snapshot().ambient_temperature(), Some(AmbientTemperature::AwaitingReading));
-                control.context.property_value_event(&observer, "sensor", TEMPERATURE, &json!(22.0), Some(101), false);
-                assert!(matches!(ac.snapshot().ambient_temperature(), Some(AmbientTemperature::Available(value)) if value.value == Some(22.0)));
-            }).await;
+                assert_eq!(
+                    ac.snapshot().ambient_temperature(),
+                    Some(AmbientTemperature::AwaitingReading)
+                );
+                control.context.property_value_event(
+                    &observer,
+                    "sensor",
+                    TEMPERATURE,
+                    &json!("invalid"),
+                    Some(100),
+                    false,
+                );
+                assert_eq!(
+                    ac.snapshot().ambient_temperature(),
+                    Some(AmbientTemperature::AwaitingReading)
+                );
+                control.context.property_value_event(
+                    &observer,
+                    "sensor",
+                    TEMPERATURE,
+                    &json!(22.0),
+                    Some(101),
+                    false,
+                );
+                assert!(matches!(
+                    ac.snapshot().ambient_temperature(),
+                    Some(AmbientTemperature::Available(value)) if value.value == Some(22.0)
+                ));
+            })
+            .await;
         }));
     }
 }
