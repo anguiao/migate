@@ -80,5 +80,6 @@ fn battery_status(
 mod access;
 mod battery;
 mod measurements;
+mod routing;
 mod sources;
 mod temperature_source;

@@ -11,11 +11,7 @@ use super::{
 use crate::xiaomi::capability::PropertyBinding;
 
 fn path_kind(path: ControlPath) -> PathKind {
-    match path {
-        ControlPath::Local(_) => PathKind::Local,
-        ControlPath::Direct(_) => PathKind::Direct,
-        ControlPath::Cloud(_) => PathKind::Cloud,
-    }
+    path.kind()
 }
 
 impl Context {
@@ -32,12 +28,11 @@ impl Context {
         }
     }
     pub(super) fn update_routing(&self, reason: &str) {
+        let now = self.clock.unix_now();
+        let evaluated = self.routing_evaluation_at(now);
         // Eligibility can change at a deadline before its maintenance task is polled.
         let reason = if reason == "access conditions changed" {
-            let expired = self
-                .credentials
-                .borrow()
-                .token_expired(self.clock.unix_now());
+            let expired = self.credentials.borrow().token_expired(now);
             if expired {
                 "access token expired"
             } else if self.hub.borrow().session().is_some()
@@ -45,7 +40,7 @@ impl Context {
                     .credentials
                     .borrow()
                     .certificate_validity()
-                    .is_some_and(|validity| validity.not_after <= self.clock.unix_now())
+                    .is_some_and(|validity| validity.not_after <= now)
             {
                 "hub certificate expired"
             } else {
@@ -59,65 +54,27 @@ impl Context {
         let previous_devices = previous.devices.clone();
         drop(previous);
         let mut routing = RoutingStatus {
-            priority: self.priority(),
-            local_connected: self.hub.borrow().session().is_some(),
+            priority: evaluated.priority,
+            local_connected: evaluated.local_connected,
             last_switch_reason: previous_routing.last_switch_reason.clone(),
         };
         if routing.priority != previous_routing.priority {
             routing.last_switch_reason = Some(reason.into());
         }
-        let dids = self
-            .directory
-            .borrow()
-            .devices
-            .iter()
-            .filter_map(|(did, slot)| slot.admitted.as_ref().map(|_| did.clone()))
-            .collect::<Vec<_>>();
         let mut devices = Vec::new();
-        for did in dids {
-            let read_only = self.is_read_only(&did);
-            let mut usable = Vec::new();
-            if !read_only {
-                if self.local_candidate(&did, false).is_ok() {
-                    usable.push(PathKind::Local);
-                }
-                if self.direct_candidate(&did).is_ok() {
-                    usable.push(PathKind::Direct);
-                }
-                if self.cloud_candidate(&did, true).is_ok() {
-                    usable.push(PathKind::Cloud);
-                }
-            }
-            let selected = self.control_path(&did).map(path_kind);
-            let mut usable_read = Vec::new();
-            if self.local_candidate(&did, false).is_ok() {
-                usable_read.push(PathKind::Local);
-            }
-            if self.direct_candidate(&did).is_ok() {
-                usable_read.push(PathKind::Direct);
-            }
-            if self.cloud_observation_candidate(&did, true).is_ok() {
-                usable_read.push(PathKind::Cloud);
-            }
-            let selected_read = self.read_path(&did).map(path_kind);
-            let physical_online =
-                if self.has_sensors(&did) && super::routing::unreliable_cloud_online(&did) {
-                    None
-                } else {
-                    let live = self.directory.borrow();
-                    let slot = live.devices.get(&did).unwrap();
-                    slot.cloud_access
-                        .as_ref()
-                        .map(|access| access.online)
-                        .or_else(|| {
-                            self.hub
-                                .borrow()
-                                .access(&did)
-                                .and_then(|access| access.as_ref().ok())
-                                .map(|access| access.online)
-                        })
-                };
-            let notification = self.active_notification(&did);
+        for (did, routes) in &evaluated.devices {
+            let did = did.clone();
+            let read_only = routes.read_only;
+            let usable = if read_only {
+                Vec::new()
+            } else {
+                routes.control.candidates.kinds()
+            };
+            let selected = routes.control.selected.clone().map(path_kind);
+            let usable_read = routes.read.candidates.kinds();
+            let selected_read = routes.read.selected.clone().map(path_kind);
+            let physical_online = routes.physical_online;
+            let notification = routes.notification_source;
             let old = previous_devices.iter().find(|device| device.did == did);
             let switched = old.is_some_and(|old| {
                 old.selected_control != selected
@@ -132,22 +89,8 @@ impl Context {
                 }
                 slot.last_switch_reason.clone()
             };
-            let unavailable_reason = (!self.device_path_available(&did)).then(|| {
-                format!(
-                    "hub: {}; direct: {}; cloud: {}",
-                    self.local_candidate(&did, false)
-                        .err()
-                        .expect("no local device path"),
-                    self.direct_candidate(&did)
-                        .err()
-                        .expect("no direct device path"),
-                    self.cloud_observation_candidate(&did, true)
-                        .expect_err("no cloud device path")
-                )
-            });
-            let sync_limited_reason = notification
-                .is_none()
-                .then(|| self.notification_reason(&did));
+            let unavailable_reason = routes.unavailable_reason.clone();
+            let sync_limited_reason = routes.sync_limited_reason.clone();
             let work = self.directory.borrow().devices[&did]
                 .admitted
                 .as_ref()
@@ -159,35 +102,34 @@ impl Context {
                 .functions()
                 .iter()
                 .map(|function| {
+                    let function_routes = &routes.functions[function.id()];
                     let notification_source =
-                        if self.is_virtual_group(&did) && function.lighting().is_some() {
+                        if routes.virtual_group && function.lighting().is_some() {
                             notification
                         } else {
-                            work.function_observer(function.id())
-                                .filter(|source| self.source_valid_for(&did, function.id(), source))
-                                .map(|source| match source {
-                                    super::notifications::NotificationSource::Local(_) => {
-                                        PathKind::Local
-                                    }
-                                    super::notifications::NotificationSource::Cloud(_) => {
-                                        PathKind::Cloud
-                                    }
-                                })
+                            function_routes
+                                .notification
+                                .active
+                                .as_ref()
+                                .map(|source| source.kind())
                         };
                     FunctionStatus {
                         function: function.id().to_owned(),
-                        selected_read: self.read_path_for(&did, function.id()).map(path_kind),
-                        low_speed: function.fan().and_then(|fan| fan.shared_speed()).map(|_| {
+                        selected_read: function_routes.read.selected.clone().map(path_kind),
+                        low_speed: function_routes.low_speed.as_ref().map(|choice| {
                             LowSpeedStatus {
-                                candidates: self.low_speed_candidate_paths(&did, function.id()),
-                                selected: self.low_speed_path(&did, function.id()).map(path_kind),
+                                candidates: choice.candidates.kinds(),
+                                selected: choice.selected.clone().map(path_kind),
                             }
                         }),
                         notification_source,
-                        sync_limited_reason: notification_source.is_none().then(|| {
-                            work.function_subscription_problem(function.id())
-                                .unwrap_or_else(|| self.notification_reason(&did))
-                        }),
+                        sync_limited_reason: if routes.virtual_group
+                            && function.lighting().is_some()
+                        {
+                            sync_limited_reason.clone()
+                        } else {
+                            function_routes.notification.sync_limited_reason.clone()
+                        },
                         read_problem: work.refresh.borrow().problem_for(function.id()),
                         observation_source: work.observation_source(function.id()),
                         subscriptions: if function.state().is_some() {
@@ -289,8 +231,14 @@ impl Context {
                     })
                 };
                 SharedFeedbackStatus {
-                    candidates: self.shared_feedback_candidate_paths(&did),
-                    selected_read: self.shared_feedback_read_path(&did).map(path_kind),
+                    candidates: routes.shared_feedback.as_ref().unwrap().candidates.kinds(),
+                    selected_read: routes
+                        .shared_feedback
+                        .as_ref()
+                        .unwrap()
+                        .selected
+                        .clone()
+                        .map(path_kind),
                     source: state.source,
                     pending: state.pending,
                     read_problem: work.refresh.borrow().input_problem(
@@ -341,7 +289,7 @@ impl Context {
             devices.push(DeviceStatus {
                 did,
                 lan,
-                direct_unavailable_reason: self.direct_candidate(&work.key.id).err(),
+                direct_unavailable_reason: routes.read.candidates.direct.as_ref().err().cloned(),
                 read_only,
                 usable_control_paths: usable,
                 selected_control: selected,
@@ -374,29 +322,6 @@ impl Context {
             .unwrap()
             .last_switch_reason = Some(reason.into());
         self.update_routing(reason);
-    }
-    fn notification_reason(&self, did: &str) -> String {
-        if self.is_virtual_group(did) {
-            return "member feedback unavailable or subscriptions not ready".into();
-        }
-        let work = self.directory.borrow().devices[did].admitted.clone();
-        if let Some(work) = work {
-            if work.notifications_preparing() {
-                return "notification subscriptions preparing".into();
-            }
-            if let Some(reason) = work.subscription_problem() {
-                return reason;
-            }
-        }
-        let local = match self.local_candidate(did, true) {
-            Ok(_) => "notification subscriptions not ready".into(),
-            Err(reason) => reason,
-        };
-        let cloud = match self.cloud_candidate(did, false) {
-            Ok(()) => "notifications disconnected or subscriptions not ready".into(),
-            Err(reason) => reason,
-        };
-        format!("hub notifications: {local}; cloud notifications: {cloud}")
     }
     pub(super) fn request_sync(&self) {
         self.sync_requested.set(true);

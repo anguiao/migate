@@ -1,7 +1,6 @@
 use super::{
     model::{AdapterError, PathKind, SubscriptionBinding},
     observations::{Observation, Origin},
-    routing::PathPriority,
     state::{Backoff, Context, Lifetime},
     tasks::TaskSet,
     work::{DeviceWork, OnlinePreparation},
@@ -23,7 +22,8 @@ mod delivery;
 mod selection;
 
 pub(super) use cloud::CloudSession;
-use cloud::{connection_key, connections, prepare_properties, reconcile_online};
+use cloud::{connections, prepare_properties, reconcile_online};
+pub(super) use selection::connection_matches;
 use selection::selections;
 
 #[derive(Clone)]

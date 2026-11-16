@@ -44,30 +44,9 @@ impl Context {
         self.update_device_availability(did);
         self.refresh_group_states(did);
     }
-    pub(in crate::xiaomi::adapter) fn device_path_available(&self, did: &str) -> bool {
-        self.control_path(did).is_some()
-            || self.observation_path(did).is_some()
-            || self
-                .directory
-                .borrow()
-                .devices
-                .get(did)
-                .and_then(|slot| slot.admitted.as_ref())
-                .is_some_and(|work| {
-                    work.native
-                        .device()
-                        .functions()
-                        .iter()
-                        .filter(|function| function.kind().is_read_only())
-                        .any(|function| {
-                            work.function_observer(function.id()).is_some_and(|source| {
-                                self.source_valid_for(did, function.id(), &source)
-                            })
-                        })
-                })
-    }
     pub(in crate::xiaomi::adapter) fn update_device_availability(&self, did: &str) {
-        let available = self.device_path_available(did);
+        let routes = self.device_routes(did);
+        let available = routes.available;
         let (work, blocked) = {
             let live = self.directory.borrow();
             let slot = &live.devices[did];
@@ -84,11 +63,9 @@ impl Context {
             )
         }) {
             let id = &function.function_key().id;
-            let read_available = self.read_path_for(did, id).is_some();
-            let source_available = read_available
-                || work
-                    .function_observer(id)
-                    .is_some_and(|source| self.source_valid_for(did, id, &source));
+            let function_routes = &routes.functions[id];
+            let read_available = function_routes.read.selected.is_some();
+            let source_available = read_available || function_routes.notification.active.is_some();
             let had_source = function
                 .snapshot()
                 .temperature_source()

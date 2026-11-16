@@ -45,6 +45,7 @@ mod groups;
 mod network;
 mod peer;
 mod rig;
+mod routing;
 
 pub(super) use cloud_peer::{
     CloudBroker, CloudPeer, cloud_active, with_cloud_peer, with_cloud_rig, with_cloud_sensors,

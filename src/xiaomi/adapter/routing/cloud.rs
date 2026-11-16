@@ -7,27 +7,7 @@ impl Context {
         self.cloud_authentication().is_ok()
     }
     pub(in crate::xiaomi::adapter) fn cloud_authentication(&self) -> Result<(), String> {
-        if self.lan_scope_invalid.get() {
-            return Err("account/home scope revoked".into());
-        }
-        if !self.token_usable() {
-            return Err("credentials unavailable, expired or rejected".into());
-        }
-        let directory = self.directory.borrow();
-        if !self
-            .credentials
-            .borrow()
-            .record()
-            .is_some_and(|credentials| {
-                directory
-                    .scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.uid == credentials.uid)
-            })
-        {
-            return Err("account/home identity mismatch".into());
-        }
-        Ok(())
+        self.cloud_authentication_at(self.clock.unix_now())
     }
     pub(in crate::xiaomi::adapter) fn ha_key(&self) -> Option<super::HaKey> {
         self.credentials.borrow().ha_key()

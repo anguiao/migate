@@ -1,130 +1,40 @@
 use super::*;
 
+pub(in crate::xiaomi::adapter) fn connection_matches(
+    session: &CloudSession,
+    record: &XiaomiRecord,
+    key: &super::super::routing::HaKey,
+    home: &str,
+) -> bool {
+    let Some(authorization) = record.ha_authorization() else {
+        return false;
+    };
+    session.key.uid == record.uid
+        && session.key.generation == key.generation
+        && session.key.token == authorization.tokens.access_token
+        && session.key.client == record.ha.client_uuid
+        && session.key.home == home
+}
+
 impl Context {
-    pub(in crate::xiaomi::adapter) fn active_notification(
-        &self,
-        did: &str,
-    ) -> Option<super::super::model::PathKind> {
-        if self.is_virtual_group(did) {
-            self.control_path(did)?;
-            let graph = self.graph.borrow().clone();
-            let group = graph.rules.get(did)?;
-            if group.members.len() != group.confirmed_members {
-                return None;
-            }
-            return group.members.iter().try_fold(
-                super::super::model::PathKind::Local,
-                |path, member| {
-                    let member_path = if self.is_virtual_group(&member.device.id) {
-                        self.active_notification(&member.device.id)?
-                    } else {
-                        let work = self
-                            .directory
-                            .borrow()
-                            .devices
-                            .get(&member.device.id)?
-                            .admitted
-                            .clone()?;
-                        let source = work.function_observer(&member.id)?;
-                        if !self.source_valid_for(&member.device.id, &member.id, &source) {
-                            return None;
-                        }
-                        match source {
-                            NotificationSource::Local(_) => super::super::model::PathKind::Local,
-                            NotificationSource::Cloud(_) => super::super::model::PathKind::Cloud,
-                        }
-                    };
-                    Some(if member_path == super::super::model::PathKind::Cloud {
-                        member_path
-                    } else {
-                        path
-                    })
-                },
-            );
-        }
-        let work = self
-            .directory
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.admitted.clone())?;
-        let source = work
-            .native
-            .device()
-            .functions()
-            .iter()
-            .find_map(|function| {
-                work.function_observer(function.id())
-                    .filter(|source| self.source_valid_for(did, function.id(), source))
-            })?;
-        Some(match source {
-            NotificationSource::Local(_) => super::super::model::PathKind::Local,
-            NotificationSource::Cloud(_) => super::super::model::PathKind::Cloud,
-        })
-    }
     pub(in crate::xiaomi::adapter) fn current_notifications(
         &self,
         handle: &NotificationHandle,
     ) -> bool {
-        self.notifications.borrow().as_ref().is_some_and(|session| {
-            session.handle.same_connection(handle)
-                && connection_key(self).is_some_and(|key| key == session.key)
-        })
+        self.notification_handle_at(self.clock.unix_now())
+            .is_some_and(|current| current.same_connection(handle))
     }
     pub(in crate::xiaomi::adapter) fn notification_source(
         &self,
         did: &str,
         id: &str,
     ) -> Option<NotificationSource> {
-        // Virtual groups derive their state from ordinary member subscriptions.
-        if self.is_virtual_group(did) {
-            return None;
-        }
-        let work = self
-            .directory
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.admitted.clone());
-        let local = self
-            .local_candidate(did, true)
-            .ok()
-            .filter(|handle| {
-                work.as_ref()
-                    .is_some_and(|work| work.local_attached(handle))
-            })
-            .map(NotificationSource::Local);
-        let cloud = if self.function_cloud_candidate(did, id, false).is_ok() {
-            self.notifications
-                .borrow()
-                .as_ref()
-                .filter(|session| self.current_notifications(&session.handle))
-                .and_then(|session| {
-                    work.as_ref()
-                        .filter(|work| work.cloud_attached(&session.handle))
-                        .map(|_| NotificationSource::Cloud(session.handle.clone()))
-                })
-        } else {
-            None
-        };
-        let local_failed = work.as_ref().is_some_and(|work| {
-            work.local_exhausted()
-                && !local
-                    .as_ref()
-                    .is_some_and(|source| work.source_ready(id, source))
-        });
-        let cloud_failed = work.as_ref().is_some_and(|work| {
-            work.cloud_exhausted()
-                && !cloud
-                    .as_ref()
-                    .is_some_and(|source| work.source_ready(id, source))
-        });
-        let local = local.filter(|_| !local_failed);
-        let cloud = cloud.filter(|_| !cloud_failed);
-        match self.priority() {
-            PathPriority::LocalFirst => local.or(cloud),
-            PathPriority::CloudFirst => cloud.or(local),
-        }
+        self.device_routes(did)
+            .functions
+            .get(id)?
+            .notification
+            .desired
+            .clone()
     }
     pub(in crate::xiaomi::adapter) fn source_valid_for(
         &self,
@@ -132,31 +42,10 @@ impl Context {
         id: &str,
         source: &NotificationSource,
     ) -> bool {
-        if self.is_virtual_group(did) {
-            return false;
-        }
-        let work = self
-            .directory
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.admitted.clone());
-        match source {
-            NotificationSource::Local(handle) => {
-                self.local_candidate(did, true)
-                    .is_ok_and(|candidate| candidate.same_connection(handle))
-                    && work
-                        .as_ref()
-                        .is_some_and(|work| work.local_attached(handle))
-            }
-            NotificationSource::Cloud(handle) => {
-                self.function_cloud_candidate(did, id, false).is_ok()
-                    && self.current_notifications(handle)
-                    && work
-                        .as_ref()
-                        .is_some_and(|work| work.cloud_attached(handle))
-            }
-        }
+        self.device_routes(did)
+            .functions
+            .get(id)
+            .is_some_and(|function| function.notification.valid(source))
     }
 }
 
@@ -193,18 +82,19 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     }
     work.reconcile_state_reads(context);
     let retry = work.take_subscription_retry();
+    let routes = context.device_routes(&did);
     let mut keep_local = false;
     let mut keep_cloud = false;
     for id in work.channels() {
         if let Some(old) = work.function_observer(&id)
-            && !context.source_valid_for(&did, &id, &old)
+            && !routes.functions[&id].notification.valid(&old)
         {
             work.revoke_observer(&id);
             context.update_device_availability(&did);
             context.refresh_group_states(&did);
             context.update_routing("notification source access conditions invalidated");
         }
-        let desired = context.notification_source(&did, &id);
+        let desired = routes.functions[&id].notification.desired.clone();
         if let Some(desired) = desired {
             keep_local |= matches!(desired, NotificationSource::Local(_));
             keep_cloud |= matches!(desired, NotificationSource::Cloud(_));
@@ -230,7 +120,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         {
             if let Ok(handle) = context.local_candidate(&did, true) {
                 let source = NotificationSource::Local(handle);
-                keep_local |= context.source_valid_for(&did, &id, &source)
+                keep_local |= routes.functions[&id].notification.valid(&source)
                     && work.source_binding_ready(&source, binding);
             }
             if let Some(handle) = context
@@ -240,7 +130,7 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
                 .map(|session| session.handle.clone())
             {
                 let source = NotificationSource::Cloud(handle);
-                keep_cloud |= context.source_valid_for(&did, &id, &source)
+                keep_cloud |= routes.functions[&id].notification.valid(&source)
                     && work.source_binding_ready(&source, binding);
             }
         }
