@@ -2,7 +2,6 @@ mod air_conditioner;
 pub(crate) mod app_source;
 mod bhf;
 mod bhf_direct;
-mod bhf_direct_operations;
 mod bootstrap;
 mod cloud_batch;
 mod cloud_refresh;

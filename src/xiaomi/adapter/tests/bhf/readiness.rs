@@ -69,3 +69,32 @@ fn initial_reads_include_the_shared_group_until_success_or_failure() {
         }));
     }
 }
+
+#[test]
+fn a_malformed_fan_switch_is_a_property_read_failure() {
+    let (rig, listener, cloud) = rig();
+    rig.cloud
+        .lock()
+        .unwrap()
+        .raw_values
+        .insert((DID.into(), 3, 2), json!("on"));
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            let device = work(&c);
+            eventually(|| {
+                device
+                    .refresh
+                    .borrow()
+                    .property_problem(BLOW, BLOW_POWER)
+                    .is_some()
+            })
+            .await;
+            assert!(device.refresh.borrow().initial_complete(BLOW, BLOW_POWER));
+            assert_eq!(
+                function(&c, BLOW).snapshot().fan().unwrap().power.value,
+                None
+            );
+        })
+        .await;
+    }));
+}

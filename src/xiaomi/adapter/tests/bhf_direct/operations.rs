@@ -1,79 +1,12 @@
 use super::*;
-use crate::{
-    device::FanCommand,
-    storage::LanRecord,
-    xiaomi::{
-        adapter::{StepReceipt, model::PathKind},
-        capability::{PropertyBinding, ReadInput, SHARED_FEEDBACK_CHANNEL},
-        lan::{Token, tests::support::LegacyDevice},
-    },
+use super::{direct_methods as direct_requests, setup_instance as setup};
+use crate::xiaomi::{
+    adapter::StepReceipt,
+    capability::{ReadInput, SHARED_FEEDBACK_CHANNEL},
 };
-use std::sync::atomic::Ordering;
 
-const DID: &str = "743765151";
-const MODEL: &str = "yeelink.bhf_light.v13";
-const BLOW: &str = "fan:3:2";
-const HEATER: &str = "heater:3";
-const BLOW_POWER: PropertyBinding = PropertyBinding { siid: 3, piid: 2 };
-const VENTILATION_POWER: PropertyBinding = PropertyBinding { siid: 3, piid: 4 };
-const HEATING: PropertyBinding = PropertyBinding { siid: 3, piid: 3 };
 const TARGET: PropertyBinding = PropertyBinding { siid: 3, piid: 8 };
 const MODE: PropertyBinding = PropertyBinding { siid: 3, piid: 1 };
-
-fn v13() -> Value {
-    serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/yeelink-bhf-light-v13.json"
-    ))
-    .unwrap()
-}
-
-fn setup(instance: Value) -> (Rig, LegacyDevice) {
-    let rig =
-        Rig::custom_lights(&[(DID, MODEL, instance)]).with_stall_timeout(Duration::from_secs(20));
-    let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
-    let peer = LegacyDevice::bhf_v13(token.clone(), DID.parse().unwrap());
-    rig.store
-        .lan()
-        .save(&LanRecord {
-            scope: rig
-                .store
-                .devices()
-                .load_configuration()
-                .unwrap()
-                .scope
-                .unwrap(),
-            did: DID.into(),
-            model: MODEL.into(),
-            address: "127.0.0.1".parse().unwrap(),
-            token,
-        })
-        .unwrap();
-    rig.network.lan_port.set(peer.address.port());
-    rig.clock.automatic.store(true, Ordering::Relaxed);
-    (rig, peer)
-}
-
-fn function(c: &Control, id: &str) -> crate::device::Function {
-    super::support::function(&c.context.registry, DID, id)
-}
-
-fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {
-    c.context.directory.borrow().devices[DID]
-        .admitted
-        .as_ref()
-        .unwrap()
-        .clone()
-}
-
-fn direct_requests(peer: &LegacyDevice, method: &str) -> Vec<Value> {
-    peer.requests
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|request| request["method"] == method)
-        .cloned()
-        .collect()
-}
 
 fn status_text(c: &Control) -> String {
     let status = crate::terminal::AuthStatus::new(
@@ -111,23 +44,6 @@ async fn settle(c: &Control) {
     })
     .await;
     c.clock.automatic.store(false, Ordering::Relaxed);
-}
-
-fn standard_peer() -> Rc<Peer> {
-    let peer = Rc::new(Peer::default());
-    for (binding, value) in [
-        (PropertyBinding { siid: 2, piid: 1 }, json!(false)),
-        (PropertyBinding { siid: 2, piid: 2 }, json!(0)),
-        (PropertyBinding { siid: 2, piid: 3 }, json!(50)),
-        (BLOW_POWER, json!(true)),
-        (VENTILATION_POWER, json!(true)),
-        (HEATING, json!(false)),
-        (TARGET, json!(25)),
-        (MODE, json!(0)),
-    ] {
-        peer.value(DID, binding, value);
-    }
-    peer
 }
 
 #[test]
