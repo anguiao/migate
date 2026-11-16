@@ -3,7 +3,6 @@
 use super::choices::{Operation, select};
 use super::{DeviceWork, NotificationHandle, NotificationSource, PathPriority, Rc, SessionHandle};
 
-#[derive(Clone)]
 pub(in crate::xiaomi::adapter) struct NotificationRoutes {
     local: Option<NotificationSource>,
     cloud: Option<NotificationSource>,
@@ -21,30 +20,31 @@ impl NotificationRoutes {
     }
 }
 
+pub(super) struct NotificationBindings {
+    local: Option<NotificationSource>,
+    cloud: Option<NotificationSource>,
+    local_ready: bool,
+    cloud_ready: bool,
+    pub(super) active: Option<NotificationSource>,
+}
+
 pub(super) struct NotificationFacts<'a> {
     work: Option<&'a DeviceWork>,
     priority: PathPriority,
     local: Option<NotificationSource>,
     cloud: Option<NotificationSource>,
-    local_exhausted: bool,
-    cloud_exhausted: bool,
     virtual_group: bool,
-    preparing: bool,
-    problem: Option<String>,
-    hub_problem: Option<String>,
 }
 
 impl<'a> NotificationFacts<'a> {
     pub(super) fn new(
         work: Option<&'a Rc<DeviceWork>>,
-        hub: &Result<SessionHandle, String>,
+        hub: Option<&SessionHandle>,
         cloud: Option<&NotificationHandle>,
         virtual_group: bool,
         priority: PathPriority,
     ) -> Self {
         let local = hub
-            .as_ref()
-            .ok()
             .filter(|handle| !virtual_group && work.is_some_and(|work| work.local_attached(handle)))
             .cloned()
             .map(NotificationSource::Local);
@@ -58,26 +58,18 @@ impl<'a> NotificationFacts<'a> {
             local,
             cloud,
             virtual_group,
-            local_exhausted: work.is_some_and(|work| work.local_exhausted()),
-            cloud_exhausted: work.is_some_and(|work| work.cloud_exhausted()),
-            preparing: work.is_some_and(|work| work.notifications_preparing()),
-            problem: work.and_then(|work| work.subscription_problem()),
-            hub_problem: hub.as_ref().err().cloned(),
         }
     }
 
-    pub(super) fn reason(&self, cloud: &Result<(), String>) -> String {
+    pub(super) fn reason(&self, cloud: &Result<(), String>, hub_problem: Option<&str>) -> String {
         if self.virtual_group {
             "member feedback unavailable or subscriptions not ready".into()
-        } else if self.preparing {
+        } else if self.work.is_some_and(|work| work.notifications_preparing()) {
             "notification subscriptions preparing".into()
-        } else if let Some(problem) = &self.problem {
-            problem.clone()
+        } else if let Some(problem) = self.work.and_then(|work| work.subscription_problem()) {
+            problem
         } else {
-            let hub = self
-                .hub_problem
-                .as_deref()
-                .unwrap_or("notification subscriptions not ready");
+            let hub = hub_problem.unwrap_or("notification subscriptions not ready");
             let cloud = cloud
                 .as_ref()
                 .err()
@@ -87,33 +79,16 @@ impl<'a> NotificationFacts<'a> {
         }
     }
 
-    pub(super) fn function(
-        &self,
-        id: &str,
-        eligibility: &Result<(), String>,
-    ) -> NotificationRoutes {
+    pub(super) fn bindings(&self, id: &str, cloud_eligible: bool) -> NotificationBindings {
         let work = self.work.expect("installed notification bindings");
         let local = self.local.clone();
-        let cloud = self.cloud.clone().filter(|_| eligibility.is_ok());
+        let cloud = self.cloud.clone().filter(|_| cloud_eligible);
         let local_ready = local
             .as_ref()
             .is_some_and(|source| work.source_ready(id, source));
         let cloud_ready = cloud
             .as_ref()
             .is_some_and(|source| work.source_ready(id, source));
-        let desired_local = local
-            .clone()
-            .filter(|_| !self.local_exhausted || local_ready);
-        let desired_cloud = cloud
-            .clone()
-            .filter(|_| !self.cloud_exhausted || cloud_ready);
-        let desired = select(
-            self.priority,
-            Operation::Control,
-            desired_local,
-            None,
-            desired_cloud,
-        );
         let active = work.function_observer(id).filter(|source| {
             local
                 .as_ref()
@@ -122,9 +97,42 @@ impl<'a> NotificationFacts<'a> {
                     .as_ref()
                     .is_some_and(|candidate| cloud_ready && candidate.same(source))
         });
+        NotificationBindings {
+            local,
+            cloud,
+            local_ready,
+            cloud_ready,
+            active,
+        }
+    }
+
+    pub(super) fn function(
+        &self,
+        id: &str,
+        eligibility: &Result<(), String>,
+        bindings: &NotificationBindings,
+        hub_problem: Option<&str>,
+    ) -> NotificationRoutes {
+        let work = self.work.expect("installed notification bindings");
+        let local = bindings.local.clone();
+        let cloud = bindings.cloud.clone();
+        let desired_local = local
+            .clone()
+            .filter(|_| !work.local_exhausted() || bindings.local_ready);
+        let desired_cloud = cloud
+            .clone()
+            .filter(|_| !work.cloud_exhausted() || bindings.cloud_ready);
+        let desired = select(
+            self.priority,
+            Operation::Control,
+            desired_local,
+            None,
+            desired_cloud,
+        );
+        let active = bindings.active.clone();
         let sync_limited_reason = active.is_none().then(|| {
             work.function_subscription_problem(id)
-                .unwrap_or_else(|| self.reason(eligibility))
+                .unwrap_or_else(|| self.reason(eligibility, hub_problem))
         });
         NotificationRoutes {
             local,

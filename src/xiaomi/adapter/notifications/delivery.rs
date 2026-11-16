@@ -33,22 +33,25 @@ impl Context {
                 && selected
                 && self.source_valid_for(did, id, source)
                 && work.source_binding_ready(source, binding)
+                && work
+                    .observe_relay_mode(
+                        function,
+                        binding,
+                        value,
+                        Observation {
+                            source: source.kind(),
+                            source_time: update_time,
+                            received_at: self.clock.unix_now(),
+                        },
+                        if cached_report {
+                            Origin::Cache
+                        } else {
+                            Origin::Notification
+                        },
+                    )
+                    .is_ok()
             {
-                let _ = work.observe_relay_mode(
-                    function,
-                    binding,
-                    value,
-                    Observation {
-                        source: source.kind(),
-                        source_time: update_time,
-                        received_at: self.clock.unix_now(),
-                    },
-                    if cached_report {
-                        Origin::Cache
-                    } else {
-                        Origin::Notification
-                    },
-                );
+                self.status_changed.notify(usize::MAX);
             }
             return;
         }
@@ -64,7 +67,6 @@ impl Context {
                 .is_some_and(|active| active.same(source))
         {
             if work.observe_relay_power_notification(function.id(), value, source.kind()) {
-                self.update_routing("relay power observed");
                 self.status_changed.notify(usize::MAX);
             }
             return;
@@ -121,7 +123,6 @@ impl Context {
                 {
                     work.refresh_related_inputs(scope);
                 }
-                self.update_routing("native mode property observed");
                 self.status_changed.notify(usize::MAX);
             }
             return;
@@ -149,7 +150,6 @@ impl Context {
                             Origin::Notification
                         },
                     );
-                    self.update_routing("mcn04 property observed");
                     self.status_changed.notify(usize::MAX);
                 }
                 return;
@@ -172,7 +172,6 @@ impl Context {
                         Origin::Notification
                     },
                 );
-                self.update_routing("air-conditioner property observed");
                 self.status_changed.notify(usize::MAX);
             }
             return;
@@ -200,7 +199,6 @@ impl Context {
                         Origin::Notification
                     },
                 );
-                self.update_routing("heater property observed");
                 if !cached_report
                     && applied
                     && let Some(scope) = work.related_scope_for_notification(function.id(), binding)
@@ -234,7 +232,6 @@ impl Context {
                         Origin::Notification
                     },
                 );
-                self.update_routing("fan property observed");
                 if !cached_report
                     && applied
                     && let Some(scope) = work.related_scope_for_notification(function.id(), binding)
@@ -268,7 +265,6 @@ impl Context {
                         Origin::Notification
                     },
                 );
-                self.update_routing("curtain property observed");
                 self.status_changed.notify(usize::MAX);
             }
             return;
@@ -298,7 +294,6 @@ impl Context {
                         Origin::Notification
                     },
                 );
-                self.update_routing("state property observed");
                 self.status_changed.notify(usize::MAX);
             }
             return;
@@ -310,7 +305,6 @@ impl Context {
                 .function_observer(id)
                 .is_some_and(|active| active.same(source))
         {
-            let battery_problem = work.battery_problem();
             let changed = work.notify_value_at(
                 binding,
                 value,
@@ -319,9 +313,7 @@ impl Context {
                 self.is_independent_light(did, id),
                 self.clock.unix_now(),
             );
-            if work.battery_problem() != battery_problem {
-                self.status_changed.notify(usize::MAX);
-            }
+            self.status_changed.notify(usize::MAX);
             if changed && !self.is_group(did) {
                 self.refresh_group_states(did);
             }
@@ -360,7 +352,11 @@ impl Context {
                 work.install_state_observer(id, source.clone());
             }
             self.update_device_availability(did);
-            self.note_notification_switch(did, "state notification established source baseline");
+            self.note_notification_switch(
+                did,
+                id,
+                "state notification established source baseline",
+            );
             return true;
         }
         false
@@ -396,7 +392,6 @@ impl Context {
                 },
                 Origin::Notification,
             );
-            self.update_routing("native motion event observed");
             self.status_changed.notify(usize::MAX);
         }
     }
@@ -421,7 +416,7 @@ impl Context {
         }
         // Online reports only update this path's access, never HTTP/auth suspension.
         self.update_availability(did);
-        self.update_routing("cloud online conditions changed");
+        self.update_device_routing(did, "cloud online conditions changed");
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
     }

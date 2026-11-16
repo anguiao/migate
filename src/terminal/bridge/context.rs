@@ -73,13 +73,8 @@ impl View {
         self.current.devices()
     }
 
-    pub(super) fn render_status(
-        &self,
-        status: &AuthStatus,
-        diagnostics: &AdapterStatus,
-        now: i64,
-    ) -> String {
-        let mut report = status.render_adapter(diagnostics, now);
+    pub(super) fn render_status(&self, status: &AuthStatus, diagnostics: &AdapterStatus) -> String {
+        let mut report = status.render_adapter(diagnostics);
         let _ = write!(
             report,
             "\nConfiguration: root version {}{}.",
@@ -100,10 +95,9 @@ impl View {
         &self,
         status: &AuthStatus,
         diagnostics: &AdapterStatus,
-        now: i64,
         did: Option<&str>,
     ) -> String {
-        let mut report = self.render_status(status, diagnostics, now);
+        let mut report = self.render_status(status, diagnostics);
         super::super::status::append_devices(&mut report, diagnostics, did);
         report
     }

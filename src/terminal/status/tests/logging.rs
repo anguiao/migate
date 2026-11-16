@@ -55,6 +55,7 @@ fn startup_login_command_is_a_single_prefixed_log_record() {
         .local_status()
         .unwrap();
     let mut adapter = AdapterStatus {
+        certificate_status: None,
         auth: report,
         gateway: GatewayStatus::Connected(gateway.clone()),
         catalog_problem: None,

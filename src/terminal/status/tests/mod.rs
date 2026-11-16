@@ -55,6 +55,7 @@ fn connected_gateway_keeps_authentication_and_catalog_diagnostics_visible() {
         "/data".into(),
     );
     let adapter = AdapterStatus {
+        certificate_status: None,
         auth: AuthReport::for_test(
             AuthenticationState::SignInRequired(
                 crate::xiaomi::auth::FailureReason::AccountIdentityMismatch,
@@ -69,7 +70,7 @@ fn connected_gateway_keeps_authentication_and_catalog_diagnostics_visible() {
         routing: Default::default(),
         devices: Vec::new(),
     };
-    let report = status.render_adapter(&adapter, 0);
+    let report = status.render_adapter(&adapter);
     assert!(report.contains("HA OAuth: sign-in required"));
     assert!(report.contains("auth login"));
     assert!(report.contains("Gateway: connected (gateway)."));
@@ -158,6 +159,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
     );
     let status = AuthStatus::new(report.clone(), "/bin/migate".into(), "/data".into());
     let adapter = AdapterStatus {
+        certificate_status: None,
         auth: report,
         gateway: GatewayStatus::Connected("gateway".into()),
         catalog_problem: None,
@@ -215,7 +217,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
             }],
         }],
     };
-    let mut output = status.render_adapter(&adapter, 1_700_000_000);
+    let mut output = status.render_adapter(&adapter);
     append_devices(&mut output, &adapter, None);
     assert!(
         output.contains("Routing: fallback-first; hub connected."),
@@ -244,7 +246,7 @@ fn routing_status_distinguishes_selected_control_from_the_actual_command_path() 
         output.contains("Device last switch: hub reported device one offline or missing."),
         "{output}"
     );
-    let help = status.render_adapter(&adapter, 1_700_000_000);
+    let help = status.render_adapter(&adapter);
     assert!(help.contains("Routing: fallback-first"));
     assert!(!help.contains("command #"));
     assert!(!help.contains("one routing:"));
@@ -261,6 +263,7 @@ fn routing_status_displays_disconnection_unsent_work_and_previous_acceptance() {
     );
     let status = AuthStatus::new(report.clone(), "/bin/migate".into(), "/data".into());
     let adapter = AdapterStatus {
+        certificate_status: None,
         auth: report,
         gateway: GatewayStatus::Unavailable("transport disconnected".into()),
         catalog_problem: None,
@@ -314,7 +317,7 @@ fn routing_status_displays_disconnection_unsent_work_and_previous_acceptance() {
             }],
         }],
     };
-    let mut output = status.render_adapter(&adapter, 0);
+    let mut output = status.render_adapter(&adapter);
     append_devices(&mut output, &adapter, Some("one"));
     assert!(output.contains("hub disconnected."), "{output}");
     assert!(output.contains("Usable control paths: none."), "{output}");

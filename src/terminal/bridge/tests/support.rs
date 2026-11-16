@@ -188,6 +188,7 @@ pub(crate) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
 
 pub(super) fn diagnostics() -> AdapterStatus {
     AdapterStatus {
+        certificate_status: None,
         auth: AuthReport::for_test(
             AuthenticationState::NotSignedIn,
             None,

@@ -1,101 +1,34 @@
 use super::{
     model::{
         AdapterStatus, DeviceStatus, DiagnosticObservation, FunctionStatus, GatewayStatus,
-        LowSpeedStatus, ObservedPropertyStatus, PathKind, RoutingStatus, SharedFanSpeedStatus,
+        LowSpeedStatus, ObservedPropertyStatus, RoutingStatus, SharedFanSpeedStatus,
         SharedFeedbackStatus, SubscriptionBinding,
     },
-    routing::ControlPath,
     state::Context,
     work::DeviceWork,
 };
 use crate::xiaomi::capability::PropertyBinding;
 
-fn path_kind(path: ControlPath) -> PathKind {
-    path.kind()
-}
+pub(super) mod history;
 
 impl Context {
     pub(super) fn diagnostics(&self) -> AdapterStatus {
-        self.update_routing("access conditions changed");
-        let cached = self.status.borrow();
-        AdapterStatus {
-            auth: self.auth_report(),
-            gateway: self.hub.borrow().gateway().clone(),
-            catalog_problem: self.catalog_problem(),
-            pending: self.pending_devices(),
-            routing: cached.routing.clone(),
-            devices: cached.devices.clone(),
-        }
-    }
-    pub(super) fn update_routing(&self, reason: &str) {
         let now = self.clock.unix_now();
         let evaluated = self.routing_evaluation_at(now);
-        // Eligibility can change at a deadline before its maintenance task is polled.
-        let reason = if reason == "access conditions changed" {
-            let expired = self.credentials.borrow().token_expired(now);
-            if expired {
-                "access token expired"
-            } else if self.hub.borrow().session().is_some()
-                && self
-                    .credentials
-                    .borrow()
-                    .certificate_validity()
-                    .is_some_and(|validity| validity.not_after <= now)
-            {
-                "hub certificate expired"
-            } else {
-                reason
-            }
-        } else {
-            reason
-        };
-        let previous = self.status.borrow();
-        let previous_routing = previous.routing.clone();
-        let previous_devices = previous.devices.clone();
-        drop(previous);
-        let mut routing = RoutingStatus {
-            priority: evaluated.priority,
+        let routing = RoutingStatus {
+            priority: evaluated.summaries.priority,
             local_connected: evaluated.local_connected,
-            last_switch_reason: previous_routing.last_switch_reason.clone(),
+            last_switch_reason: self.routing_history.borrow().reason.clone(),
         };
-        if routing.priority != previous_routing.priority {
-            routing.last_switch_reason = Some(reason.into());
-        }
-        let mut devices = Vec::new();
-        for (did, routes) in &evaluated.devices {
-            let did = did.clone();
-            let read_only = routes.read_only;
-            let usable = if read_only {
-                Vec::new()
-            } else {
-                routes.control.candidates.kinds()
-            };
-            let selected = routes.control.selected.clone().map(path_kind);
-            let usable_read = routes.read.candidates.kinds();
-            let selected_read = routes.read.selected.clone().map(path_kind);
-            let physical_online = routes.physical_online;
-            let notification = routes.notification_source;
-            let old = previous_devices.iter().find(|device| device.did == did);
-            let switched = old.is_some_and(|old| {
-                old.selected_control != selected
-                    || old.selected_read != selected_read
-                    || old.notification_source != notification
-            });
-            let last_switch_reason = {
-                let mut live = self.directory.borrow_mut();
-                let slot = live.devices.get_mut(&did).unwrap();
-                if switched {
-                    slot.last_switch_reason = Some(reason.into());
-                }
-                slot.last_switch_reason.clone()
-            };
-            let unavailable_reason = routes.unavailable_reason.clone();
-            let sync_limited_reason = routes.sync_limited_reason.clone();
-            let work = self.directory.borrow().devices[&did]
-                .admitted
-                .as_ref()
-                .unwrap()
-                .clone();
+        let directory = self.directory.borrow();
+        let mut devices = Vec::with_capacity(evaluated.devices.len());
+        for (did, routes) in evaluated.devices {
+            let slot = &directory.devices[&did];
+            let work = slot.admitted.as_ref().unwrap();
+            let last_switch_reason = evaluated.summaries.devices[&did]
+                .deadline
+                .map(|deadline| deadline.reason().into())
+                .or_else(|| slot.last_switch_reason.clone());
             let functions = work
                 .native
                 .device()
@@ -103,30 +36,28 @@ impl Context {
                 .iter()
                 .map(|function| {
                     let function_routes = &routes.functions[function.id()];
-                    let notification_source =
-                        if routes.virtual_group && function.lighting().is_some() {
-                            notification
-                        } else {
-                            function_routes
-                                .notification
-                                .active
-                                .as_ref()
-                                .map(|source| source.kind())
-                        };
+                    let group_light = routes.virtual_group && function.lighting().is_some();
+                    let notification_source = if group_light {
+                        routes.notification_source
+                    } else {
+                        function_routes
+                            .notification
+                            .active
+                            .as_ref()
+                            .map(|source| source.kind())
+                    };
                     FunctionStatus {
                         function: function.id().to_owned(),
-                        selected_read: function_routes.read.selected.clone().map(path_kind),
+                        selected_read: function_routes.read.selected_kind(),
                         low_speed: function_routes.low_speed.as_ref().map(|choice| {
                             LowSpeedStatus {
                                 candidates: choice.candidates.kinds(),
-                                selected: choice.selected.clone().map(path_kind),
+                                selected: choice.selected_kind(),
                             }
                         }),
                         notification_source,
-                        sync_limited_reason: if routes.virtual_group
-                            && function.lighting().is_some()
-                        {
-                            sync_limited_reason.clone()
+                        sync_limited_reason: if group_light {
+                            routes.sync_limited_reason.clone()
                         } else {
                             function_routes.notification.sync_limited_reason.clone()
                         },
@@ -139,7 +70,7 @@ impl Context {
                         },
                         properties: if let Some((mode, _)) = function.relay_mode() {
                             property_statuses(
-                                &work,
+                                work,
                                 function.id(),
                                 [("Power", function.power().unwrap()), ("Mode", mode)],
                             )
@@ -162,7 +93,7 @@ impl Context {
                                 bindings.push(("Control range", Some(patch.range)));
                             }
                             property_statuses(
-                                &work,
+                                work,
                                 function.id(),
                                 bindings.into_iter().filter_map(|(name, binding)| {
                                     binding.map(|binding| (name, binding))
@@ -170,7 +101,7 @@ impl Context {
                             )
                         } else if let Some(heater) = function.heater() {
                             property_statuses(
-                                &work,
+                                work,
                                 function.id(),
                                 [
                                     ("Power", heater.power()),
@@ -179,7 +110,7 @@ impl Context {
                             )
                         } else if let Some(fan) = function.fan() {
                             property_statuses(
-                                &work,
+                                work,
                                 function.id(),
                                 [
                                     ("Power", Some(fan.power())),
@@ -194,7 +125,7 @@ impl Context {
                             )
                         } else if let Some(curtain) = function.curtain() {
                             property_statuses(
-                                &work,
+                                work,
                                 function.id(),
                                 [
                                     ("Current position", curtain.current().property()),
@@ -220,6 +151,7 @@ impl Context {
                     })
             });
             let shared_feedback = work.native.plan().shared_feedback().map(|plan| {
+                let route = routes.shared_feedback.as_ref().unwrap();
                 let state = work.shared_feedback();
                 let field = |value: &Option<super::model::NativeValueObservation>| {
                     value.as_ref().map(|value| DiagnosticObservation {
@@ -231,14 +163,8 @@ impl Context {
                     })
                 };
                 SharedFeedbackStatus {
-                    candidates: routes.shared_feedback.as_ref().unwrap().candidates.kinds(),
-                    selected_read: routes
-                        .shared_feedback
-                        .as_ref()
-                        .unwrap()
-                        .selected
-                        .clone()
-                        .map(path_kind),
+                    candidates: route.candidates.kinds(),
+                    selected_read: route.selected_kind(),
                     source: state.source,
                     pending: state.pending,
                     read_problem: work.refresh.borrow().input_problem(
@@ -275,9 +201,8 @@ impl Context {
                 .functions()
                 .iter()
                 .filter(|function| function.kind().is_control())
-                .map(|function| function.id().to_owned())
-                .collect::<Vec<_>>();
-            let mut commands = self.commands.snapshot(&did, channels.into_iter());
+                .map(|function| function.id().to_owned());
+            let mut commands = self.commands.snapshot(&did, channels);
             for command in &mut commands {
                 command.light_actions = work
                     .physical()
@@ -285,20 +210,19 @@ impl Context {
                     .unwrap()
                     .light_action_diagnostics();
             }
-            let lan = self.directory.borrow().devices[&did].lan.status.clone();
             devices.push(DeviceStatus {
                 did,
-                lan,
-                direct_unavailable_reason: routes.read.candidates.direct.as_ref().err().cloned(),
-                read_only,
-                usable_control_paths: usable,
-                selected_control: selected,
-                usable_read_paths: usable_read,
-                selected_read,
-                physical_online,
-                notification_source: notification,
-                unavailable_reason,
-                sync_limited_reason,
+                lan: slot.lan.status.clone(),
+                read_only: routes.read_only,
+                usable_control_paths: routes.control.candidates.kinds(),
+                selected_control: routes.control.selected_kind(),
+                usable_read_paths: routes.read.candidates.kinds(),
+                selected_read: routes.read.selected_kind(),
+                direct_unavailable_reason: routes.read.candidates.direct.err(),
+                physical_online: routes.physical_online,
+                notification_source: routes.notification_source,
+                unavailable_reason: routes.unavailable_reason,
+                sync_limited_reason: routes.sync_limited_reason,
                 battery_problem,
                 last_switch_reason,
                 standard_mode,
@@ -307,21 +231,16 @@ impl Context {
                 functions,
             });
         }
-        let mut current = self.status.borrow_mut();
-        if current.routing != routing || current.devices != devices {
-            current.routing = routing;
-            current.devices = devices;
-            self.status_changed.notify(usize::MAX);
+        let credentials = self.credentials.borrow();
+        AdapterStatus {
+            certificate_status: credentials.certificate_status(now),
+            auth: credentials.report(now),
+            gateway: self.hub.borrow().gateway().clone(),
+            catalog_problem: self.catalog_problem(),
+            pending: self.pending_devices(),
+            routing,
+            devices,
         }
-    }
-    pub(super) fn note_notification_switch(&self, did: &str, reason: &str) {
-        self.directory
-            .borrow_mut()
-            .devices
-            .get_mut(did)
-            .unwrap()
-            .last_switch_reason = Some(reason.into());
-        self.update_routing(reason);
     }
     pub(super) fn request_sync(&self) {
         self.sync_requested.set(true);

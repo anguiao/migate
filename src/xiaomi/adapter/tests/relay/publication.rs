@@ -153,7 +153,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             control.publication.apply(control.publication.prepare(plan)).unwrap();
             assert_eq!(control.publication.frozen().len(), 2);
             assert!(model.invoke(ep3, 0).await.is_err());
-            let status = crate::terminal::AuthStatus::new(control.context.auth_report().clone(), "/bin/migate".into(), "/data".into());
+            let status = crate::terminal::AuthStatus::new(control.context.diagnostics().auth.clone(), "/bin/migate".into(), "/data".into());
             let terminal = crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             assert!(terminal.handle_line("off one relay:3", 0).await.unwrap().unwrap().contains("command accepted"));
             assert_eq!(peer.count("rpcReq", "one", 3), 3);
@@ -211,7 +211,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                         .unwrap();
                     let before = control.publication.current().configuration.clone();
                     let status = crate::terminal::AuthStatus::new(
-                        control.context.auth_report().clone(),
+                        control.context.diagnostics().auth.clone(),
                         "/bin/migate".into(),
                         "/data".into(),
                     );

@@ -11,7 +11,7 @@ use super::{
     model::AdapterError,
     state::{Backoff, Context},
 };
-use crate::xiaomi::certificate::CertificateValidity;
+use crate::xiaomi::certificate::{CertificateStatus, CertificateValidity};
 use crate::{
     storage::XiaomiRecord,
     xiaomi::auth::{
@@ -79,21 +79,23 @@ impl Credentials {
             .and_then(|record| record.ha_authorization())
             .is_some_and(|ha| ha.tokens.expires_at <= now)
     }
-    pub(super) fn token_usable(&self, now: i64) -> bool {
+    pub(super) fn token_authorized(&self) -> bool {
         !matches!(self.ha_sync, HaSync::Rejected(_) | HaSync::Paused)
             && self
                 .record
                 .as_ref()
                 .and_then(|record| record.ha_authorization())
-                .is_some_and(|ha| ha.tokens.expires_at > now)
+                .is_some()
+    }
+    pub(super) fn token_usable(&self, now: i64) -> bool {
+        self.token_authorized() && !self.token_expired(now)
     }
     pub(super) fn certificate_validity(&self) -> Option<CertificateValidity> {
         self.report.certificate
     }
-    pub(super) fn hub_usable(&self, now: i64) -> bool {
-        self.report
-            .certificate
-            .is_some_and(|validity| validity.currently_valid(now))
+    pub(super) fn certificate_status(&self, now: i64) -> Option<CertificateStatus> {
+        self.certificate_validity()
+            .map(|validity| validity.status(now))
     }
     pub(super) fn ha_key(&self) -> Option<super::routing::HaKey> {
         Some(super::routing::HaKey {
@@ -153,7 +155,6 @@ impl Credentials {
         record: XiaomiRecord,
         mijia_generation: Option<u64>,
         ha_generation: Option<u64>,
-        now: i64,
     ) -> Adopted {
         let mijia_changed = self.mijia_generation != mijia_generation;
         let ha_changed = self.ha_generation != ha_generation;
@@ -165,23 +166,17 @@ impl Credentials {
             self.mijia_rejected = None;
             self.http_paused = false;
         }
-        if report_changed {
-            self.report.set_completed_at(now);
-        }
         if ha_changed {
             self.ha_sync = if record.ha.stopped {
                 HaSync::Paused
             } else {
                 HaSync::Idle
             };
-            self.ha_authentication(
-                if ha_generation.is_some() {
-                    AuthenticationState::Checking
-                } else {
-                    AuthenticationState::SignInRequired(FailureReason::HaAuthorizationStopped)
-                },
-                now,
-            );
+            self.report.ha = if ha_generation.is_some() {
+                AuthenticationState::Checking
+            } else {
+                AuthenticationState::SignInRequired(FailureReason::HaAuthorizationStopped)
+            };
         }
         self.record = Some(record);
         self.mijia_generation = mijia_generation;
@@ -194,12 +189,16 @@ impl Credentials {
         }
     }
     pub(super) fn mijia_authentication(&mut self, authentication: AuthenticationState, now: i64) {
+        if authentication_completed(&authentication) {
+            self.report.set_completed_at(now);
+        }
         self.report.mijia = authentication;
-        self.report.set_completed_at(now);
     }
     pub(super) fn ha_authentication(&mut self, authentication: AuthenticationState, now: i64) {
+        if authentication_completed(&authentication) {
+            self.report.set_completed_at(now);
+        }
         self.report.ha = authentication;
-        self.report.set_completed_at(now);
     }
     fn certificate_result(
         &mut self,
@@ -251,16 +250,12 @@ impl Credentials {
 }
 
 impl Context {
-    pub(super) fn auth_report(&self) -> AuthReport {
-        self.credentials.borrow().report(self.clock.unix_now())
-    }
     pub(super) fn adopt_credentials(&self, credentials: XiaomiRecord) {
         let snapshot = self.store.xiaomi().current_snapshot();
         let adopted = self.credentials.borrow_mut().adopt(
             credentials,
             snapshot.mijia_generation(),
             snapshot.ha_generation(),
-            self.clock.unix_now(),
         );
         if adopted.report_changed || adopted.ha_changed {
             self.status_changed.notify(usize::MAX);
@@ -380,11 +375,6 @@ fn saved(auth: &AuthService, context: &Context) -> Result<XiaomiRecord, AdapterE
 }
 
 fn eligibility_changed(context: &Context, reason: &str) {
-    context
-        .credentials
-        .borrow_mut()
-        .report
-        .set_completed_at(context.clock.unix_now());
     context.update_all_availability();
     context.update_routing(reason);
     context.credentials_changed.notify(usize::MAX);
@@ -404,12 +394,16 @@ async fn ha_retired(context: &Context, key: &super::routing::HaKey) {
 }
 
 fn token_expired(context: &Context) {
-    if !context.credentials.borrow().refresh_paused() {
-        context.ha_authentication(AuthenticationState::Unavailable(
-            FailureReason::AccessTokenExpired,
-        ));
-    }
     eligibility_changed(context, "access token expired");
+}
+
+fn authentication_completed(authentication: &AuthenticationState) -> bool {
+    matches!(
+        authentication,
+        AuthenticationState::Authenticated
+            | AuthenticationState::Unavailable(_)
+            | AuthenticationState::SignInRequired(_)
+    )
 }
 
 async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterError> {

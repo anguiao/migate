@@ -483,7 +483,7 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
         assert!(two.execute(Command::Off).await.is_err());
         until(|| {
             matches!(
-                c.context.auth_report().mijia,
+                c.context.diagnostics().auth.mijia,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             )
         })
@@ -626,7 +626,7 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                         control.context.diagnostics().catalog_problem.is_some()
                     } else {
                         matches!(
-                            control.context.auth_report().mijia,
+                            control.context.diagnostics().auth.mijia,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                     }
@@ -701,7 +701,7 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         c.context.request_sync();
         until(|| {
             matches!(
-                c.context.auth_report().mijia,
+                c.context.diagnostics().auth.mijia,
                 crate::xiaomi::auth::AuthenticationState::Unavailable(_)
             )
         })

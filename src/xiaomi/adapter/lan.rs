@@ -213,7 +213,7 @@ impl Context {
         let Some((scope, profile, cloud, model)) = eligible else {
             if self.stop_lan(did) {
                 self.update_availability(did);
-                self.update_routing("direct LAN eligibility ended");
+                self.update_device_routing(did, "direct LAN eligibility ended");
                 self.changed.notify(usize::MAX);
             }
             return Ok(());
@@ -244,7 +244,7 @@ impl Context {
             });
             self.status_changed.notify(usize::MAX);
             self.update_availability(did);
-            self.update_routing("device is not eligible for direct LAN");
+            self.update_device_routing(did, "device is not eligible for direct LAN");
             self.changed.notify(usize::MAX);
             return Ok(());
         }
@@ -287,7 +287,7 @@ impl Context {
             drop(live);
             if was_active {
                 self.update_availability(did);
-                self.update_routing("direct LAN credentials unavailable");
+                self.update_device_routing(did, "direct LAN credentials unavailable");
                 self.refresh_changed.notify(usize::MAX);
                 self.changed.notify(usize::MAX);
             }
@@ -583,7 +583,7 @@ impl Context {
         drop(live);
         self.update_availability(did);
         self.refresh_source(did);
-        self.update_routing(reason);
+        self.update_device_routing(did, reason);
         self.refresh_changed.notify(usize::MAX);
         self.status_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
@@ -642,7 +642,7 @@ impl Context {
         }
         self.reconcile_lan_after(did, Some(error.clone()))?;
         self.update_availability(did);
-        self.update_routing("direct LAN business request failed");
+        self.update_device_routing(did, "direct LAN business request failed");
         self.refresh_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
         Ok(())

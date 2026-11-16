@@ -309,6 +309,7 @@ pub(super) struct DeviceSlot {
     pub(super) loading: Option<Loading>,
     pub(super) blocked: Option<String>,
     pub(super) last_switch_reason: Option<String>,
+    pub(super) routing_selection: Option<super::routing::Selection>,
 }
 #[derive(Clone)]
 pub(super) struct Loading {

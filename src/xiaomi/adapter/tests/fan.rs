@@ -310,7 +310,7 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
             assert_eq!(fan(control).speed.value, None);
             assert_eq!(fan(control).swing.value, None);
             let status = crate::terminal::AuthStatus::new(
-                control.context.auth_report().clone(),
+                control.context.diagnostics().auth.clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );
@@ -435,7 +435,7 @@ fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
                     .is_none()
             );
             let status = crate::terminal::AuthStatus::new(
-                control.context.auth_report().clone(),
+                control.context.diagnostics().auth.clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );

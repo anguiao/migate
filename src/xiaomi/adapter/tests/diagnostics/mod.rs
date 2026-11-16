@@ -1,13 +1,17 @@
 use super::*;
 use crate::xiaomi::adapter::{PathKind, PathPriority};
 
+mod deadlines;
+mod history;
+mod publishing;
+
 #[test]
 fn credential_report_checks_expiry_without_a_new_authentication_check() {
     use crate::xiaomi::auth::{AuthenticationState, FailureReason};
 
     let rig = Rig::new(true, &["one"]);
     let context = &rig.source.context;
-    let checked = context.auth_report();
+    let checked = context.diagnostics().auth;
     let expires_at = context
         .credentials
         .borrow()
@@ -21,7 +25,7 @@ fn credential_report_checks_expiry_without_a_new_authentication_check() {
         .advance(Duration::from_secs((expires_at - rig.clock.wall()) as u64));
 
     for _ in 0..2 {
-        let report = context.auth_report();
+        let report = context.diagnostics().auth;
         assert_eq!(
             report.ha,
             AuthenticationState::Unavailable(FailureReason::AccessTokenExpired)
@@ -322,7 +326,7 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         until(|| !c.context.token_usable()).await;
         until(|| {
             matches!(
-                c.context.auth_report().ha,
+                c.context.diagnostics().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::Unavailable(
                     crate::xiaomi::auth::FailureReason::AccessTokenExpired
                 )

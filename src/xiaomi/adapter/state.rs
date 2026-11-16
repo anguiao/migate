@@ -1,8 +1,4 @@
-use super::{
-    bootstrap::Clock,
-    model::{DeviceStatus, Ready, RoutingStatus},
-    tasks::TaskSet,
-};
+use super::{bootstrap::Clock, model::Ready, tasks::TaskSet};
 use crate::{
     configuration::DerivedConfiguration, device::DeviceRegistry, storage::Store,
     xiaomi::mijia::MijiaClient,
@@ -38,11 +34,6 @@ impl Lifetime {
     }
 }
 pub(super) use super::work::LogicalSink;
-#[derive(Default)]
-pub(super) struct DiagnosticCache {
-    pub(super) routing: RoutingStatus,
-    pub(super) devices: Vec<DeviceStatus>,
-}
 pub(super) struct Context {
     pub(super) commands: Rc<super::commands::Commands>,
     pub(super) write_gates: super::commands::DeviceWriteGates,
@@ -67,7 +58,7 @@ pub(super) struct Context {
     pub(super) tasks: TaskSet,
     pub(super) configuration_changed: Rc<Event>,
     pub(super) changed: Event,
-    pub(super) status: RefCell<DiagnosticCache>,
+    pub(super) routing_history: RefCell<super::diagnostics::history::PriorityHistory>,
     pub(super) status_changed: Event,
     pub(super) ready: Rc<Ready>,
     pub(super) clock: Arc<dyn Clock>,

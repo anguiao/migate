@@ -192,7 +192,7 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
             assert_eq!(snapshot(control).mode.source_time, Some(700));
             assert_eq!(snapshot(control).speed.source_time, Some(701));
             let status = crate::terminal::AuthStatus::new(
-                control.context.auth_report().clone(),
+                control.context.diagnostics().auth.clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );

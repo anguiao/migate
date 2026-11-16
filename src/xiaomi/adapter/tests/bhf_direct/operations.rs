@@ -10,7 +10,7 @@ const MODE: PropertyBinding = PropertyBinding { siid: 3, piid: 1 };
 
 fn status_text(c: &Control) -> String {
     let status = crate::terminal::AuthStatus::new(
-        c.context.auth_report().clone(),
+        c.context.diagnostics().auth.clone(),
         "/bin/migate".into(),
         "/data".into(),
     );

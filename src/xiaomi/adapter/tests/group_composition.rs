@@ -351,7 +351,7 @@ fn ambiguous_member_stays_visible_and_cannot_supply_group_feedback() {
         assert!(!group.description().supports_rgb());
         assert_eq!(group.snapshot().power(), Some(Power::Unknown));
         let status = crate::terminal::AuthStatus::new(
-            c.context.auth_report().clone(),
+            c.context.diagnostics().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );

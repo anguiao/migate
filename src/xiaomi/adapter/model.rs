@@ -445,6 +445,7 @@ pub struct DeviceStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterStatus {
     pub auth: AuthReport,
+    pub certificate_status: Option<crate::xiaomi::certificate::CertificateStatus>,
     pub gateway: GatewayStatus,
     pub catalog_problem: Option<String>,
     pub pending: Vec<PendingDevice>,

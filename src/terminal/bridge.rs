@@ -12,23 +12,17 @@ use crate::{
     xiaomi::adapter::AdapterStatus,
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, map-type DID FUNCTION switch|light, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
-fn invalid(
-    view: &View,
-    status: &AuthStatus,
-    diagnostics: &AdapterStatus,
-    now: i64,
-    reason: &str,
-) -> String {
+fn invalid(view: &View, status: &AuthStatus, diagnostics: &AdapterStatus, reason: &str) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
-        view.render_status(status, diagnostics, now)
+        view.render_status(status, diagnostics)
     )
 }
 impl View {
     async fn handle_words(
         &self,
         words: &[&str],
-        now: i64,
+        _now: i64,
         status: &AuthStatus,
         diagnostics: impl FnOnce() -> AdapterStatus,
     ) -> Result<Option<String>, StorageError> {
@@ -39,7 +33,7 @@ impl View {
             [] => return Ok(None),
             ["help"] => format!(
                 "{COMMAND_HELP}\n{}",
-                view.render_status(status, &diagnostics, now)
+                view.render_status(status, &diagnostics)
             ),
             ["list"] => {
                 let mut text = render(registry, None, &diagnostics, true);
@@ -52,14 +46,14 @@ impl View {
             ["status"] => format!(
                 "{}\n{}",
                 render(registry, None, &diagnostics, false),
-                view.render_devices(status, &diagnostics, now, None)
+                view.render_devices(status, &diagnostics, None)
             ),
             ["status", did] => {
                 if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
                     if view.contains_did(did) {
                         let mut lines = vec![format!("{did}: not published")];
                         lines.extend(configuration_lines(registry, did));
-                        lines.push(view.render_devices(status, &diagnostics, now, Some(did)));
+                        lines.push(view.render_devices(status, &diagnostics, Some(did)));
                         lines.join("\n")
                     } else if let Some(pending) = diagnostics
                         .pending
@@ -68,13 +62,13 @@ impl View {
                     {
                         view.pending_line(pending)
                     } else {
-                        invalid(registry, status, &diagnostics, now, "Unknown device DID.")
+                        invalid(registry, status, &diagnostics, "Unknown device DID.")
                     }
                 } else {
                     format!(
                         "{}\n{}",
                         render(registry, Some(did), &diagnostics, false),
-                        view.render_devices(status, &diagnostics, now, Some(did))
+                        view.render_devices(status, &diagnostics, Some(did))
                     )
                 }
             }
@@ -84,7 +78,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Unknown device DID.",
                     )));
                 };
@@ -93,7 +86,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Unknown function.",
                     )));
                 };
@@ -123,7 +115,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Unknown device DID.",
                     )));
                 };
@@ -132,7 +123,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Unknown function.",
                     )));
                 };
@@ -141,7 +131,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Function does not support heating mode control.",
                     )));
                 }
@@ -172,7 +161,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Unknown device DID.",
                     )));
                 };
@@ -181,7 +169,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Unknown function.",
                     )));
                 };
@@ -190,7 +177,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Function does not support heating temperature control.",
                     )));
                 }
@@ -199,7 +185,6 @@ impl View {
                         registry,
                         status,
                         &diagnostics,
-                        now,
                         "Temperature must be a whole number.",
                     )));
                 };
@@ -219,13 +204,7 @@ impl View {
                     Err(error) => format!("{target}: {error}"),
                 }
             }
-            _ => invalid(
-                registry,
-                status,
-                &diagnostics,
-                now,
-                "Invalid command usage.",
-            ),
+            _ => invalid(registry, status, &diagnostics, "Invalid command usage."),
         };
         Ok(Some(text))
     }

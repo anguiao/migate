@@ -2,7 +2,6 @@
 
 use super::{Client, CloudPath, ControlPath, PathKind, PathPriority, SessionHandle};
 
-#[derive(Clone)]
 pub(in crate::xiaomi::adapter) struct Candidates {
     pub(in crate::xiaomi::adapter) hub: Result<SessionHandle, String>,
     pub(in crate::xiaomi::adapter) direct: Result<Client, String>,
@@ -50,7 +49,6 @@ impl Candidates {
     }
 }
 
-#[derive(Clone)]
 pub(in crate::xiaomi::adapter) struct RouteChoice {
     pub(in crate::xiaomi::adapter) candidates: Candidates,
     pub(in crate::xiaomi::adapter) selected: Option<ControlPath>,
@@ -79,19 +77,48 @@ pub(super) fn select<T>(
     }
 }
 
+pub(super) fn select_kind(
+    priority: PathPriority,
+    operation: Operation,
+    hub: bool,
+    direct: bool,
+    cloud: bool,
+) -> Option<PathKind> {
+    select(
+        priority,
+        operation,
+        hub.then_some(PathKind::Local),
+        direct.then_some(PathKind::Direct),
+        cloud.then_some(PathKind::Cloud),
+    )
+}
+
 impl RouteChoice {
+    pub(in crate::xiaomi::adapter) fn selected_kind(&self) -> Option<PathKind> {
+        self.selected.as_ref().map(ControlPath::kind)
+    }
+
     pub(super) fn new(
         candidates: Candidates,
         priority: PathPriority,
         operation: Operation,
     ) -> Self {
-        let selected = select(
+        let kind = select_kind(
             priority,
             operation,
-            candidates.hub.clone().ok().map(ControlPath::Local),
-            candidates.direct.clone().ok().map(ControlPath::Direct),
-            candidates.cloud.clone().ok().map(ControlPath::Cloud),
+            candidates.hub.is_ok(),
+            candidates.direct.is_ok(),
+            candidates.cloud.is_ok(),
         );
+        Self::from_selection(candidates, kind)
+    }
+
+    pub(super) fn from_selection(candidates: Candidates, kind: Option<PathKind>) -> Self {
+        let selected = kind.map(|kind| match kind {
+            PathKind::Local => ControlPath::Local(candidates.hub.as_ref().unwrap().clone()),
+            PathKind::Direct => ControlPath::Direct(candidates.direct.as_ref().unwrap().clone()),
+            PathKind::Cloud => ControlPath::Cloud(candidates.cloud.as_ref().unwrap().clone()),
+        });
         Self {
             candidates,
             selected,

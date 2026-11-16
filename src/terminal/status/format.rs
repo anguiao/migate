@@ -10,6 +10,20 @@ use std::{fmt::Write as _, path::Path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir: &Path) -> String {
+    format_report_with_certificate(
+        report,
+        report.certificate.map(|validity| validity.status(now)),
+        executable,
+        data_dir,
+    )
+}
+
+pub(super) fn format_report_with_certificate(
+    report: &AuthReport,
+    certificate_status: Option<CertificateStatus>,
+    executable: &Path,
+    data_dir: &Path,
+) -> String {
     let account = match &report.account {
         Some(account) => format!("Xiaomi account: {} ({}).", account.uid, account.region),
         None => "Xiaomi account: not signed in (cn).".to_owned(),
@@ -19,7 +33,7 @@ pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir:
         account,
         format_authentication("Mijia session", &report.mijia),
         format_authentication("HA OAuth", &report.ha),
-        format_certificate(report.certificate, now)
+        format_certificate_with_status(report.certificate, certificate_status)
     );
     if let Some(failure) = &report.login_failure {
         let _ = write!(
@@ -564,10 +578,17 @@ pub(super) fn check_command(executable: &Path, data_dir: &Path) -> String {
 }
 
 pub(super) fn format_certificate(validity: Option<CertificateValidity>, now: i64) -> String {
+    format_certificate_with_status(validity, validity.map(|validity| validity.status(now)))
+}
+
+fn format_certificate_with_status(
+    validity: Option<CertificateValidity>,
+    status: Option<CertificateStatus>,
+) -> String {
     let Some(validity) = validity else {
         return "Gateway certificate: not prepared.".to_owned();
     };
-    match validity.status(now) {
+    match status.expect("sampled certificate has its validity status") {
         CertificateStatus::NotYetValid => format!(
             "Gateway certificate: not valid before {}.",
             timestamp(validity.not_before)

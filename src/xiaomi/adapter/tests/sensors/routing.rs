@@ -30,7 +30,7 @@ fn degraded_hub_remains_a_candidate_without_sending_automatic_sensor_reads() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let auth_status = crate::terminal::AuthStatus::new(
-                control.context.auth_report(),
+                control.context.diagnostics().auth,
                 "/bin/migate".into(),
                 "/data".into(),
             );

@@ -33,7 +33,13 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let expiry = control.context.auth_report().certificate.unwrap().not_after;
+            let expiry = control
+                .context
+                .diagnostics()
+                .auth
+                .certificate
+                .unwrap()
+                .not_after;
             let by = Duration::from_secs((expiry - control.clock.wall()) as u64);
             control.cloud.lock().unwrap().cert_status = 503;
             control.clock.advance(by);
@@ -99,7 +105,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         until(|| c.cloud.lock().unwrap().certs == 2).await;
         until(|| {
             matches!(
-                c.context.auth_report().certificate_update,
+                c.context.diagnostics().auth.certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Updated
             )
         })
@@ -107,7 +113,7 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);
         assert!(!c.context.credentials.borrow().refresh_paused());
         assert!(!matches!(
-            c.context.auth_report().ha,
+            c.context.diagnostics().auth.ha,
             crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
         ));
     }));
@@ -125,7 +131,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 matches!(
-                    control.context.auth_report().certificate_update,
+                    control.context.diagnostics().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Failed(_)
                 )
             })
@@ -139,7 +145,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             until(|| {
                 control.cloud.lock().unwrap().certs > before
                     && matches!(
-                        control.context.auth_report().certificate_update,
+                        control.context.diagnostics().auth.certificate_update,
                         crate::xiaomi::auth::CertificateUpdate::Updated
                     )
             })
@@ -195,7 +201,7 @@ fn initial_certificate_failure_reuses_the_saved_identity_on_retry() {
         until(|| {
             c.cloud.lock().unwrap().certs == 1
                 && matches!(
-                    c.context.auth_report().certificate_update,
+                    c.context.diagnostics().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Failed(
                         crate::xiaomi::auth::FailureReason::Cloud(_)
                     )
@@ -254,7 +260,7 @@ fn late_certificate_rejection_cannot_stop_identical_replacement_generation() {
         until(|| {
             c.cloud.lock().unwrap().certs == 2
                 && matches!(
-                    c.context.auth_report().certificate_update,
+                    c.context.diagnostics().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
         })
@@ -285,16 +291,16 @@ fn background_reports_and_repairs_a_damaged_certificate_without_replacing_identi
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().certs == 1).await;
         assert_eq!(
-            c.context.auth_report().certificate_update,
+            c.context.diagnostics().auth.certificate_update,
             crate::xiaomi::auth::CertificateUpdate::Failed(
                 crate::xiaomi::auth::FailureReason::InvalidCertificate
             )
         );
-        assert!(c.context.auth_report().certificate.is_none());
+        assert!(c.context.diagnostics().auth.certificate.is_none());
         release.send(()).unwrap();
         until(|| {
             matches!(
-                c.context.auth_report().certificate_update,
+                c.context.diagnostics().auth.certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Updated
             )
         })
@@ -302,6 +308,6 @@ fn background_reports_and_repairs_a_damaged_certificate_without_replacing_identi
         let repaired = c.store.xiaomi().load().unwrap().unwrap().hub.unwrap();
         assert_eq!(repaired.virtual_did, identity.virtual_did);
         assert_eq!(repaired.private_key_pem, identity.private_key_pem);
-        assert!(c.context.auth_report().certificate.is_some());
+        assert!(c.context.diagnostics().auth.certificate.is_some());
     }));
 }

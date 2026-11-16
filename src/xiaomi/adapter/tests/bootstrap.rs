@@ -650,9 +650,9 @@ fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails()
         if corrupt_credentials {
             let (adapter, ready) = result.unwrap();
             block_on(poll_once(ready.wait())).unwrap().unwrap();
-            assert_eq!(adapter.context.auth_report().certificate, None);
+            assert_eq!(adapter.context.diagnostics().auth.certificate, None);
             assert!(matches!(
-                adapter.context.auth_report().certificate_update,
+                adapter.context.diagnostics().auth.certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Failed(
                     crate::xiaomi::auth::FailureReason::InvalidCertificate
                 )
@@ -699,7 +699,7 @@ fn stopped_ha_or_missing_certificate_preserves_topology_and_maintenance() {
                 .devices
                 .contains_key("one")
         );
-        let report = adapter.context.auth_report().clone();
+        let report = adapter.context.diagnostics().auth.clone();
         assert_eq!(report.certificate.is_some(), ha_stopped);
         if ha_stopped {
             assert!(matches!(

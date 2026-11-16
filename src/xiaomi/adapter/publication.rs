@@ -377,6 +377,11 @@ impl SourceHandle {
             || self.0.graph.borrow().rules != plan.derived.rules;
         for key in &prepared.removed {
             self.0.retire_work(&key.id);
+            let mut directory = self.0.directory.borrow_mut();
+            if let Some(slot) = directory.devices.get_mut(&key.id) {
+                slot.routing_selection = None;
+                slot.last_switch_reason = None;
+            }
         }
         let mut started = Vec::new();
         for source in prepared.installed {
@@ -467,6 +472,7 @@ impl SourceHandle {
             }
             self.0.refresh_all_group_states();
         }
+        self.0.update_routing("committed configuration installed");
         let entries = self.entries(&plan.configuration);
         self.0.changed.notify(usize::MAX);
         entries

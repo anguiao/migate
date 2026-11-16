@@ -164,6 +164,7 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
         sensor.set_temperature_source_available(true);
         sensor.observe_measurement(21.5, Some(100), 200).unwrap();
         let diagnostics = crate::xiaomi::adapter::AdapterStatus {
+            certificate_status: None,
             auth: crate::xiaomi::auth::AuthReport::for_test(
                 crate::xiaomi::auth::AuthenticationState::Authenticated,
                 None,

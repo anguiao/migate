@@ -188,7 +188,7 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                     assert_eq!(control.cloud.lock().unwrap().tokens, 1);
                     until(|| control.context.notifications.borrow().is_none()).await;
                     assert!(matches!(
-                        control.context.auth_report().ha,
+                        control.context.diagnostics().auth.ha,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     ));
                     function(&control.context.registry, "one", "outlet:2")

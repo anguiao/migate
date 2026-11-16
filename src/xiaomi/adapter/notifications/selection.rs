@@ -54,7 +54,11 @@ fn activate(context: &Context, work: &DeviceWork, id: &str, source: Notification
     work.install_observer(id, source);
     context.update_device_availability(did);
     context.refresh_group_states(did);
-    context.note_notification_switch(did, "notification subscriptions ready; source activated");
+    context.note_notification_switch(
+        did,
+        id,
+        "notification subscriptions ready; source activated",
+    );
 }
 pub(super) async fn selections(context: Rc<Context>) -> Result<(), AdapterError> {
     loop {
@@ -92,7 +96,8 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
             work.revoke_observer(&id);
             context.update_device_availability(&did);
             context.refresh_group_states(&did);
-            context.update_routing("notification source access conditions invalidated");
+            context
+                .update_device_routing(&did, "notification source access conditions invalidated");
         }
         let desired = routes.functions[&id].notification.desired.clone();
         if let Some(desired) = desired {

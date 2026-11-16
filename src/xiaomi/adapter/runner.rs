@@ -38,8 +38,7 @@ impl XiaomiAdapter {
         )
     }
     pub async fn run(self, mut on_status: impl FnMut(AdapterStatus)) -> Result<(), AdapterError> {
-        let mut reported = self.context.diagnostics();
-        on_status(reported.clone());
+        let mut reported = None;
         let context = self.context.clone();
         let monitor = async {
             loop {
@@ -48,9 +47,9 @@ impl XiaomiAdapter {
                 let credentials = context.credentials_changed.listen();
                 let commands = context.commands.changed.listen();
                 let status = context.diagnostics();
-                if status != reported {
+                if reported.as_ref() != Some(&status) {
                     on_status(status.clone());
-                    reported = status;
+                    reported = Some(status);
                 }
                 future::or(
                     listener,
@@ -65,7 +64,7 @@ impl XiaomiAdapter {
             self.context.disconnect(error.to_string());
         }
         let status = self.context.diagnostics();
-        if status != reported {
+        if reported.as_ref() != Some(&status) {
             on_status(status);
         }
         result

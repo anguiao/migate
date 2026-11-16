@@ -636,6 +636,7 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             .local_status()
             .unwrap();
         let diagnostics = crate::xiaomi::adapter::AdapterStatus {
+            certificate_status: None,
             auth: report,
             gateway: crate::xiaomi::adapter::GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
@@ -688,6 +689,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             .local_status()
             .unwrap();
         let diagnostics = AdapterStatus {
+            certificate_status: None,
             auth: report,
             gateway: GatewayStatus::Connected("hub".into()),
             catalog_problem: None,

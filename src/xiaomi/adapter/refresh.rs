@@ -448,10 +448,7 @@ fn reconcile_input(work: &DeviceWork, id: &str, input: ReadInput, path: Option<&
     work.refresh_changed.notify(usize::MAX);
 }
 /// Capture active read decisions for one synchronous scheduling pass.
-fn read_routes(
-    context: &Context,
-    candidates: &[Rc<DeviceWork>],
-) -> BTreeMap<String, Rc<DeviceRoutes>> {
+fn read_routes(context: &Context, candidates: &[Rc<DeviceWork>]) -> BTreeMap<String, DeviceRoutes> {
     candidates
         .iter()
         .filter(|work| {
@@ -461,7 +458,7 @@ fn read_routes(
         .map(|work| (work.key.id.clone(), context.device_routes(&work.key.id)))
         .collect()
 }
-fn retire(candidates: &[Rc<DeviceWork>], routes: &BTreeMap<String, Rc<DeviceRoutes>>) {
+fn retire(candidates: &[Rc<DeviceWork>], routes: &BTreeMap<String, DeviceRoutes>) {
     for work in candidates {
         for ((id, input), flight) in &work.refresh.borrow().inflight {
             if work.life.is_closed()

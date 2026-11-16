@@ -45,7 +45,7 @@ fn terminal_describes_optional_recognition_failure_separately_from_connectivity(
             c.peer(peer, |_peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
                 let status = crate::terminal::AuthStatus::new(
-                    control.context.auth_report().clone(),
+                    control.context.diagnostics().auth.clone(),
                     "/bin/migate".into(),
                     "/data".into(),
                 );
@@ -101,7 +101,7 @@ fn composite_controls_route_commands_and_feedback_to_their_own_bindings() {
                 })
                 .await;
                 let status = crate::terminal::AuthStatus::new(
-                    control.context.auth_report().clone(),
+                    control.context.diagnostics().auth.clone(),
                     "/bin/migate".into(),
                     "/data".into(),
                 );

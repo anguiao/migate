@@ -23,7 +23,7 @@ fn home_and_info_rejection_stop_only_mijia_recovery_after_account_rejection() {
             c.context.request_sync();
             until(|| {
                 matches!(
-                    c.context.auth_report().mijia,
+                    c.context.diagnostics().auth.mijia,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 )
             })
@@ -39,7 +39,7 @@ fn home_and_info_rejection_stop_only_mijia_recovery_after_account_rejection() {
             async_io::Timer::after(Duration::from_millis(20)).await;
             assert_eq!(c.cloud.lock().unwrap().restores, 1);
             assert!(!matches!(
-                c.context.auth_report().ha,
+                c.context.diagnostics().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
         }));
@@ -222,7 +222,7 @@ fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia
                 initialized(control, &peer, &["one"]).await;
                 until(|| {
                     matches!(
-                        control.context.auth_report().mijia,
+                        control.context.diagnostics().auth.mijia,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     )
                 })
@@ -251,7 +251,7 @@ fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia
                 }
                 assert_eq!(control.cloud.lock().unwrap().restores, 1);
                 assert!(!matches!(
-                    control.context.auth_report().ha,
+                    control.context.diagnostics().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 ));
             })
@@ -284,7 +284,7 @@ fn coalesced_candidate_401s_preserve_the_temporary_recovery_backoff() {
             until(|| {
                 control.cloud.lock().unwrap().restores == 1
                     && matches!(
-                        control.context.auth_report().mijia,
+                        control.context.diagnostics().auth.mijia,
                         crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                     )
             })

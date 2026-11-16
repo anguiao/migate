@@ -7,7 +7,7 @@ mod cloud;
 mod evaluation;
 mod hub;
 
-pub(super) use evaluation::{DeviceRoutes, RoutingEvaluation};
+pub(super) use evaluation::{DeviceRoutes, Selection, Summaries};
 
 /// Official Xiaomi source omits state subscriptions for BLE and proxy-child
 /// identities; their cloud online flag is not a sensor eligibility signal.
@@ -71,12 +71,6 @@ impl DeviceRoutes {
     }
 }
 impl Context {
-    pub(super) fn routing_evaluation_at(&self, now: i64) -> RoutingEvaluation {
-        evaluation::evaluate(self, now)
-    }
-    pub(super) fn device_routes(&self, did: &str) -> Rc<DeviceRoutes> {
-        evaluation::device(self, did, self.clock.unix_now())
-    }
     pub(super) fn current_local(&self, handle: &SessionHandle) -> bool {
         self.hub
             .borrow()
@@ -94,9 +88,9 @@ impl Context {
     pub(super) fn local_candidate(&self, did: &str, push: bool) -> Result<SessionHandle, String> {
         let routes = self.device_routes(did);
         if push {
-            routes.hub_push.clone()
+            routes.hub_push
         } else {
-            routes.read.candidates.hub.clone()
+            routes.read.candidates.hub
         }
     }
     pub(super) fn is_group(&self, did: &str) -> bool {

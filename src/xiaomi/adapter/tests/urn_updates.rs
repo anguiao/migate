@@ -176,7 +176,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
         let matter = PublishedLightModel::new(&c.publication, &c.store);
         let attributes = matter.read(committed.endpoint).await;
         let status = crate::terminal::AuthStatus::new(
-            c.context.auth_report().clone(),
+            c.context.diagnostics().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -467,7 +467,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
             Some(&committed)
         );
         let status = crate::terminal::AuthStatus::new(
-            c.context.auth_report().clone(),
+            c.context.diagnostics().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -519,7 +519,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         .await;
 
         let status = crate::terminal::AuthStatus::new(
-            c.context.auth_report().clone(),
+            c.context.diagnostics().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );

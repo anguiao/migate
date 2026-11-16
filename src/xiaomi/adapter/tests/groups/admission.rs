@@ -152,7 +152,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         until(|| c.context.directory.borrow().confirmed_groups().iter().any(|group| group.membership.members.iter().any(|member| member == "member-new"))).await;
         until(|| c.publication.failure().is_some()).await;
         let status = crate::terminal::AuthStatus::new(
-            c.context.auth_report().clone(),
+            c.context.diagnostics().auth.clone(),
             "/bin/migate".into(),
             "/data".into(),
         );

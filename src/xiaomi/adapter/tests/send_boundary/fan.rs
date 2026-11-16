@@ -223,7 +223,7 @@ fn transport_failure_after_fan_bytes_is_reported_as_uncertain() {
                 assert_eq!(last.actual_path, Some(PathKind::Local));
                 assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
                 let auth = crate::terminal::AuthStatus::new(
-                    c.context.auth_report().clone(),
+                    c.context.diagnostics().auth.clone(),
                     "/bin/migate".into(),
                     "/data".into(),
                 );

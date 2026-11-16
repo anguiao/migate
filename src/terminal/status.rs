@@ -54,8 +54,13 @@ impl AuthStatus {
         format_report(&self.report.borrow(), now, &self.executable, &self.data_dir)
     }
 
-    pub(super) fn render_adapter(&self, adapter: &AdapterStatus, now: i64) -> String {
-        let mut report = format_report(&adapter.auth, now, &self.executable, &self.data_dir);
+    pub(super) fn render_adapter(&self, adapter: &AdapterStatus) -> String {
+        let mut report = format::format_report_with_certificate(
+            &adapter.auth,
+            adapter.certificate_status,
+            &self.executable,
+            &self.data_dir,
+        );
         let _ = write!(report, "\n{}", format_gateway(&adapter.gateway));
         if let Some(problem) = &adapter.catalog_problem {
             let _ = write!(report, "\nDevice description: {problem}.");

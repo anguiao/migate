@@ -219,7 +219,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
     rig.clock.advance(Duration::from_secs(7200));
     let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
-    assert!(context.auth_report().certificate.unwrap().not_after < rig.clock.wall());
+    assert!(context.diagnostics().auth.certificate.unwrap().not_after < rig.clock.wall());
     rig.network.lan_port.set(peer.address.port());
     rig.network
         .discover_at(peer.address, Duration::from_millis(20));

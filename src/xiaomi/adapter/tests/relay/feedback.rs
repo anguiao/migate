@@ -165,7 +165,7 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
             })
             .await;
             let status = crate::terminal::AuthStatus::new(
-                control.context.auth_report().clone(),
+                control.context.diagnostics().auth.clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );
@@ -384,7 +384,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
 fn relay_power_read_reports_its_real_source_in_terminal_status() {
     let rig = rig();
     let status = Rc::new(crate::terminal::AuthStatus::new(
-        rig.source.context.auth_report().clone(),
+        rig.source.context.diagnostics().auth.clone(),
         "/bin/migate".into(),
         "/data".into(),
     ));
@@ -440,7 +440,7 @@ fn relay_power_read_reports_its_real_source_in_terminal_status() {
 fn relay_power_live_notification_records_source_without_accepting_retained_or_invalid_as_fresh() {
     let rig = rig();
     let status = Rc::new(crate::terminal::AuthStatus::new(
-        rig.source.context.auth_report().clone(),
+        rig.source.context.diagnostics().auth.clone(),
         "/bin/migate".into(),
         "/data".into(),
     ));

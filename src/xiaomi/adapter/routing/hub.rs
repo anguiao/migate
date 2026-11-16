@@ -36,7 +36,10 @@ impl Context {
         self.hub.borrow_mut().device_offline(did);
         work.retry_subscriptions();
         self.update_availability(did);
-        self.update_routing(&format!("hub reported device {did} offline or missing"));
+        self.update_device_routing(
+            did,
+            &format!("hub reported device {did} offline or missing"),
+        );
         self.refresh_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }

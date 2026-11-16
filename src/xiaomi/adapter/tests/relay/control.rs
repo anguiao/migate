@@ -39,7 +39,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             .await;
             let mut changes = two.subscribe();
             let status = crate::terminal::AuthStatus::new(
-                control.context.auth_report().clone(),
+                control.context.diagnostics().auth.clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );

@@ -24,7 +24,7 @@ fn mqtt_and_token_refresh_work_without_an_ha_identity_probe() {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one") && c.cloud.lock().unwrap().homes > 0).await;
             assert!(matches!(
-                c.context.auth_report().ha,
+                c.context.diagnostics().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::Authenticated
             ));
             assert!(c.context.cloud_candidate("one", true).is_err());
@@ -33,7 +33,7 @@ fn mqtt_and_token_refresh_work_without_an_ha_identity_probe() {
             until(|| {
                 c.cloud.lock().unwrap().tokens == 1
                     && matches!(
-                        c.context.auth_report().ha,
+                        c.context.diagnostics().auth.ha,
                         crate::xiaomi::auth::AuthenticationState::Authenticated
                     )
             })
@@ -69,7 +69,7 @@ fn ha_rejection_and_refresh_do_not_request_an_extra_mijia_directory_round() {
         until(|| c.cloud.lock().unwrap().tokens == 1).await;
         until(|| {
             matches!(
-                c.context.auth_report().ha,
+                c.context.diagnostics().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::Authenticated
             )
         })
@@ -202,7 +202,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             new_cert_release.send(()).unwrap();
             until(|| {
                 matches!(
-                    c.context.auth_report().certificate_update,
+                    c.context.diagnostics().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
             })
@@ -252,7 +252,10 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
             let one = function(&c.context.registry, "one", "outlet:2");
             c.clock.advance(Duration::from_secs(5));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
-            assert_eq!(format!("{:?}", c.context.auth_report().ha), "Refreshing");
+            assert_eq!(
+                format!("{:?}", c.context.diagnostics().auth.ha),
+                "Refreshing"
+            );
             assert_eq!(one.snapshot().availability, Availability::Available);
             one.execute(Command::On).await.unwrap();
             c.clock.advance(Duration::from_secs(5));
@@ -296,7 +299,7 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
             until(|| control.cloud.lock().unwrap().tokens == 1).await;
             until(|| {
                 matches!(
-                    control.context.auth_report().ha,
+                    control.context.diagnostics().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                 )
             })
@@ -332,7 +335,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 matches!(
-                    control.context.auth_report().ha,
+                    control.context.diagnostics().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 )
             })
@@ -350,7 +353,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             }
             assert_eq!(control.cloud.lock().unwrap().homes, before);
             assert!(matches!(
-                control.context.auth_report().ha,
+                control.context.diagnostics().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
         })
@@ -384,7 +387,7 @@ fn temporary_refresh_failure_and_late_unauthorized_do_not_stop_ha() {
         until(|| {
             c.cloud.lock().unwrap().tokens == 2
                 && matches!(
-                    c.context.auth_report().ha,
+                    c.context.diagnostics().auth.ha,
                     crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                 )
         })
@@ -426,7 +429,7 @@ fn stopped_ha_stays_stopped_after_adapter_restart_while_mijia_and_hub_work() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             assert!(matches!(
-                control.context.auth_report().ha,
+                control.context.diagnostics().auth.ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
             assert!(!control.context.token_usable());
@@ -472,33 +475,33 @@ fn successful_certificate_does_not_hide_failed_or_inflight_token_refresh() {
                     && c.cloud.lock().unwrap().tokens == 1
                     && if pending {
                         matches!(
-                            c.context.auth_report().ha,
+                            c.context.diagnostics().auth.ha,
                             crate::xiaomi::auth::AuthenticationState::Refreshing
                         )
                     } else {
                         matches!(
-                            c.context.auth_report().ha,
+                            c.context.diagnostics().auth.ha,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                     }
             })
             .await;
-            let status = c.context.auth_report().ha.clone();
+            let status = c.context.diagnostics().auth.ha.clone();
             certificate_release.send(()).unwrap();
             until(|| {
                 matches!(
-                    c.context.auth_report().certificate_update,
+                    c.context.diagnostics().auth.certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
             })
             .await;
-            assert_eq!(c.context.auth_report().ha, status);
+            assert_eq!(c.context.diagnostics().auth.ha, status);
             assert!(c.context.token_usable());
             if pending {
                 token_release.send(()).unwrap();
                 until(|| {
                     matches!(
-                        c.context.auth_report().ha,
+                        c.context.diagnostics().auth.ha,
                         crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                     )
                 })

@@ -30,7 +30,7 @@ impl Context {
                         async {
                             loop {
                                 changes.changed().await;
-                                context.update_routing("lighting action changed");
+                                context.status_changed.notify(usize::MAX);
                             }
                         },
                     )
@@ -64,9 +64,14 @@ impl Context {
             .cloned()
             .collect::<Vec<_>>();
         self.hub.borrow_mut().observe_access(&observed, entries);
-        for did in observed {
-            self.update_availability(&did);
+        for did in &observed {
+            self.update_availability(did);
         }
+        self.update_routing_for(
+            observed.iter().map(String::as_str),
+            "hub device access changed",
+            None,
+        );
     }
     pub(super) fn reconcile_all(self: &Rc<Self>) -> Result<(), AdapterError> {
         let dids = self
@@ -154,6 +159,7 @@ impl Context {
             loading.life.close();
         }
         self.hub.borrow_mut().forget_device(did);
+        self.update_device_routing(did, "device removed");
         self.commands.remove(did);
         self.changed.notify(usize::MAX);
     }

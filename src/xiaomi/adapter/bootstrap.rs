@@ -4,7 +4,7 @@ use super::{
     hub::Hub,
     model::{AdapterError, Ready, TopologyReady},
     runner::XiaomiAdapter,
-    state::{Context, DiagnosticCache, LogicalSink},
+    state::{Context, LogicalSink},
     tasks::TaskSet,
     work::DeviceWork,
 };
@@ -182,7 +182,7 @@ impl XiaomiAdapter {
             tasks: TaskSet::default(),
             configuration_changed: Rc::new(Event::new()),
             changed: Event::new(),
-            status: RefCell::new(DiagnosticCache::default()),
+            routing_history: RefCell::new(Default::default()),
             status_changed: Event::new(),
             ready: ready.clone(),
             clock,
@@ -247,6 +247,7 @@ impl XiaomiAdapter {
                 context.status_changed.notify(usize::MAX);
             }
         }
+        context.update_routing("stored configuration restored");
         Ok((
             Self {
                 cloud,

@@ -220,7 +220,7 @@ fn temporary_recovery_failure_backs_off_without_stopping_credentials() {
         until(|| {
             c.cloud.lock().unwrap().restores == 1
                 && matches!(
-                    c.context.auth_report().mijia,
+                    c.context.diagnostics().auth.mijia,
                     AuthenticationState::Unavailable(_)
                 )
         })
@@ -256,7 +256,7 @@ fn signature_failure_does_not_attempt_account_recovery() {
     block_on(rig.run(|c| async move {
         until(|| {
             matches!(
-                c.context.auth_report().mijia,
+                c.context.diagnostics().auth.mijia,
                 AuthenticationState::Unavailable(_)
             )
         })
@@ -317,7 +317,7 @@ fn account_protocol_failure_does_not_repeat_on_unrelated_credential_events() {
         until(|| {
             c.cloud.lock().unwrap().restores == 1
                 && matches!(
-                    c.context.auth_report().mijia,
+                    c.context.diagnostics().auth.mijia,
                     AuthenticationState::Unavailable(_)
                 )
         })

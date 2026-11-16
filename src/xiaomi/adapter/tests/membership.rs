@@ -399,7 +399,7 @@ fn incomplete_foreign_or_failed_directory_sync_cannot_remove_published_devices()
                 until(|| {
                     control.context.diagnostics().catalog_problem.is_some()
                         || matches!(
-                            control.context.auth_report().ha,
+                            control.context.diagnostics().auth.ha,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                 })
