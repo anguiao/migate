@@ -93,7 +93,7 @@ pub(super) async fn send(
 }
 
 fn snapshot_members(context: &Context, plan: &RepairPlan) -> Vec<SourceRef> {
-    let live = context.live.borrow();
+    let live = context.directory.borrow();
     plan.members
         .iter()
         .filter_map(|key| {

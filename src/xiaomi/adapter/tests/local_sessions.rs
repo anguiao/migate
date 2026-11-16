@@ -11,13 +11,13 @@ fn cached_local_control_survives_temporary_cloud_detail_failures() {
             until(|| {
                 control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .values()
                     .all(|slot| slot.loading.is_none())
                     && matches!(
-                        control.context.status.borrow().auth.ha,
+                        control.context.auth_report().ha,
                         crate::xiaomi::auth::AuthenticationState::Authenticated
                     )
                     && function(&control.context.registry, "one", "outlet:2")
@@ -74,9 +74,9 @@ fn cached_local_access_recovers_while_cloud_member_sync_is_stalled() {
 #[test]
 fn discovery_timeout_keeps_its_reason_and_diagnostic_wakes_do_not_skip_retry() {
     block_on(Rig::new(true,&[]).run(|c|async move {
-    advance_to(&c.clock,Duration::from_secs(30)).await;until(||matches!(c.context.status.borrow().gateway,GatewayStatus::Unavailable(_))).await;
+    advance_to(&c.clock,Duration::from_secs(30)).await;until(||matches!(c.context.diagnostics().gateway,GatewayStatus::Unavailable(_))).await;
     c.context.set_catalog_problem(Some("cloud diagnostic".into()));c.context.changed.notify(usize::MAX);for _ in 0..10 {future::yield_now().await;}
-    assert!(matches!(c.context.status.borrow().gateway,GatewayStatus::Unavailable(ref reason) if reason.contains("gateway")));
+    assert!(matches!(c.context.diagnostics().gateway,GatewayStatus::Unavailable(ref reason) if reason.contains("gateway")));
     let mut changes=c.discovery.subscribe();let mut retry=Box::pin(super::super::local::wait_retry(&c.context,&c.discovery,&mut changes,None,Duration::from_secs(5)));assert!(poll_once(retry.as_mut()).await.is_none());
     c.context.changed.notify(usize::MAX);assert!(poll_once(retry.as_mut()).await.is_none());c.clock.advance(Duration::from_secs(5));retry.await.unwrap();
 }));
@@ -97,7 +97,7 @@ fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
                     peer.state.borrow_mut().list_error = true;
                 }
                 peer.list_changed(&["one"]);
-                until(|| control.context.status.borrow().catalog_problem.is_some()).await;
+                until(|| control.context.diagnostics().catalog_problem.is_some()).await;
                 assert_eq!(
                     control.context.priority(),
                     super::super::routing::PathPriority::LocalFirst
@@ -149,7 +149,7 @@ fn a_full_list_timeout_keeps_existing_routes_and_retries_after_one_minute() {
             super::super::local::refresh_access(&control.context);
             control.clock.advance(Duration::from_secs(3));
             until(|| peer.lists() == lists + 1).await;
-            until(|| control.context.access_problem.borrow().is_some()).await;
+            until(|| control.context.hub.borrow().problem().is_some()).await;
             let retry = control.clock.now() + Duration::from_secs(60);
             until(|| control.clock.deadlines.lock().unwrap().contains(&retry)).await;
 
@@ -177,7 +177,7 @@ fn a_full_list_timeout_keeps_existing_routes_and_retries_after_one_minute() {
             peer.state.borrow_mut().list_timeout = false;
             control.clock.advance(Duration::from_secs(1));
             until(|| peer.lists() == lists + 2).await;
-            until(|| control.context.access_problem.borrow().is_none()).await;
+            until(|| control.context.hub.borrow().problem().is_none()).await;
             assert_eq!(control.context.priority(), PathPriority::LocalFirst);
         })
         .await;
@@ -197,8 +197,8 @@ fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() 
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| {
-                    control.context.access_problem.borrow().is_some()
-                        && control.context.cloud_problem.borrow().is_some()
+                    control.context.hub.borrow().problem().is_some()
+                        && control.context.directory.borrow().problem().is_some()
                 })
                 .await;
                 assert_eq!(peer.lists(), 1);
@@ -221,11 +221,16 @@ fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() 
                     .advance(Duration::from_secs(if timeout { 60 } else { 3 }));
                 initialized(control, &peer, &["one"]).await;
                 assert_eq!(peer.lists(), 2);
-                assert!(control.context.access_problem.borrow().is_none());
-                assert!(control.context.cloud_problem.borrow().is_some());
+                assert!(control.context.hub.borrow().problem().is_none());
+                assert!(control.context.directory.borrow().problem().is_some());
                 assert_eq!(
-                    control.context.status.borrow().catalog_problem,
-                    *control.context.cloud_problem.borrow()
+                    control.context.diagnostics().catalog_problem,
+                    control
+                        .context
+                        .directory
+                        .borrow()
+                        .problem()
+                        .map(str::to_owned)
                 );
                 function(&control.context.registry, "one", "outlet:2")
                     .execute(Command::On)
@@ -245,13 +250,13 @@ fn disconnect_cancels_gateway_list_backoff_before_a_new_session_starts() {
         peer.state.borrow_mut().list_error = true;
         let control = &c;
         c.peer(peer, |peer| async move {
-            until(|| control.context.access_problem.borrow().is_some()).await;
+            until(|| control.context.hub.borrow().problem().is_some()).await;
             assert_eq!(peer.lists(), 1);
         })
         .await;
         until(|| {
             matches!(
-                c.context.status.borrow().gateway,
+                c.context.diagnostics().gateway,
                 GatewayStatus::Unavailable(_)
             )
         })
@@ -277,7 +282,7 @@ fn disconnect_cancels_gateway_list_backoff_before_a_new_session_starts() {
                 future::yield_now().await;
             }
             assert_eq!(peer.lists(), requests);
-            assert!(control.context.access_problem.borrow().is_none());
+            assert!(control.context.hub.borrow().problem().is_none());
         })
         .await;
     }));
@@ -299,7 +304,14 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
                 .events
                 .send(announcement(
                     next_address,
-                    &control.context.live.borrow().scope.as_ref().unwrap().uid,
+                    &control
+                        .context
+                        .directory
+                        .borrow()
+                        .scope
+                        .as_ref()
+                        .unwrap()
+                        .uid,
                     "next",
                     456,
                 ))
@@ -320,7 +332,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
                 .unwrap();
             assert_eq!(peer.count("rpcReq", "one", 2), 1);
             assert_eq!(
-                control.context.status.borrow().gateway,
+                control.context.diagnostics().gateway,
                 GatewayStatus::Connected("123".into())
             );
         })
@@ -328,7 +340,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
         drop(std::mem::replace(&mut c.listener, next));
         until(|| {
             matches!(
-                c.context.status.borrow().gateway,
+                c.context.diagnostics().gateway,
                 GatewayStatus::Unavailable(_)
             )
         })
@@ -338,7 +350,7 @@ fn a_new_master_replaces_a_failed_cached_route_without_changing_devices() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
             assert_eq!(
-                control.context.status.borrow().gateway,
+                control.context.diagnostics().gateway,
                 GatewayStatus::Connected("456".into())
             );
             assert_eq!(control.discovery.snapshot().gateways.len(), 3);
@@ -416,7 +428,7 @@ fn masters_failing_after_connack_cannot_starve_a_later_healthy_master() {
             drop(broker);
             until(|| {
                 matches!(
-                    c.context.status.borrow().gateway,
+                    c.context.diagnostics().gateway,
                     GatewayStatus::Unavailable(_)
                 )
             })
@@ -436,7 +448,7 @@ fn masters_failing_after_connack_cannot_starve_a_later_healthy_master() {
             c.events
                 .send(announcement(
                     listener.get_ref().local_addr().unwrap(),
-                    &c.context.live.borrow().scope.as_ref().unwrap().uid,
+                    &c.context.directory.borrow().scope.as_ref().unwrap().uid,
                     name,
                     did,
                 ))
@@ -453,7 +465,7 @@ fn masters_failing_after_connack_cannot_starve_a_later_healthy_master() {
                 initialized(&c, &peer, &["one"]).await;
                 assert_eq!(attempts.borrow().as_slice(), &[123, 456]);
                 assert_eq!(
-                    c.context.status.borrow().gateway,
+                    c.context.diagnostics().gateway,
                     GatewayStatus::Connected("789".into())
                 );
                 let function = function(&c.context.registry, "one", "outlet:2");
@@ -480,7 +492,13 @@ fn a_new_master_in_the_current_group_wakes_connection_retry() {
             .discovery
             .snapshot()
             .route(
-                &c.context.live.borrow().scope.as_ref().unwrap().group_id(),
+                &c.context
+                    .directory
+                    .borrow()
+                    .scope
+                    .as_ref()
+                    .unwrap()
+                    .group_id(),
                 None,
             )
             .unwrap();
@@ -502,7 +520,7 @@ fn a_new_master_in_the_current_group_wakes_connection_retry() {
         c.events
             .send(announcement(
                 address,
-                &c.context.live.borrow().scope.as_ref().unwrap().uid,
+                &c.context.directory.borrow().scope.as_ref().unwrap().uid,
                 "next",
                 456,
             ))
@@ -536,7 +554,7 @@ fn reconnect_keeps_command_consumers_cancels_old_writes_and_rebuilds_only_regist
         assert!(command.await.is_err());
         until(|| {
             matches!(
-                c.context.status.borrow().gateway,
+                c.context.diagnostics().gateway,
                 GatewayStatus::Unavailable(_)
             )
         })
@@ -626,7 +644,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             assert!(
                 !control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .contains_key("group-1")
@@ -637,7 +655,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             until(|| {
                 control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .get("group-1")
@@ -653,7 +671,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             .await;
             assert!(peer.lists() > lists);
             let id = {
-                let live = control.context.live.borrow();
+                let live = control.context.directory.borrow();
                 let record = live.devices["group-1"].admitted.as_ref().unwrap();
                 let cached = record.native.clone();
                 cached
@@ -741,7 +759,7 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
                 ["group-p", "group-v"].iter().all(|did| {
                     control
                         .context
-                        .live
+                        .directory
                         .borrow()
                         .devices
                         .get(*did)
@@ -766,12 +784,7 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
             ));
             // Obtain the virtual group's own advertised local row as well.
             peer.list_changed(&["group-v"]);
-            until(|| {
-                control.context.live.borrow().devices["group-v"]
-                    .access
-                    .is_some()
-            })
-            .await;
+            until(|| control.context.hub.borrow().access("group-v").is_some()).await;
             assert!(control.context.control_path("group-v").is_none());
             assert!(matches!(
                 virtual_group.snapshot().availability,

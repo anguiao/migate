@@ -73,7 +73,7 @@ fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replaceme
             );
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")

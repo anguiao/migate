@@ -48,14 +48,19 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
     block_on(rig.run_result_without_publication(|c| async move {
         c.announce();
         until(|| {
-            c.context.relations.borrow().snapshot().iter().any(|group| {
-                group.active
-                    && group
-                        .membership
-                        .members
-                        .iter()
-                        .any(|member| member == "one")
-            })
+            c.context
+                .directory
+                .borrow()
+                .confirmed_groups()
+                .iter()
+                .any(|group| {
+                    group.active
+                        && group
+                            .membership
+                            .members
+                            .iter()
+                            .any(|member| member == "one")
+                })
         })
         .await;
         let port = free_udp_port();
@@ -227,7 +232,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             // A real active group light action is cancelled when the runner is
             // dropped for the next rebuild.
             let (id, _) = {
-                let live = c.context.live.borrow();
+                let live = c.context.directory.borrow();
                 let record = live.devices["group-1"].admitted.as_ref().unwrap();
                 let cached = record.native.clone();
                 let light = cached
@@ -262,7 +267,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             // Phase 2: the relation returns to its confirmed members while the
             // confirmed native range changes the published fixed shape.
             {
-                let mut live = c.context.live.borrow_mut();
+                let mut live = c.context.directory.borrow_mut();
                 let slot = live.devices.get_mut("group-1").unwrap();
                 let candidate = slot.candidate.as_mut().unwrap();
                 let native = candidate.native.as_ref().unwrap();
@@ -461,7 +466,7 @@ fn failed_source_wins_before_configured_startup_commits() {
     block_on(rig.run_result_without_publication(|c| async move {
         c.announce();
         until(|| {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             live.scope.is_some()
                 && live.devices.get("one").is_some_and(|slot| {
                     slot.candidate

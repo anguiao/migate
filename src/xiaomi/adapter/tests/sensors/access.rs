@@ -106,7 +106,7 @@ fn mixed_proxy_cloud_notifications_cannot_borrow_another_functions_access() {
             // Revoke the actual control eligibility and deliver queued values
             // synchronously, before asynchronous source selection can run.
             c.context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("proxy.sensor")
@@ -171,8 +171,7 @@ fn unreliable_ble_and_proxy_cloud_offline_does_not_block_reads() {
             assert_eq!(physical.availability(), Availability::Available);
             let status = c
                 .context
-                .status
-                .borrow()
+                .diagnostics()
                 .devices
                 .iter()
                 .find(|device| device.did == did)
@@ -197,7 +196,7 @@ fn unreliable_ble_and_proxy_cloud_offline_does_not_block_reads() {
         // The skipped online flag never bypasses an explicit authorization
         // failure. Readings survive the path loss.
         c.context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut("blt.sensor")
@@ -239,7 +238,7 @@ fn a_reliable_offline_sensor_does_not_read_or_become_available() {
     block_on(rig.run(|c| async move {
         c.announce();
         for _ in 0..500 {
-            let access_known = c.context.live.borrow().devices["sensor"]
+            let access_known = c.context.directory.borrow().devices["sensor"]
                 .cloud_access
                 .is_some();
             if access_known {
@@ -258,8 +257,7 @@ fn a_reliable_offline_sensor_does_not_read_or_become_available() {
         );
         let status = c
             .context
-            .status
-            .borrow()
+            .diagnostics()
             .devices
             .iter()
             .find(|device| device.did == "sensor")
@@ -287,14 +285,13 @@ fn prefixed_control_devices_keep_offline_blocking() {
         for _ in 0..500 {
             let known = dids.iter().all(|did| {
                 c.context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .get(*did)
                     .is_some_and(|slot| slot.cloud_access.is_some())
                     && c.context
-                        .status
-                        .borrow()
+                        .diagnostics()
                         .devices
                         .iter()
                         .any(|d| d.did == *did)
@@ -328,8 +325,7 @@ fn prefixed_control_devices_keep_offline_blocking() {
             );
             let status = c
                 .context
-                .status
-                .borrow()
+                .diagnostics()
                 .devices
                 .iter()
                 .find(|device| device.did == did)

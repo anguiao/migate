@@ -29,7 +29,7 @@ fn reads_since(peer: &Peer, start: usize) -> Vec<String> {
 async fn subscriptions_ready(c: &Control, dids: &[&str]) {
     advance_to(&c.clock, Duration::from_millis(10)).await;
     until(|| {
-        let live = c.context.live.borrow();
+        let live = c.context.directory.borrow();
         dids.iter().all(|did| {
             live.devices
                 .get(*did)
@@ -86,7 +86,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
                             .snapshot()
                             .power()
                             == Some(Power::Off)
-                        && control.context.live.borrow().devices[*did]
+                        && control.context.directory.borrow().devices[*did]
                             .admitted
                             .as_ref()
                             .is_some_and(|work| {
@@ -116,7 +116,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
 
             let feedback_did = &first[0];
             assert!(
-                control.context.live.borrow().devices[feedback_did]
+                control.context.directory.borrow().devices[feedback_did]
                     .admitted
                     .as_ref()
                     .unwrap()
@@ -320,7 +320,7 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
         let control = &c;
         c.peer(peer, |peer| async move {
             subscriptions_ready(control, &["one"]).await;
-            let one = control.context.live.borrow().devices["one"]
+            let one = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -361,7 +361,7 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
                 sub.pkid,
                 vec![SubscribeReasonCode::QoS2],
             )));
-            let work = control.context.live.borrow().devices["multi"]
+            let work = control.context.directory.borrow().devices["multi"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -437,14 +437,14 @@ fn removal_and_disconnect_cancel_pending_rounds_and_property_backoff() {
             if !remove {
                 until(|| {
                     matches!(
-                        c.context.status.borrow().gateway,
+                        c.context.diagnostics().gateway,
                         GatewayStatus::Unavailable(_)
                     )
                 })
                 .await;
                 c.clock.advance(Duration::from_secs(3));
                 settle_wire().await;
-                assert!(c.context.live.borrow().session.is_none());
+                assert!(c.context.hub.borrow().session().is_none());
                 assert_eq!(observing.count("get", "multi", 0), 1);
             }
         }));

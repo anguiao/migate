@@ -3,7 +3,7 @@ use crate::xiaomi::capability::PropertyBinding;
 use std::sync::atomic::Ordering;
 
 fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
-    c.context.live.borrow().devices[did]
+    c.context.directory.borrow().devices[did]
         .admitted
         .as_ref()
         .unwrap()
@@ -12,7 +12,7 @@ fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
 
 async fn settled(c: &Control, dids: &[&str]) {
     until(|| {
-        let live = c.context.live.borrow();
+        let live = c.context.directory.borrow();
         let cloud = c.cloud.lock().unwrap();
         dids.iter().all(|did| {
             live.devices
@@ -189,13 +189,13 @@ fn malformed_periodic_response_preserves_correlated_offline_error() {
         })
         .await;
         assert!(
-            !c.context.live.borrow().devices["one"]
+            !c.context.directory.borrow().devices["one"]
                 .cloud_access
                 .as_ref()
                 .unwrap()
                 .online
         );
-        assert!(!c.context.http_paused.get());
+        assert!(!c.context.credentials.borrow().http_paused());
     }));
 }
 

@@ -29,7 +29,7 @@ fn measurement(context: &super::super::state::Context, did: &str, id: &str) -> M
 }
 
 fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::work::DeviceWork> {
-    context.live.borrow().devices[did]
+    context.directory.borrow().devices[did]
         .admitted
         .as_ref()
         .unwrap()
@@ -69,8 +69,7 @@ fn battery_status(
     did: &str,
 ) -> super::super::model::DeviceStatus {
     context
-        .status
-        .borrow()
+        .diagnostics()
         .devices
         .iter()
         .find(|device| device.did == did)

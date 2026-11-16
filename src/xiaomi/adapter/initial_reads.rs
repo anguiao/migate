@@ -1,9 +1,6 @@
 //! Initial source observations needed by the currently published functions.
 
-use super::{
-    state::{Context, Live},
-    work::DeviceWork,
-};
+use super::{directory::Directory, state::Context, work::DeviceWork};
 use crate::{
     configuration::CommittedConfiguration,
     device::{DeviceKey, FunctionDescription, FunctionKey},
@@ -12,7 +9,7 @@ use crate::{
 
 pub(super) fn ready(context: &Context, configuration: &CommittedConfiguration) -> bool {
     let graph = context.graph.borrow();
-    let live = context.live.borrow();
+    let live = context.directory.borrow();
 
     for device in &graph.published {
         let Some(work) = current_work(&live, device) else {
@@ -69,7 +66,7 @@ pub(super) fn ready(context: &Context, configuration: &CommittedConfiguration) -
     })
 }
 
-fn current_work<'a>(live: &'a Live, key: &DeviceKey) -> Option<&'a DeviceWork> {
+fn current_work<'a>(live: &'a Directory, key: &DeviceKey) -> Option<&'a DeviceWork> {
     live.devices
         .get(&key.id)
         .and_then(|slot| slot.admitted.as_deref())
@@ -96,7 +93,7 @@ fn function_ready(work: &DeviceWork, id: &str) -> bool {
 }
 
 fn group_member_ready(
-    live: &Live,
+    live: &Directory,
     key: &FunctionKey,
     published: &FunctionDescription,
     physical_group: bool,

@@ -131,7 +131,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 .registry
                 .get(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
-            let mut changed = control.context.live.borrow().devices["one"]
+            let mut changed = control.context.directory.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -148,7 +148,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -244,7 +244,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
             }
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("multi")
@@ -282,7 +282,7 @@ fn rejected_write_keeps_a_prior_inflight_read_valid() {
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -345,7 +345,7 @@ fn old_read_before_the_receipt_does_not_suppress_accepted_power() {
                         .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
                 })
                 .await;
-                let work = control.context.live.borrow().devices["one"]
+                let work = control.context.directory.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();
@@ -397,7 +397,7 @@ fn outlet_without_notifications_uses_the_shared_post_write_feedback() {
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
             .await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -444,7 +444,7 @@ fn outlet_post_write_read_before_receipt_remains_the_observed_state() {
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
             .await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -493,7 +493,7 @@ fn outlet_receipt_refreshes_again_after_a_post_write_inflight_read() {
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
             .await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -542,7 +542,7 @@ fn outlet_read_started_before_the_write_does_not_satisfy_feedback() {
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
             .await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();

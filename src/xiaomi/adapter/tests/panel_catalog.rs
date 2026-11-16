@@ -83,7 +83,7 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
                 .iter()
                 .all(|entry| entry.device.key().id == "panel")
         );
-        assert!(!c.context.live.borrow().devices.contains_key("alias"));
+        assert!(!c.context.directory.borrow().devices.contains_key("alias"));
         function(&c.context.registry, "panel", "relay:3")
             .execute(Command::On)
             .await
@@ -111,12 +111,12 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
         }
         c.context.request_sync();
         until(|| {
-            c.context.status.borrow().catalog_problem.is_some()
-                || c.context.live.borrow().devices.contains_key("alias")
+            c.context.diagnostics().catalog_problem.is_some()
+                || c.context.directory.borrow().devices.contains_key("alias")
         })
         .await;
-        assert!(c.context.status.borrow().catalog_problem.is_some());
-        assert!(!c.context.live.borrow().devices.contains_key("alias"));
+        assert!(c.context.diagnostics().catalog_problem.is_some());
+        assert!(!c.context.directory.borrow().devices.contains_key("alias"));
         assert_eq!(
             c.store
                 .devices()
@@ -134,7 +134,7 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
             .unwrap()["extra"]["split"]["moduleId"] = json!(3);
         c.clock.advance(Duration::from_secs(3));
         c.context.request_sync();
-        until(|| c.context.status.borrow().catalog_problem.is_none()).await;
+        until(|| c.context.diagnostics().catalog_problem.is_none()).await;
         assert_eq!(
             c.store
                 .devices()
@@ -196,7 +196,7 @@ fn complete_catalog_binds_names_and_filters_aliases_before_description_requests(
                 .any(|item| item["device_id"] == "single" && item["name"] == "Single key")
         );
         for did in ["left-alias", "middle-alias"] {
-            assert!(!c.context.live.borrow().devices.contains_key(did));
+            assert!(!c.context.directory.borrow().devices.contains_key(did));
             assert!(
                 c.context
                     .registry
@@ -289,7 +289,7 @@ fn cached_alias_never_restores_as_a_physical_device_even_when_catalog_is_offline
     assert!(
         !source
             .context
-            .live
+            .directory
             .borrow()
             .devices
             .contains_key("left-alias")
@@ -300,10 +300,16 @@ fn cached_alias_never_restores_as_a_physical_device_even_when_catalog_is_offline
         c.announce();
         until(|| {
             c.cloud.lock().unwrap().catalogs > 0
-                && c.context.live.borrow().devices["panel"].confirmed
+                && c.context.directory.borrow().devices["panel"].confirmed
         })
         .await;
-        assert!(!c.context.live.borrow().devices.contains_key("left-alias"));
+        assert!(
+            !c.context
+                .directory
+                .borrow()
+                .devices
+                .contains_key("left-alias")
+        );
         assert!(
             c.context
                 .registry
@@ -364,7 +370,7 @@ fn another_home_cannot_contribute_panel_names_or_turn_an_alias_into_a_device() {
             "outside-alias",
             "foreign-panel",
         ] {
-            assert!(!c.context.live.borrow().devices.contains_key(did));
+            assert!(!c.context.directory.borrow().devices.contains_key(did));
         }
         assert!(
             c.cloud
@@ -394,15 +400,21 @@ fn failed_first_catalog_defers_unknown_devices_until_the_retry_classifies_them()
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.context.live.borrow().scope.is_some()).await;
-        assert!(c.context.live.borrow().devices.is_empty());
+        until(|| c.context.directory.borrow().scope.is_some()).await;
+        assert!(c.context.directory.borrow().devices.is_empty());
         assert!(c.cloud.lock().unwrap().detail_requests.is_empty());
-        assert!(c.context.status.borrow().catalog_problem.is_some());
+        assert!(c.context.diagnostics().catalog_problem.is_some());
         c.cloud.lock().unwrap().catalog_status = 200;
         c.clock.advance(Duration::from_secs(3));
         c.context.request_sync();
         until(|| c.publication.current().published.list().len() == 2).await;
-        assert!(!c.context.live.borrow().devices.contains_key("left-alias"));
+        assert!(
+            !c.context
+                .directory
+                .borrow()
+                .devices
+                .contains_key("left-alias")
+        );
         assert!(
             c.context
                 .registry

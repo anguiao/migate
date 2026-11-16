@@ -34,7 +34,7 @@ fn mqtt_and_token_refresh_work_without_an_ha_identity_probe() {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one") && c.cloud.lock().unwrap().homes > 0).await;
             assert!(matches!(
-                c.context.status.borrow().auth.ha,
+                c.context.auth_report().ha,
                 crate::xiaomi::auth::AuthenticationState::Authenticated
             ));
             assert!(c.context.cloud_candidate("one", true).is_err());
@@ -43,7 +43,7 @@ fn mqtt_and_token_refresh_work_without_an_ha_identity_probe() {
             until(|| {
                 c.cloud.lock().unwrap().tokens == 1
                     && matches!(
-                        c.context.status.borrow().auth.ha,
+                        c.context.auth_report().ha,
                         crate::xiaomi::auth::AuthenticationState::Authenticated
                     )
             })
@@ -79,7 +79,7 @@ fn ha_rejection_and_refresh_do_not_request_an_extra_mijia_directory_round() {
         until(|| c.cloud.lock().unwrap().tokens == 1).await;
         until(|| {
             matches!(
-                c.context.status.borrow().auth.ha,
+                c.context.auth_report().ha,
                 crate::xiaomi::auth::AuthenticationState::Authenticated
             )
         })
@@ -144,10 +144,9 @@ fn token_deadline_is_polled_while_initial_mijia_directory_is_pending() {
         c.clock.advance(Duration::from_secs(1));
         until(|| {
             c.context
-                .live
-                .borrow()
                 .credentials
-                .as_ref()
+                .borrow()
+                .record()
                 .unwrap()
                 .ha
                 .authorization
@@ -160,10 +159,9 @@ fn token_deadline_is_polled_while_initial_mijia_directory_is_pending() {
         assert_eq!(c.cloud.lock().unwrap().certs, 1);
         assert_eq!(
             c.context
-                .live
-                .borrow()
                 .credentials
-                .as_ref()
+                .borrow()
+                .record()
                 .unwrap()
                 .ha
                 .authorization
@@ -217,10 +215,9 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             assert_eq!(peer.state.borrow().connects[1], "fresh-access");
             assert_eq!(
                 c.context
-                    .live
-                    .borrow()
                     .credentials
-                    .as_ref()
+                    .borrow()
+                    .record()
                     .unwrap()
                     .ha
                     .authorization
@@ -243,7 +240,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             new_cert_release.send(()).unwrap();
             until(|| {
                 matches!(
-                    c.context.status.borrow().auth.certificate_update,
+                    c.context.auth_report().certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
             })
@@ -262,10 +259,9 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
             );
             assert_eq!(
                 c.context
-                    .live
-                    .borrow()
                     .credentials
-                    .as_ref()
+                    .borrow()
+                    .record()
                     .unwrap()
                     .ha
                     .authorization
@@ -294,10 +290,7 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
             let one = function(&c.context.registry, "one", "outlet:2");
             c.clock.advance(Duration::from_secs(5));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
-            assert_eq!(
-                format!("{:?}", c.context.status.borrow().auth.ha),
-                "Refreshing"
-            );
+            assert_eq!(format!("{:?}", c.context.auth_report().ha), "Refreshing");
             assert_eq!(one.snapshot().availability, Availability::Available);
             one.execute(Command::On).await.unwrap();
             c.clock.advance(Duration::from_secs(5));
@@ -341,13 +334,13 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
             until(|| control.cloud.lock().unwrap().tokens == 1).await;
             until(|| {
                 matches!(
-                    control.context.status.borrow().auth.ha,
+                    control.context.auth_report().ha,
                     crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                 )
             })
             .await;
             assert!(control.context.cloud_candidate("one", true).is_ok());
-            assert!(!control.context.http_paused.get());
+            assert!(!control.context.credentials.borrow().http_paused());
             control.clock.advance(Duration::from_secs(5));
             until(|| !control.context.token_usable()).await;
             assert!(matches!(
@@ -378,14 +371,7 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let expiry = control
-                .context
-                .status
-                .borrow()
-                .auth
-                .certificate
-                .unwrap()
-                .not_after;
+            let expiry = control.context.auth_report().certificate.unwrap().not_after;
             let by = Duration::from_secs((expiry - control.clock.wall()) as u64);
             control.cloud.lock().unwrap().cert_status = 503;
             control.clock.advance(by);
@@ -425,7 +411,7 @@ fn home_and_info_rejection_stop_only_mijia_recovery_after_account_rejection() {
             c.context.request_sync();
             until(|| {
                 matches!(
-                    c.context.status.borrow().auth.mijia,
+                    c.context.auth_report().mijia,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 )
             })
@@ -441,7 +427,7 @@ fn home_and_info_rejection_stop_only_mijia_recovery_after_account_rejection() {
             async_io::Timer::after(Duration::from_millis(20)).await;
             assert_eq!(c.cloud.lock().unwrap().restores, 1);
             assert!(!matches!(
-                c.context.status.borrow().auth.ha,
+                c.context.auth_report().ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
         }));
@@ -477,10 +463,9 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
             .unwrap();
         until(|| {
             c.context
-                .live
-                .borrow()
                 .credentials
-                .as_ref()
+                .borrow()
+                .record()
                 .unwrap()
                 .ha
                 .authorization
@@ -498,18 +483,15 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         until(|| c.cloud.lock().unwrap().certs == 2).await;
         until(|| {
             matches!(
-                c.context.status.borrow().auth.certificate_update,
+                c.context.auth_report().certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Updated
             )
         })
         .await;
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);
+        assert!(!c.context.credentials.borrow().refresh_paused());
         assert!(!matches!(
-            *c.context.ha_sync.borrow(),
-            super::super::credentials::HaSync::Paused
-        ));
-        assert!(!matches!(
-            c.context.status.borrow().auth.ha,
+            c.context.auth_report().ha,
             crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
         ));
     }));
@@ -558,10 +540,10 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
                 .await
                 .is_err()
         );
-        assert!(c.context.http_paused.get());
+        assert!(c.context.credentials.borrow().http_paused());
         old_release.send(()).unwrap();
         async_io::Timer::after(Duration::from_millis(30)).await;
-        assert!(c.context.http_paused.get());
+        assert!(c.context.credentials.borrow().http_paused());
         assert!(
             c.context
                 .registry
@@ -594,7 +576,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 matches!(
-                    control.context.status.borrow().auth.certificate_update,
+                    control.context.auth_report().certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Failed(_)
                 )
             })
@@ -608,7 +590,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             until(|| {
                 control.cloud.lock().unwrap().certs > before
                     && matches!(
-                        control.context.status.borrow().auth.certificate_update,
+                        control.context.auth_report().certificate_update,
                         crate::xiaomi::auth::CertificateUpdate::Updated
                     )
             })
@@ -636,7 +618,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             initialized(control, &peer, &["one"]).await;
             until(|| {
                 matches!(
-                    control.context.status.borrow().auth.ha,
+                    control.context.auth_report().ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 )
             })
@@ -654,7 +636,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             }
             assert_eq!(control.cloud.lock().unwrap().homes, before);
             assert!(matches!(
-                control.context.status.borrow().auth.ha,
+                control.context.auth_report().ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
         })
@@ -737,7 +719,14 @@ fn stale_candidate_401_cannot_pause_identical_replacement_session() {
             initialized(control, &peer, &["one", "multi"]).await;
             assert_eq!(control.cloud.lock().unwrap().restores, 0);
             assert_eq!(control.cloud.lock().unwrap().tokens, 0);
-            assert!(control.context.mijia_rejected.borrow().is_none());
+            assert!(
+                control
+                    .context
+                    .credentials
+                    .borrow()
+                    .mijia_rejected()
+                    .is_none()
+            );
         })
         .await;
     }));
@@ -764,7 +753,7 @@ fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia
                 initialized(control, &peer, &["one"]).await;
                 until(|| {
                     matches!(
-                        control.context.status.borrow().auth.mijia,
+                        control.context.auth_report().mijia,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     )
                 })
@@ -793,7 +782,7 @@ fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia
                 }
                 assert_eq!(control.cloud.lock().unwrap().restores, 1);
                 assert!(!matches!(
-                    control.context.status.borrow().auth.ha,
+                    control.context.auth_report().ha,
                     crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                 ));
             })
@@ -826,7 +815,7 @@ fn coalesced_candidate_401s_preserve_the_temporary_recovery_backoff() {
             until(|| {
                 control.cloud.lock().unwrap().restores == 1
                     && matches!(
-                        control.context.status.borrow().auth.mijia,
+                        control.context.auth_report().mijia,
                         crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                     )
             })
@@ -903,7 +892,7 @@ fn initial_certificate_failure_reuses_the_saved_identity_on_retry() {
         until(|| {
             c.cloud.lock().unwrap().certs == 1
                 && matches!(
-                    c.context.status.borrow().auth.certificate_update,
+                    c.context.auth_report().certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Failed(
                         crate::xiaomi::auth::FailureReason::Cloud(_)
                     )
@@ -959,7 +948,7 @@ fn temporary_refresh_failure_and_late_unauthorized_do_not_stop_ha() {
         until(|| {
             c.cloud.lock().unwrap().tokens == 2
                 && matches!(
-                    c.context.status.borrow().auth.ha,
+                    c.context.auth_report().ha,
                     crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                 )
         })
@@ -1018,7 +1007,7 @@ fn late_certificate_rejection_cannot_stop_identical_replacement_generation() {
         until(|| {
             c.cloud.lock().unwrap().certs == 2
                 && matches!(
-                    c.context.status.borrow().auth.certificate_update,
+                    c.context.auth_report().certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
         })
@@ -1041,7 +1030,7 @@ fn stopped_ha_stays_stopped_after_adapter_restart_while_mijia_and_hub_work() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             assert!(matches!(
-                control.context.status.borrow().auth.ha,
+                control.context.auth_report().ha,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             ));
             assert!(!control.context.token_usable());
@@ -1082,16 +1071,16 @@ fn background_reports_and_repairs_a_damaged_certificate_without_replacing_identi
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().certs == 1).await;
         assert_eq!(
-            c.context.status.borrow().auth.certificate_update,
+            c.context.auth_report().certificate_update,
             crate::xiaomi::auth::CertificateUpdate::Failed(
                 crate::xiaomi::auth::FailureReason::InvalidCertificate
             )
         );
-        assert!(c.context.status.borrow().auth.certificate.is_none());
+        assert!(c.context.auth_report().certificate.is_none());
         release.send(()).unwrap();
         until(|| {
             matches!(
-                c.context.status.borrow().auth.certificate_update,
+                c.context.auth_report().certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Updated
             )
         })
@@ -1099,7 +1088,7 @@ fn background_reports_and_repairs_a_damaged_certificate_without_replacing_identi
         let repaired = c.store.xiaomi().load().unwrap().unwrap().hub.unwrap();
         assert_eq!(repaired.virtual_did, identity.virtual_did);
         assert_eq!(repaired.private_key_pem, identity.private_key_pem);
-        assert!(c.context.status.borrow().auth.certificate.is_some());
+        assert!(c.context.auth_report().certificate.is_some());
     }));
 }
 
@@ -1128,33 +1117,33 @@ fn successful_certificate_does_not_hide_failed_or_inflight_token_refresh() {
                     && c.cloud.lock().unwrap().tokens == 1
                     && if pending {
                         matches!(
-                            c.context.status.borrow().auth.ha,
+                            c.context.auth_report().ha,
                             crate::xiaomi::auth::AuthenticationState::Refreshing
                         )
                     } else {
                         matches!(
-                            c.context.status.borrow().auth.ha,
+                            c.context.auth_report().ha,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                     }
             })
             .await;
-            let status = c.context.status.borrow().auth.ha.clone();
+            let status = c.context.auth_report().ha.clone();
             certificate_release.send(()).unwrap();
             until(|| {
                 matches!(
-                    c.context.status.borrow().auth.certificate_update,
+                    c.context.auth_report().certificate_update,
                     crate::xiaomi::auth::CertificateUpdate::Updated
                 )
             })
             .await;
-            assert_eq!(c.context.status.borrow().auth.ha, status);
+            assert_eq!(c.context.auth_report().ha, status);
             assert!(c.context.token_usable());
             if pending {
                 token_release.send(()).unwrap();
                 until(|| {
                     matches!(
-                        c.context.status.borrow().auth.ha,
+                        c.context.auth_report().ha,
                         crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                     )
                 })

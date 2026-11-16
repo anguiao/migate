@@ -8,8 +8,9 @@
 //! runtime, so native subscriptions and observations are never rebuilt.
 
 use super::{
+    directory::{DeviceSlot, Directory},
     model::AdapterError,
-    state::{Context, DeviceSlot, Live, LogicalSink},
+    state::{Context, LogicalSink},
     work::DeviceWork,
 };
 use crate::xiaomi::capability::NativeDescription;
@@ -50,7 +51,7 @@ pub(crate) struct PreparedSources {
     removed: Vec<DeviceKey>,
 }
 
-impl Live {
+impl Directory {
     fn committed_work(&self, scope: &Scope, key: &DeviceKey) -> Option<(&DeviceSlot, &DeviceWork)> {
         let slot = self.devices.get(&key.id)?;
         let work = slot.admitted.as_deref()?;
@@ -66,12 +67,8 @@ impl Live {
 }
 
 impl DeviceSlot {
-    fn confirmed_access(&self) -> bool {
-        self.confirmed
-            && ((self.cloud_access.is_some() && !self.cloud_forbidden)
-                || self.access.as_ref().is_some_and(|access| {
-                    access.as_ref().is_ok_and(|access| access.spec_v2_access)
-                }))
+    fn confirmed_access(&self, hub_access: bool) -> bool {
+        self.confirmed && ((self.cloud_access.is_some() && !self.cloud_forbidden) || hub_access)
     }
 }
 
@@ -94,7 +91,7 @@ impl SourceHandle {
 
     /// End every serving action and retire unsent repaired-group frames.
     pub(crate) fn stop_actions(&self) {
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         for slot in live.devices.values() {
             if let Some(work) = &slot.admitted {
                 work.physical().reset_actions();
@@ -104,7 +101,7 @@ impl SourceHandle {
     }
 
     pub(crate) fn accessible_descriptions(&self) -> std::collections::BTreeSet<DeviceKey> {
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         live.devices
             .values()
             .filter_map(|slot| slot.committed.as_ref().map(|source| source.raw.key.clone()))
@@ -114,11 +111,15 @@ impl SourceHandle {
     /// Binding requires confirmed membership and unrevoked source authority,
     /// but does not require the device to be online.
     pub(crate) fn binding_accessible(&self, scope: &Option<Scope>, key: &DeviceKey) -> bool {
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         scope
             .as_ref()
             .and_then(|scope| live.committed_work(scope, key))
-            .is_some_and(|(slot, _)| slot.confirmed_access())
+            .is_some_and(|(slot, _)| {
+                slot.confirmed_access(self.0.hub.borrow().access(&key.id).is_some_and(|access| {
+                    access.as_ref().is_ok_and(|access| access.spec_v2_access)
+                }))
+            })
     }
 
     /// Publication supplies the last confirmed wired mode until fresh feedback arrives.
@@ -126,15 +127,20 @@ impl SourceHandle {
         if !self.0.graph.borrow().published_relays.contains(key) {
             return false;
         }
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         let Some((slot, work)) = live.committed_work(scope, &key.device) else {
             return false;
         };
         // The current home's hub can admit an already published relay while
         // the first cloud directory sync is still pending.
-        let authorized = slot.confirmed_access()
-            || !self.0.lan_scope_invalid.get()
-                && self.0.local_candidate(&key.device.id, false).is_ok();
+        let authorized = slot.confirmed_access(
+            self.0
+                .hub
+                .borrow()
+                .access(&key.device.id)
+                .is_some_and(|access| access.as_ref().is_ok_and(|access| access.spec_v2_access)),
+        ) || !self.0.lan_scope_invalid.get()
+            && self.0.local_candidate(&key.device.id, false).is_ok();
         authorized
             && work.physical().function(&key.id).is_some_and(|function| {
                 function.snapshot().relay_mode() != Some(RelayMode::Wireless)
@@ -148,7 +154,7 @@ impl SourceHandle {
     /// A new Matter instance must not restore reports for a source whose
     /// authority already ended, even if the next configuration failed to save.
     pub(crate) fn source_retained(&self, scope: &Option<Scope>, key: &DeviceKey) -> bool {
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         live.scope == *scope
             && live
                 .devices
@@ -160,7 +166,7 @@ impl SourceHandle {
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
     pub(crate) fn snapshot(&self) -> SourceFacts {
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         let scope = live.scope.clone();
         // A directory target that has not produced its matching description
         // cannot be combined with other new facts. Keep the committed graph
@@ -212,9 +218,9 @@ impl SourceHandle {
         drop(live);
         let mut relations: Vec<GroupRelation> = self
             .0
-            .relations
+            .directory
             .borrow()
-            .snapshot()
+            .confirmed_groups()
             .into_iter()
             .filter(|group| scope.as_ref() == Some(&group.scope))
             .map(|group| {
@@ -253,7 +259,7 @@ impl SourceHandle {
             scope,
             devices,
             relations,
-            split_devices: self.0.split_devices.borrow().clone(),
+            split_devices: self.0.directory.borrow().split_devices().to_vec(),
             relay_modes,
         }
     }
@@ -261,7 +267,7 @@ impl SourceHandle {
     /// Serving entries projected from one committed configuration. The native
     /// metadata comes from the committed value, never from an older runtime.
     pub(crate) fn entries(&self, configuration: &CommittedConfiguration) -> Vec<Rc<SourceEntry>> {
-        let live = self.0.live.borrow();
+        let live = self.0.directory.borrow();
         let mut entries = live
             .devices
             .values()
@@ -294,7 +300,7 @@ impl SourceHandle {
                 OperationKind::Removed => removed.push(key),
                 OperationKind::Reused => {}
                 OperationKind::ReplacedLogical => {
-                    let work = self.0.live.borrow().devices[&key.id]
+                    let work = self.0.directory.borrow().devices[&key.id]
                         .admitted
                         .clone()
                         .expect("a logical replacement keeps its native runtime");
@@ -396,7 +402,7 @@ impl SourceHandle {
                 }
             }
             self.0
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut(&did)
@@ -411,7 +417,7 @@ impl SourceHandle {
                 continue;
             }
             let device = plan.configuration.device(&operation.key).unwrap();
-            let mut live = self.0.live.borrow_mut();
+            let mut live = self.0.directory.borrow_mut();
             let slot = live.devices.get_mut(&operation.key.id).unwrap();
             let work = slot.admitted.as_ref().unwrap();
             work.physical().set_label(device.label.clone());
@@ -424,7 +430,7 @@ impl SourceHandle {
             slot.group = plan.derived.groups.contains_key(&operation.key.id);
         }
         {
-            let mut live = self.0.live.borrow_mut();
+            let mut live = self.0.directory.borrow_mut();
             for slot in live.devices.values_mut() {
                 slot.committed = None;
             }
@@ -463,7 +469,7 @@ impl SourceHandle {
     pub(crate) fn set_label(&self, key: &DeviceKey, label: &str) {
         if let Some(work) = self
             .0
-            .live
+            .directory
             .borrow()
             .devices
             .get(&key.id)
@@ -503,7 +509,7 @@ impl Context {
         self.store.lan().remove(did)?;
         let key = DeviceKey::new("xiaomi", did);
         let (admitted, cached) = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)

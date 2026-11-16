@@ -72,7 +72,7 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
             peer.state.borrow_mut().hold_reads = false;
             peer.release("multi", 3, json!({"value":true})).await;
             until(|| {
-                control.context.live.borrow().devices["multi"]
+                control.context.directory.borrow().devices["multi"]
                     .admitted
                     .as_ref()
                     .unwrap()

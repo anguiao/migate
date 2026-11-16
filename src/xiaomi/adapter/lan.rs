@@ -88,7 +88,7 @@ pub(super) async fn run(context: Rc<Context>) -> Result<(), AdapterError> {
     loop {
         let changed = context.changed.listen();
         let dids = context
-            .live
+            .directory
             .borrow()
             .devices
             .keys()
@@ -103,7 +103,7 @@ pub(super) async fn run(context: Rc<Context>) -> Result<(), AdapterError> {
 
 impl Context {
     pub(super) fn legacy_mapping(&self, did: &str) -> Option<&'static Mapping> {
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         live.devices
             .get(did)?
             .committed
@@ -117,7 +117,7 @@ impl Context {
     pub(super) fn invalidate_lan_scope(&self) -> Result<(), AdapterError> {
         self.lan_scope_invalid.set(true);
         let (scope, dids) = {
-            let live = self.live.borrow();
+            let live = self.directory.borrow();
             (
                 live.scope.clone(),
                 live.devices.keys().cloned().collect::<Vec<_>>(),
@@ -137,7 +137,7 @@ impl Context {
     }
     pub(super) fn stop_lan(&self, did: &str) -> bool {
         let mut was_active = false;
-        if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
+        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
             if let Some(task) = slot.lan.task.take() {
                 task.close();
             }
@@ -162,7 +162,7 @@ impl Context {
         failure: Option<RequestError>,
     ) -> Result<(), AdapterError> {
         let eligible = {
-            let live = self.live.borrow();
+            let live = self.directory.borrow();
             let Some(slot) = live.devices.get(did) else {
                 return Ok(());
             };
@@ -219,7 +219,7 @@ impl Context {
             return Ok(());
         };
         if matches!(cloud, Some(LanCredentials::NotIp)) {
-            if self.live.borrow().devices[did]
+            if self.directory.borrow().devices[did]
                 .lan
                 .status
                 .as_ref()
@@ -229,7 +229,7 @@ impl Context {
             }
             self.stop_lan(did);
             self.store.lan().remove(did)?;
-            self.live
+            self.directory
                 .borrow_mut()
                 .devices
                 .get_mut(did)
@@ -269,7 +269,7 @@ impl Context {
             } else {
                 LanState::MissingCredentials
             };
-            let mut live = self.live.borrow_mut();
+            let mut live = self.directory.borrow_mut();
             let lan = &mut live.devices.get_mut(did).unwrap().lan;
             let was_active = lan.active.is_some();
             if let Some(task) = lan.task.take() {
@@ -304,7 +304,7 @@ impl Context {
             return Ok(());
         }
         let (life, active) = {
-            let mut live = self.live.borrow_mut();
+            let mut live = self.directory.borrow_mut();
             let lan = &mut live.devices.get_mut(did).unwrap().lan;
             if lan.desired.as_ref() == Some(&candidate) {
                 return Ok(());
@@ -388,7 +388,7 @@ impl Context {
                 return Ok(());
             }
             if let Some(status) = &mut self
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut(&did)
@@ -428,7 +428,7 @@ impl Context {
                         return Ok(());
                     }
                     if had_active && terminal(&error) {
-                        let mut live = self.live.borrow_mut();
+                        let mut live = self.directory.borrow_mut();
                         let lan = &mut live.devices.get_mut(&did).unwrap().lan;
                         lan.task = None;
                         if let Some(status) = &mut lan.status {
@@ -499,7 +499,7 @@ impl Context {
                     }
                     if terminal(&error) {
                         self.lan_failed(&did, candidate.address, &error, RecoveryStatus::None);
-                        self.live
+                        self.directory
                             .borrow_mut()
                             .devices
                             .get_mut(&did)
@@ -514,7 +514,7 @@ impl Context {
                         RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64);
                     if had_active {
                         if let Some(status) = &mut self
-                            .live
+                            .directory
                             .borrow_mut()
                             .devices
                             .get_mut(&did)
@@ -538,7 +538,7 @@ impl Context {
                         return Ok(());
                     }
                     if let Some(status) = &mut self
-                        .live
+                        .directory
                         .borrow_mut()
                         .devices
                         .get_mut(&did)
@@ -571,7 +571,7 @@ impl Context {
             problem: None,
             recovery: RecoveryStatus::None,
         };
-        let mut live = self.live.borrow_mut();
+        let mut live = self.directory.borrow_mut();
         let lan = &mut live.devices.get_mut(did).unwrap().lan;
         if retry_desired {
             // Reconciliation will retry the preferred candidate while this client stays active.
@@ -591,7 +591,7 @@ impl Context {
     }
 
     fn lan_current(&self, did: &str, scope: &Scope, life: &Rc<Lifetime>) -> bool {
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         live.scope.as_ref() == Some(scope)
             && live.devices.get(did).is_some_and(|slot| {
                 slot.admitted
@@ -618,7 +618,7 @@ impl Context {
             return Ok(());
         }
         {
-            let mut live = self.live.borrow_mut();
+            let mut live = self.directory.borrow_mut();
             let Some(slot) = live.devices.get_mut(did) else {
                 return Ok(());
             };
@@ -656,7 +656,7 @@ impl Context {
         recovery: RecoveryStatus,
     ) {
         if let Some(status) = &mut self
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(did)

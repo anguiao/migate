@@ -67,7 +67,7 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
             assert_eq!(peer.count("rpcReq", "one", 0), 0);
 
             freeze_light_clock(control);
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -213,7 +213,7 @@ fn retired_consumer_keeps_sent_http_startup_owned_until_original_receipt() {
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let action = light.begin_light_action(brightness(60.0), false).unwrap();
         until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
-        let record = c.context.live.borrow().devices["one"]
+        let record = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -257,7 +257,7 @@ fn cloud_partial_auth_rejection_clears_runtime_light_state_when_access_is_restri
         cloud.token_status = 401;
     }
     block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_scope_valid.get()).await;
+        until(|| c.context.directory.borrow().scope_valid()).await;
         let light = function(&c.context.registry, "one", "light:2");
         until(|| {
             light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature)
@@ -458,7 +458,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let first = old.begin_light_action(brightness(60.0), false).unwrap();
         until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
-        let mut changed = c.context.live.borrow().devices["one"]
+        let mut changed = c.context.directory.borrow().devices["one"]
             .admitted
             .as_ref()
             .unwrap()
@@ -479,7 +479,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .get(&DeviceKey::new("xiaomi", "one"))
             .expect("the committed light is served");
         c.context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut("one")

@@ -15,7 +15,7 @@ pub(super) fn rig() -> Rig {
     Rig::custom_lights(&[("one", "generic.ac.model", instance)])
 }
 pub(super) fn work(c: &Control) -> Rc<super::work::DeviceWork> {
-    c.context.live.borrow().devices["one"]
+    c.context.directory.borrow().devices["one"]
         .admitted
         .as_ref()
         .unwrap()

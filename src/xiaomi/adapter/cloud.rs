@@ -1,7 +1,4 @@
-use super::{
-    model::AdapterError,
-    state::{Backoff, Context},
-};
+use super::{model::AdapterError, state::Context};
 use crate::{
     configuration::Scope,
     xiaomi::{
@@ -27,7 +24,8 @@ pub(super) async fn run(
     let mut due = context.clock.now();
     loop {
         let listener = context.sync_changed.listen();
-        if let Some(floor) = context.sync_not_before.get()
+        let floor = context.directory.borrow().sync_deadline();
+        if let Some(floor) = floor
             && context.clock.now() < floor
         {
             future::or(context.clock.wait_until(floor), async {
@@ -36,7 +34,7 @@ pub(super) async fn run(
             .await;
             continue;
         }
-        context.sync_not_before.set(None);
+        context.directory.borrow_mut().begin_sync();
         if !context.sync_requested.replace(false) && context.clock.now() < due {
             future::or(context.clock.wait_until(due), async {
                 listener.await;
@@ -57,7 +55,8 @@ pub(super) async fn run(
             .await;
             continue;
         }
-        let Some(credentials) = context.live.borrow().credentials.clone() else {
+        let credentials = context.credentials.borrow().record().cloned();
+        let Some(credentials) = credentials else {
             continue;
         };
         let Some(path) = context.mijia_path() else {
@@ -96,9 +95,9 @@ pub(super) async fn run(
                     ));
                 }
                 due = context
-                    .sync_not_before
-                    .get()
-                    .unwrap_or_else(|| context.sync_failed());
+                    .directory
+                    .borrow_mut()
+                    .retry_deadline(context.clock.now());
                 continue;
             }
         };
@@ -113,7 +112,7 @@ pub(super) async fn run(
             }
             context.set_catalog_problem(Some(reason.to_string()));
             context.mijia_authentication(AuthenticationState::Unavailable(reason));
-            context.cloud_scope_valid.set(false);
+            context.directory.borrow_mut().invalidate_scope();
             context.update_all_availability();
             context.update_routing("cloud account identity invalidated");
             context.changed.notify(usize::MAX);
@@ -122,9 +121,9 @@ pub(super) async fn run(
             continue;
         }
         context.mijia_authentication(AuthenticationState::Authenticated);
-        let expected_scope = context.live.borrow().scope.clone();
+        let expected_scope = context.directory.borrow().scope.clone();
         let selected = {
-            let live = context.live.borrow();
+            let live = context.directory.borrow();
             if let Some(scope) = &live.scope {
                 if scope.uid != credentials.uid {
                     Err(CatalogError::InvalidScope)
@@ -142,7 +141,7 @@ pub(super) async fn run(
                     context.invalidate_lan_scope()?;
                 }
                 context.set_catalog_problem(Some(error.to_string()));
-                context.cloud_scope_valid.set(false);
+                context.directory.borrow_mut().invalidate_scope();
                 context.update_all_availability();
                 context.update_routing("cloud home scope invalidated");
                 due = context.sync_failed();
@@ -170,7 +169,7 @@ pub(super) async fn run(
             context.request_sync();
             continue;
         };
-        if !context.current_mijia(token) || context.live.borrow().scope != expected_scope {
+        if !context.current_mijia(token) || context.directory.borrow().scope != expected_scope {
             continue;
         }
         let mut catalog_problem = None;
@@ -198,8 +197,9 @@ pub(super) async fn run(
             splits.clone()
         } else if expected_scope.as_ref() == Some(&scope) {
             context
-                .split_devices
+                .directory
                 .borrow()
+                .split_devices()
                 .iter()
                 .filter(|split| home_members.contains(&split.did))
                 .cloned()
@@ -218,7 +218,7 @@ pub(super) async fn run(
             .map(|split| split.did.as_str())
             .collect::<BTreeSet<_>>();
         let members = {
-            let live = context.live.borrow();
+            let live = context.directory.borrow();
             home_members
                 .iter()
                 .filter(|did| {
@@ -230,7 +230,7 @@ pub(super) async fn run(
                 .collect::<BTreeSet<_>>()
         };
         let requested = {
-            let live = context.live.borrow();
+            let live = context.directory.borrow();
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
@@ -259,7 +259,7 @@ pub(super) async fn run(
             context.request_sync();
             continue;
         };
-        if !context.current_mijia(token) || context.live.borrow().scope != expected_scope {
+        if !context.current_mijia(token) || context.directory.borrow().scope != expected_scope {
             continue;
         }
         let infos = match infos {
@@ -271,75 +271,36 @@ pub(super) async fn run(
                 context.set_catalog_problem(Some(error.to_string()));
                 context.cloud_error(token, None, &error);
                 due = context
-                    .sync_not_before
-                    .get()
-                    .unwrap_or_else(|| context.sync_failed());
+                    .directory
+                    .borrow_mut()
+                    .retry_deadline(context.clock.now());
                 continue;
             }
         };
         // The complete publication transaction persists the scope.
-        let scope_changed = context
-            .live
-            .borrow()
-            .scope
-            .as_ref()
-            .is_some_and(|old| old != &scope);
-        let membership_changed = context
-            .live
-            .borrow()
-            .devices
-            .iter()
-            .filter(|(_, slot)| !slot.group)
-            .map(|(did, _)| did)
-            .ne(members.iter());
-        let removed = {
-            let live = context.live.borrow();
-            live.devices
-                .iter()
-                .filter(|(did, slot)| scope_changed || (!slot.group && !members.contains(*did)))
-                .map(|(did, _)| did.clone())
-                .collect::<Vec<_>>()
-        };
+        let update = context
+            .directory
+            .borrow_mut()
+            .select_home(scope.clone(), splits, &members);
         context.lan_scope_invalid.set(false);
-        context.live.borrow_mut().scope = Some(scope.clone());
-        *context.split_devices.borrow_mut() = splits;
         context.stage();
-        for did in removed {
+        for did in update.removed {
             context.remove(&did)?;
         }
-        for did in &members {
-            context
-                .live
-                .borrow_mut()
-                .devices
-                .entry(did.clone())
-                .or_default();
-        }
-        {
-            let mut live = context.live.borrow_mut();
-            for (did, slot) in &mut live.devices {
-                // Native groups keep their own catalog access metadata; an
-                // ordinary home detail absence must never clear it.
-                if slot.group {
-                    continue;
-                }
-                slot.confirmed = true;
-                slot.cloud_access = infos.get(did).cloned();
-                slot.cloud_forbidden = false;
-            }
-        }
+        context
+            .directory
+            .borrow_mut()
+            .confirm_members(&members, infos);
         context.mijia_authentication(AuthenticationState::Authenticated);
-        context.cloud_scope_valid.set(true);
-        context.http_paused.set(false);
+        context.credentials.borrow_mut().resume_http();
         if catalog.is_some() {
-            context.sync_not_before.set(None);
-            *context.sync_backoff.borrow_mut() = Backoff::new(1, 30);
+            context.directory.borrow_mut().reset_sync();
         }
         context.update_all_availability();
         context.update_routing("complete cloud directory and device information synchronized");
         context.set_catalog_problem(catalog_problem);
         context.changed.notify(usize::MAX);
-        if membership_changed {
+        if update.membership_changed {
             super::local::refresh_access(&context);
         }
         let path = context
@@ -351,8 +312,8 @@ pub(super) async fn run(
             // A home member missing from a complete account catalog remains
             // visible to group membership, but cannot be described until its
             // directory record establishes whether it is a split alias.
-            let known = context.live.borrow().devices[&did].admitted.is_some()
-                || context.live.borrow().devices[&did].candidate.is_some();
+            let known = context.directory.borrow().devices[&did].admitted.is_some()
+                || context.directory.borrow().devices[&did].candidate.is_some();
             if !known
                 && catalog.as_ref().is_none_or(|(catalog, _)| {
                     !catalog.devices.iter().any(|record| record.did == did)
@@ -363,7 +324,7 @@ pub(super) async fn run(
             // Group-like records are admitted only by a confirmed catalog
             // relation, never through the ordinary home description path.
             let group_like = {
-                let live = context.live.borrow();
+                let live = context.directory.borrow();
                 live.devices[&did].group
                     || crate::xiaomi::capability::is_light_group(
                         &crate::device::DeviceKey::new("xiaomi", &did),
@@ -378,27 +339,30 @@ pub(super) async fn run(
                 continue;
             }
             // Capture the target metadata this load is allowed to apply.
-            let target = context.live.borrow().devices[&did]
+            let target = context.directory.borrow().devices[&did]
                 .cloud_access
                 .as_ref()
                 .map(|access| (access.model.clone(), access.instance_type.clone()));
             // A directory target change retires the in-flight load so a new
             // target can start instead of waiting for a result that will be
             // discarded. Online changes keep the same target.
-            {
-                let mut live = context.live.borrow_mut();
-                if let Some(slot) = live.devices.get_mut(&did) {
-                    slot.retarget_loading(&target);
-                }
+            let retired = context
+                .directory
+                .borrow_mut()
+                .devices
+                .get_mut(&did)
+                .and_then(|slot| slot.retarget_loading(&target));
+            if let Some(life) = retired {
+                life.close();
             }
-            let prepare = context.live.borrow().devices[&did].needs_description();
+            let prepare = context.directory.borrow().devices[&did].needs_description();
             if !prepare {
                 context.resolved_description_target(&did);
                 context.reconcile(&did)?;
                 continue;
             }
             let life = {
-                let mut live = context.live.borrow_mut();
+                let mut live = context.directory.borrow_mut();
                 live.devices
                     .get_mut(&did)
                     .unwrap()
@@ -414,10 +378,10 @@ pub(super) async fn run(
             let task = async move {
                 if life.is_closed()
                     || !current.current_mijia(&captured_token)
-                    || current.live.borrow().scope.as_ref() != Some(&captured_scope)
+                    || current.directory.borrow().scope.as_ref() != Some(&captured_scope)
                 {
                     let cleared = current
-                        .live
+                        .directory
                         .borrow_mut()
                         .devices
                         .get_mut(&did)
@@ -448,7 +412,7 @@ pub(super) async fn run(
                 .await
                 else {
                     let cleared = current
-                        .live
+                        .directory
                         .borrow_mut()
                         .devices
                         .get_mut(&did)
@@ -461,7 +425,7 @@ pub(super) async fn run(
                 // A retired/removed slot, a superseding load or a changed
                 // directory target must discard this older result.
                 let current_loading = {
-                    let live = current.live.borrow();
+                    let live = current.directory.borrow();
                     let Some(slot) = live.devices.get(&did) else {
                         return Ok(());
                     };
@@ -474,10 +438,10 @@ pub(super) async fn run(
                 };
                 if !current_loading
                     || !current.current_mijia(&captured_token)
-                    || current.live.borrow().scope.as_ref() != Some(&captured_scope)
+                    || current.directory.borrow().scope.as_ref() != Some(&captured_scope)
                 {
                     let cleared = current
-                        .live
+                        .directory
                         .borrow_mut()
                         .devices
                         .get_mut(&did)
@@ -487,7 +451,7 @@ pub(super) async fn run(
                     }
                     return Ok(());
                 }
-                if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
+                if let Some(slot) = current.directory.borrow_mut().devices.get_mut(&did) {
                     slot.finish_loading(&life);
                 }
                 match result {
@@ -496,11 +460,10 @@ pub(super) async fn run(
                             *model == description.raw.model && *urn == description.raw.instance_type
                         });
                         if matches_target {
-                            if let Some(slot) = current.live.borrow_mut().devices.get_mut(&did) {
-                                slot.candidate = Some(description);
-                                slot.blocked = None;
-                                slot.recompute_failed = false;
-                            }
+                            current
+                                .directory
+                                .borrow_mut()
+                                .accept_description(&did, description);
                             current.clear_description_problem(&did);
                             current.stage();
                             // The new latest fact must enter the next
@@ -538,15 +501,17 @@ pub(super) async fn run(
         // The selected scope is captured at request start so the first home
         // binding (previously `None`) cannot discard the first catalog.
         if context.current_mijia(token)
-            && context.live.borrow().scope.as_ref() == Some(&scope)
+            && context.directory.borrow().scope.as_ref() == Some(&scope)
             && let Some((catalog, _)) = &catalog
         {
-            let update = context
-                .relations
-                .borrow_mut()
-                .apply(catalog, &scope, &catalog_members);
+            let update =
+                context
+                    .directory
+                    .borrow_mut()
+                    .confirm_catalog(catalog, &scope, &catalog_members);
             for did in &update.withdrawn {
-                if !catalog_members.contains(did) && context.live.borrow().devices.contains_key(did)
+                if !catalog_members.contains(did)
+                    && context.directory.borrow().devices.contains_key(did)
                 {
                     context.remove(did)?;
                 }
@@ -570,9 +535,9 @@ pub(super) async fn run(
             context.clock.now() + MEMBER_INTERVAL
         } else {
             context
-                .sync_not_before
-                .get()
-                .unwrap_or_else(|| context.sync_failed())
+                .directory
+                .borrow_mut()
+                .retry_deadline(context.clock.now())
         };
     }
 }

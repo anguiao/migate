@@ -38,7 +38,7 @@ fn foreground_batch_keeps_successful_properties_when_another_fails() {
             })
             .await;
             assert_eq!(curtain(&c).current_position.value, Some(25));
-            assert!(!c.context.http_paused.get());
+            assert!(!c.context.credentials.borrow().http_paused());
             let batches = &c.cloud.lock().unwrap().read_batches[before..];
             assert_eq!(batches.len(), 1);
             assert_eq!(batches[0].len(), 3);

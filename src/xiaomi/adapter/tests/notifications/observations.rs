@@ -12,7 +12,7 @@ fn same_value_notification_invalidates_an_inflight_read() {
             let two = function(&control.context.registry, "two", "outlet:2");
             peer.state.borrow_mut().hold_reads = true;
             let reads = peer.count("get", "one", 2);
-            control.context.live.borrow().devices["one"]
+            control.context.directory.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -40,7 +40,7 @@ fn retained_outlet_snapshot_neither_replaces_state_nor_invalidates_a_read() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
             let one = function(&control.context.registry, "one", "outlet:2");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -267,7 +267,7 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             super::super::support::repair_ready(&c).await;
-            let member = c.context.live.borrow().devices["member-a"]
+            let member = c.context.directory.borrow().devices["member-a"]
                 .admitted
                 .clone()
                 .unwrap();

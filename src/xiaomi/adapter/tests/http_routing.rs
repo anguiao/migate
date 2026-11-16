@@ -175,7 +175,7 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
     block_on(rig.run(|c| async move {
         cloud_ready(&c, &["one", "two"]).await;
         let token = c.context.mijia_path().unwrap();
-        let work = c.context.live.borrow().devices["one"]
+        let work = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -197,7 +197,7 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
         errors.push(timeout);
         for error in errors {
             c.context.cloud_property_read_error(&token, &work, &error);
-            assert!(!c.context.http_paused.get());
+            assert!(!c.context.credentials.borrow().http_paused());
             assert!(c.context.cloud_candidate("one", true).is_ok());
             assert!(c.context.cloud_candidate("two", true).is_ok());
         }
@@ -227,7 +227,7 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             let token = c.context.mijia_path().unwrap();
             let mut stale = token.clone();
             stale.generation = token.generation.wrapping_add(1);
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -238,7 +238,7 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             c.context.cloud_property_read_error(&token, &work, &error);
             assert!(c.context.cloud_candidate("one", true).is_err());
             assert!(c.context.cloud_candidate("two", true).is_ok());
-            assert!(!c.context.http_paused.get());
+            assert!(!c.context.credentials.borrow().http_paused());
         }));
     }
 }
@@ -252,7 +252,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         let token = c.context.mijia_path().unwrap();
         let mut stale = token.clone();
         stale.generation = token.generation.wrapping_add(1);
-        let work = c.context.live.borrow().devices["one"]
+        let work = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -261,7 +261,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         work.life.close();
         c.context.cloud_property_read_error(&token, &work, &offline);
         assert!(
-            c.context.live.borrow().devices["one"]
+            c.context.directory.borrow().devices["one"]
                 .cloud_access
                 .as_ref()
                 .unwrap()
@@ -269,10 +269,13 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         );
         c.context
             .cloud_property_read_error(&stale, &work, &unauthorized);
-        assert!(c.context.mijia_rejected.borrow().is_none());
+        assert!(c.context.credentials.borrow().mijia_rejected().is_none());
         c.context
             .cloud_property_read_error(&token, &work, &unauthorized);
-        assert_eq!(*c.context.mijia_rejected.borrow(), Some(token.generation));
+        assert_eq!(
+            c.context.credentials.borrow().mijia_rejected(),
+            Some(token.generation)
+        );
     }));
 }
 
@@ -292,7 +295,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
         let mut command = Box::pin(one.execute(Command::On));
         assert!(poll_once(command.as_mut()).await.is_none());
         until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
-        let record = c.context.live.borrow().devices["one"]
+        let record = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -350,7 +353,7 @@ fn http_temporary_failure_pauses_the_account_until_a_complete_scoped_sync() {
         let infos = c.cloud.lock().unwrap().infos;
         c.clock.advance(Duration::from_secs(1));
         until(|| c.cloud.lock().unwrap().infos > infos).await;
-        until(|| c.context.status.borrow().catalog_problem.is_some()).await;
+        until(|| c.context.diagnostics().catalog_problem.is_some()).await;
         assert!(
             c.context
                 .registry
@@ -480,7 +483,7 @@ fn concurrent_http_token_rejections_merge_refresh_and_never_replay_failed_writes
         assert!(two.execute(Command::Off).await.is_err());
         until(|| {
             matches!(
-                c.context.status.borrow().auth.mijia,
+                c.context.auth_report().mijia,
                 crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
             )
         })
@@ -512,7 +515,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
     block_on(rig.run(|c| async move {
         let key = DeviceKey::new("xiaomi", "multi");
         until(|| c.context.registry.get(&key).is_some()).await;
-        assert!(c.context.live.borrow().session.is_none());
+        assert!(c.context.hub.borrow().session().is_none());
         let physical = c.context.registry.get(&key).unwrap();
         assert_eq!(physical.description().label(), "Cloud strip");
         assert_eq!(physical.functions().len(), 3);
@@ -595,7 +598,7 @@ fn cloud_only_members_publish_offline_and_readd_with_their_saved_identity_and_na
             c.context.registry.get(&key).unwrap().description().label(),
             "Controller saved strip"
         );
-        assert!(c.context.live.borrow().session.is_none());
+        assert!(c.context.hub.borrow().session().is_none());
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
     }));
 }
@@ -620,10 +623,10 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                 control.context.request_sync();
                 until(|| {
                     if mode == 2 {
-                        control.context.status.borrow().catalog_problem.is_some()
+                        control.context.diagnostics().catalog_problem.is_some()
                     } else {
                         matches!(
-                            control.context.status.borrow().auth.mijia,
+                            control.context.auth_report().mijia,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                     }
@@ -639,8 +642,11 @@ fn runtime_identity_and_home_scope_failures_retire_cloud_eligibility_and_preserv
                 peer.state.borrow_mut().online.insert("one".into(), false);
                 peer.list_changed(&["one"]);
                 until(|| {
-                    control.context.live.borrow().devices["one"]
-                        .access
+                    control
+                        .context
+                        .hub
+                        .borrow()
+                        .access("one")
                         .as_ref()
                         .is_some_and(|access| access.as_ref().is_ok_and(|access| !access.online))
                 })
@@ -695,7 +701,7 @@ fn temporary_directory_failures_pause_existing_http_candidates_until_sync_recove
         c.context.request_sync();
         until(|| {
             matches!(
-                c.context.status.borrow().auth.mijia,
+                c.context.auth_report().mijia,
                 crate::xiaomi::auth::AuthenticationState::Unavailable(_)
             )
         })
@@ -794,7 +800,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 .registry
                 .get(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
-            let mut changed = c.context.live.borrow().devices["one"]
+            let mut changed = c.context.directory.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -810,7 +816,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
             )
             .unwrap();
             {
-                let mut live = c.context.live.borrow_mut();
+                let mut live = c.context.directory.borrow_mut();
                 let slot = live.devices.get_mut("one").unwrap();
                 slot.candidate.as_mut().unwrap().native = Some(changed);
             }

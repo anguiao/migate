@@ -16,7 +16,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
         })
         .await;
         control.clock.automatic.store(false, Ordering::Relaxed);
-        let old_work = control.context.live.borrow().devices[did]
+        let old_work = control.context.directory.borrow().devices[did]
             .admitted
             .clone()
             .unwrap();
@@ -24,7 +24,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
         let candidate = SourceFixture::new(did, "other.air-conditioner", instance());
         assert!(candidate.legacy_profile().is_none());
         {
-            let mut live = control.context.live.borrow_mut();
+            let mut live = control.context.directory.borrow_mut();
             let slot = live.devices.get_mut(did).unwrap();
             // There is no newer authoritative cloud model in this scenario.
             slot.cloud_access = None;
@@ -63,7 +63,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
         control.publication.apply(prepared).unwrap();
         assert!(old_work.life.is_closed());
         assert!(control.context.legacy_mapping(did).is_none());
-        let current = control.context.live.borrow().devices[did]
+        let current = control.context.directory.borrow().devices[did]
             .admitted
             .clone()
             .unwrap();
@@ -79,7 +79,7 @@ fn authoritative_cloud_model_mismatch_revokes_old_direct_access() {
     block_on(rig.run(|control| async move {
         until(|| {
             control.context.direct_candidate(did).is_ok()
-                && control.context.live.borrow().devices[did]
+                && control.context.directory.borrow().devices[did]
                     .cloud_access
                     .is_some()
         })
@@ -87,7 +87,7 @@ fn authoritative_cloud_model_mismatch_revokes_old_direct_access() {
         control.clock.automatic.store(false, Ordering::Relaxed);
         control
             .context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(did)
@@ -302,7 +302,7 @@ fn mcn02_hub_and_cloud_continue_using_standard_miot_properties() {
                                 .any(|r| r["method"].as_str().unwrap().starts_with("set_"))
                         );
                         c.context.stop_lan(did);
-                        c.context.priority.set(PathPriority::CloudFirst);
+                        c.context.hub.borrow_mut().degrade();
                         assert!(matches!(
                             c.context.control_path_for(did, "air-conditioner:2"),
                             Some(super::super::super::routing::ControlPath::Cloud(_))
@@ -349,7 +349,7 @@ fn mcn02_unknown_swing_does_not_block_offline_direct_and_recovers() {
         let id = "air-conditioner:2";
         let swing = PropertyBinding { siid: 3, piid: 2 };
         let ac = function(&control.context.registry, did, id);
-        let work = control.context.live.borrow().devices[did]
+        let work = control.context.directory.borrow().devices[did]
             .admitted
             .clone()
             .unwrap();
@@ -582,7 +582,7 @@ fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
         },
     ));
     context
-        .live
+        .directory
         .borrow_mut()
         .devices
         .get_mut(did)
@@ -595,7 +595,7 @@ fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
         lan: LanCredentials::Unknown,
     });
     context.adopt_credentials(rig.store.xiaomi().load().unwrap().unwrap());
-    context.cloud_scope_valid.set(true);
+    context.directory.borrow_mut().confirm_scope();
     let binding = PropertyBinding { siid: 4, piid: 1 };
     let key = (did.to_owned(), binding.siid, binding.piid);
     rig.cloud
@@ -603,7 +603,10 @@ fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
         .unwrap()
         .raw_values
         .insert(key.clone(), json!("invalid"));
-    let work = context.live.borrow().devices[did].admitted.clone().unwrap();
+    let work = context.directory.borrow().devices[did]
+        .admitted
+        .clone()
+        .unwrap();
     let read_count = || {
         rig.cloud
             .lock()

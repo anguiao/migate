@@ -67,7 +67,7 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
         until(|| c.context.group_repair("group-1").is_some()).await;
         let before = c.store.devices().load_configuration().unwrap();
         let rules = c.context.graph.borrow().rules.clone();
-        let old_member = c.context.live.borrow().devices["member-a"]
+        let old_member = c.context.directory.borrow().devices["member-a"]
             .admitted
             .clone()
             .unwrap();
@@ -87,22 +87,28 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
         }
         c.context.request_sync();
         until(|| {
-            c.context.live.borrow().devices["member-a"]
+            c.context.directory.borrow().devices["member-a"]
                 .blocked
                 .is_some()
         })
         .await;
         until(|| {
-            c.context.relations.borrow().snapshot().iter().any(|group| {
-                group.membership.group_did == "group-1" && group.membership.members == ["member-a"]
-            })
+            c.context
+                .directory
+                .borrow()
+                .confirmed_groups()
+                .iter()
+                .any(|group| {
+                    group.membership.group_did == "group-1"
+                        && group.membership.members == ["member-a"]
+                })
         })
         .await;
         assert_eq!(c.store.devices().load_configuration().unwrap(), before);
         assert_eq!(c.context.graph.borrow().rules, rules);
         assert!(Rc::ptr_eq(
             &old_member,
-            c.context.live.borrow().devices["member-a"]
+            c.context.directory.borrow().devices["member-a"]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -146,7 +152,7 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
                 .unwrap()
                 .endpoint
         );
-        assert!(c.context.status.borrow().pending.iter().all(|pending| {
+        assert!(c.context.diagnostics().pending.iter().all(|pending| {
             pending.did != "member-a" || !pending.reason.contains("invalid MIoT description")
         }));
     }));
@@ -173,7 +179,7 @@ fn missing_group_instance_type_retains_the_committed_relation_until_restored() {
             cloud.catalog_groups = vec![relation];
         }
         c.context.request_sync();
-        until(|| c.context.live.borrow().devices["group-1"].description_target_missing).await;
+        until(|| c.context.directory.borrow().devices["group-1"].description_target_missing).await;
         assert_eq!(c.store.devices().load_configuration().unwrap(), before);
         assert_eq!(c.context.graph.borrow().rules["group-1"].members.len(), 2);
         c.cloud.lock().unwrap().catalog_groups = vec![group_record(
@@ -301,7 +307,7 @@ fn mixed_group_dispatches_each_adapted_policy_and_keeps_composite_fan_independen
             group.light_action_current(action.token()),
             "the fan must not take over the group color action"
         );
-        let work = c.context.live.borrow().devices["member-a"]
+        let work = c.context.directory.borrow().devices["member-a"]
             .admitted
             .clone()
             .unwrap();
@@ -345,7 +351,7 @@ fn ambiguous_member_stays_visible_and_cannot_supply_group_feedback() {
         assert!(!group.description().supports_rgb());
         assert_eq!(group.snapshot().power(), Some(Power::Unknown));
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().auth.clone(),
+            c.context.auth_report().clone(),
             "/bin/migate".into(),
             "/data".into(),
         );

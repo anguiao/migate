@@ -1,7 +1,10 @@
 use super::{
-    model::{AdapterError, AdapterStatus, GatewayStatus, Ready, TopologyReady},
+    credentials::Credentials,
+    directory::{DeviceSlot, Directory},
+    hub::Hub,
+    model::{AdapterError, Ready, TopologyReady},
     runner::XiaomiAdapter,
-    state::{Backoff, Context, DeviceSlot, Live, LogicalSink},
+    state::{Context, DiagnosticCache, LogicalSink},
     tasks::TaskSet,
     work::DeviceWork,
 };
@@ -14,7 +17,6 @@ use crate::{
 use event_listener::Event;
 use std::{
     cell::{Cell, RefCell},
-    collections::BTreeMap,
     future::Future,
     pin::Pin,
     rc::Rc,
@@ -57,7 +59,6 @@ impl XiaomiAdapter {
         let snapshot = store.xiaomi().current_snapshot();
         let mijia_generation = snapshot.mijia_generation();
         let ha_generation = snapshot.ha_generation();
-        let ha_stopped = credentials.as_ref().is_some_and(|record| record.ha.stopped);
         let stored = store.devices().load_configuration()?;
         let scope = credentials
             .as_ref()
@@ -148,59 +149,41 @@ impl XiaomiAdapter {
         let context = Rc::new(Context {
             commands: Rc::new(super::commands::Commands::default()),
             write_gates: super::commands::DeviceWriteGates::default(),
-            relations: RefCell::new(relations),
-            split_devices: RefCell::new(if scope.is_some() {
-                stored.split_devices.clone()
-            } else {
-                Vec::new()
-            }),
             notifications: RefCell::new(None),
             credentials_changed: Event::new(),
-            priority: Cell::new(super::routing::PathPriority::LocalFirst),
             mijia: auth.mijia_client(),
             network,
             lan_discovery: crate::xiaomi::lan::Discovery::default(),
             lan_scope_invalid: Cell::new(false),
             lan_network_changed: Event::new(),
-            ha_sync: RefCell::new(if ha_stopped {
-                super::credentials::HaSync::Paused
-            } else {
-                super::credentials::HaSync::default()
-            }),
             ha_changed: Event::new(),
-            mijia_rejected: RefCell::new(None),
             mijia_changed: Event::new(),
-            http_paused: Cell::new(false),
-            cloud_scope_valid: Cell::new(false),
-            sync_not_before: Cell::new(None),
-            sync_backoff: RefCell::new(Backoff::new(1, 30)),
             refresh_changed: Rc::new(Event::new()),
             initial_reads_changed: Rc::new(Event::new()),
-            live: RefCell::new(Live {
+            credentials: RefCell::new(Credentials::restored(
                 credentials,
                 mijia_generation,
                 ha_generation,
-                scope,
-                devices: BTreeMap::new(),
-                session: None,
-            }),
+                report,
+            )),
+            directory: RefCell::new(Directory::restored(
+                scope.clone(),
+                relations,
+                if scope.is_some() {
+                    stored.split_devices.clone()
+                } else {
+                    Vec::new()
+                },
+            )),
+            hub: RefCell::new(Hub::default()),
             graph: RefCell::new(Rc::new(graph)),
             registry,
             store,
             tasks: TaskSet::default(),
             configuration_changed: Rc::new(Event::new()),
             changed: Event::new(),
-            status: RefCell::new(AdapterStatus {
-                auth: report,
-                gateway: GatewayStatus::Discovering,
-                catalog_problem: None,
-                pending: Vec::new(),
-                routing: Default::default(),
-                devices: Vec::new(),
-            }),
+            status: RefCell::new(DiagnosticCache::default()),
             status_changed: Event::new(),
-            cloud_problem: RefCell::new(None),
-            access_problem: RefCell::new(None),
             ready: ready.clone(),
             clock,
 
@@ -238,7 +221,11 @@ impl XiaomiAdapter {
                 .rules
                 .get(&did)
                 .is_some_and(|group| !group.is_physical);
-            context.live.borrow_mut().devices.insert(did.clone(), slot);
+            context
+                .directory
+                .borrow_mut()
+                .devices
+                .insert(did.clone(), slot);
             if !virtual_group {
                 work.refresh();
             }
@@ -248,7 +235,7 @@ impl XiaomiAdapter {
         for (candidate, committed, group, failure) in staged {
             let did = candidate.raw.key.id.clone();
             {
-                let mut live = context.live.borrow_mut();
+                let mut live = context.directory.borrow_mut();
                 let slot = live.devices.entry(did.clone()).or_default();
                 slot.group = group;
                 slot.committed = Some(committed);

@@ -3,9 +3,7 @@
 use std::rc::Rc;
 
 use super::super::{
-    SourceHandle, XiaomiAdapter,
-    state::{DeviceSlot, LogicalSink},
-    work::DeviceWork,
+    SourceHandle, XiaomiAdapter, directory::DeviceSlot, state::LogicalSink, work::DeviceWork,
 };
 use crate::{
     device::{CommandReceiver, DeviceKey, PhysicalDevice, PhysicalDeviceDescription},
@@ -45,7 +43,7 @@ impl AppSource {
         crate::xiaomi::capability::PropertyBinding,
     ) {
         let physical = self.physical.as_ref().expect("test source has a device");
-        let work = self.handle.0.live.borrow().devices[&physical.key().id]
+        let work = self.handle.0.directory.borrow().devices[&physical.key().id]
             .admitted
             .clone()
             .expect("test device has a source");
@@ -128,7 +126,7 @@ impl AppSource {
         let mut receivers = Vec::new();
         let mut physical = None;
         {
-            let mut live = adapter.context.live.borrow_mut();
+            let mut live = adapter.context.directory.borrow_mut();
             live.scope = configuration.scope;
             for device in configuration.devices {
                 if revocations
@@ -193,7 +191,7 @@ impl AppSource {
     }
 
     pub(crate) fn confirm_all(&self) {
-        for (did, slot) in &mut self.handle.0.live.borrow_mut().devices {
+        for (did, slot) in &mut self.handle.0.directory.borrow_mut().devices {
             slot.confirmed = true;
             let raw = &slot.committed.as_ref().unwrap().raw;
             slot.cloud_access = Some(crate::xiaomi::mijia::CloudDeviceInfo {
@@ -209,7 +207,7 @@ impl AppSource {
     pub(crate) fn forbid(&self, did: &str) {
         self.handle
             .0
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(did)
@@ -220,7 +218,7 @@ impl AppSource {
     pub(crate) fn allow(&self, did: &str) {
         self.handle
             .0
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(did)
@@ -233,11 +231,11 @@ impl AppSource {
     }
 
     pub(crate) fn scope(&self, scope: crate::configuration::Scope) {
-        self.handle.0.live.borrow_mut().scope = Some(scope);
+        self.handle.0.directory.borrow_mut().scope = Some(scope);
     }
 
     pub(crate) fn describe(&self, description: PhysicalDeviceDescription) {
-        let mut live = self.handle.0.live.borrow_mut();
+        let mut live = self.handle.0.directory.borrow_mut();
         let slot = live
             .devices
             .entry(description.key().id.clone())
@@ -249,7 +247,7 @@ impl AppSource {
     }
 
     pub(crate) fn directory_name(&self, key: &DeviceKey, name: &str) {
-        let mut live = self.handle.0.live.borrow_mut();
+        let mut live = self.handle.0.directory.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();
         let native = slot.admitted.as_ref().unwrap().native.clone();
         slot.candidate.as_mut().unwrap().native = Some(native);

@@ -56,7 +56,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .cloned()
                 .unwrap();
             let original_physical = control.context.registry.get(&key).unwrap();
-            let original = control.context.live.borrow().devices["one"]
+            let original = control.context.directory.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -74,7 +74,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -142,7 +142,7 @@ fn binding_change_retires_old_feedback_authority() {
             peer.state.borrow_mut().hold_writes = true;
             let action = old.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            let mut changed = control.context.live.borrow().devices["one"]
+            let mut changed = control.context.directory.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -159,7 +159,7 @@ fn binding_change_retires_old_feedback_authority() {
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -230,7 +230,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
             );
             drop(old);
 
-            let old_work = control.context.live.borrow().devices["one"]
+            let old_work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -249,7 +249,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
             peer.value("one", TEMPERATURE, json!(4000));
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")

@@ -56,7 +56,7 @@ fn a_switch_keeps_a_failed_read_and_retry_after_a_new_notification() {
             .await;
             assert!(one_work.refresh.borrow().contains("outlet:2", binding));
             assert_eq!(one.snapshot().power(), Some(Power::On));
-            assert!(!c.context.http_paused.get());
+            assert!(!c.context.credentials.borrow().http_paused());
             c.clock.advance(Duration::from_secs(3));
             until(|| {
                 cloud_reads(&c, "one", 2) == before + 2
@@ -139,7 +139,7 @@ fn foreground_cloud_read_failure_preserves_other_control_and_live_notifications(
                     "{problem}"
                 );
                 assert_eq!(one.snapshot().power(), Some(Power::On));
-                assert!(!c.context.http_paused.get());
+                assert!(!c.context.credentials.borrow().http_paused());
                 assert!(c.context.cloud_candidate("one", true).is_ok());
                 assert!(c.context.cloud_candidate("two", true).is_ok());
                 assert!(cloud_active(&c, "one"));
@@ -198,8 +198,8 @@ fn foreground_cloud_read_device_rejection_only_revokes_the_affected_device() {
             })
             .await;
             assert!(c.context.cloud_candidate("two", true).is_ok());
-            assert!(!c.context.http_paused.get());
-            let live = c.context.live.borrow();
+            assert!(!c.context.credentials.borrow().http_paused());
+            let live = c.context.directory.borrow();
             let slot = &live.devices["one"];
             if code == -704_042_011 {
                 assert!(!slot.cloud_access.as_ref().unwrap().online);
@@ -236,10 +236,10 @@ fn foreground_cloud_read_unauthorized_rejects_current_credentials() {
         let before = c.cloud.lock().unwrap().tokens;
         work(&c, "one").refresh_property("outlet:2", PropertyBinding { siid: 2, piid: 1 });
         c.clock.advance(Duration::from_millis(201));
-        until(|| *c.context.mijia_rejected.borrow() == Some(token.generation)).await;
+        until(|| c.context.credentials.borrow().mijia_rejected() == Some(token.generation)).await;
         assert_eq!(c.cloud.lock().unwrap().tokens, before);
         assert!(c.context.cloud_candidate("one", true).is_err());
-        assert!(c.context.http_paused.get());
+        assert!(c.context.credentials.borrow().http_paused());
         drop(release);
     }));
 }

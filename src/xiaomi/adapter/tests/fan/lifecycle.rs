@@ -41,7 +41,7 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")

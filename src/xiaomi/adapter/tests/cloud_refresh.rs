@@ -29,7 +29,7 @@ fn directory_uses_mijia_session_and_signed_form() {
 }
 
 fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
-    c.context.live.borrow().devices[did]
+    c.context.directory.borrow().devices[did]
         .admitted
         .as_ref()
         .unwrap()
@@ -162,7 +162,7 @@ fn refreshes_during_a_cloud_read_coalesce_and_invalidate_its_old_value() {
     }
     block_on(rig.run(|c| async move {
         until(|| cloud_reads(&c, "one", 2) == 1).await;
-        assert!(c.context.live.borrow().session.is_none());
+        assert!(c.context.hub.borrow().session().is_none());
         assert_eq!(
             c.cloud.lock().unwrap().property_reads,
             [("one".into(), 2, 1)]

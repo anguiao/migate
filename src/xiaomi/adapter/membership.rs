@@ -7,7 +7,7 @@ use crate::{
     device::{Availability, CommandReceiver, DeviceKey},
     xiaomi::central::DeviceEntry,
 };
-use std::{collections::BTreeMap, rc::Rc};
+use std::rc::Rc;
 impl Context {
     pub(super) fn add_consumers(
         self: &Rc<Self>,
@@ -49,7 +49,7 @@ impl Context {
     /// Apply only observations in wire order; admission and storage run after the request future wakes.
     pub(super) fn observe_access(&self, entries: Vec<DeviceEntry>) {
         let dids = self
-            .live
+            .directory
             .borrow()
             .devices
             .keys()
@@ -58,28 +58,19 @@ impl Context {
         self.observe_access_filtered(&dids, entries);
     }
     pub(super) fn observe_access_filtered(&self, dids: &[String], entries: Vec<DeviceEntry>) {
-        let mut entries = entries
-            .into_iter()
-            .map(|entry| (entry.did, entry.access))
-            .collect::<BTreeMap<_, _>>();
-        let observed = {
-            let mut live = self.live.borrow_mut();
-            let mut observed = Vec::new();
-            for did in dids {
-                if let Some(slot) = live.devices.get_mut(did) {
-                    slot.access = entries.remove(did);
-                    observed.push(did);
-                }
-            }
-            observed
-        };
+        let observed = dids
+            .iter()
+            .filter(|did| self.directory.borrow().devices.contains_key(*did))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.hub.borrow_mut().observe_access(&observed, entries);
         for did in observed {
-            self.update_availability(did);
+            self.update_availability(&did);
         }
     }
     pub(super) fn reconcile_all(self: &Rc<Self>) -> Result<(), AdapterError> {
         let dids = self
-            .live
+            .directory
             .borrow()
             .devices
             .keys()
@@ -92,13 +83,13 @@ impl Context {
         Ok(())
     }
     pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        if self.live.borrow().devices[did].group {
+        if self.directory.borrow().devices[did].group {
             return self.reconcile_group(did);
         }
-        if self.live.borrow().devices[did].admitted.is_some() {
+        if self.directory.borrow().devices[did].admitted.is_some() {
             self.install_work(did);
             self.update_availability(did);
-            if let Some(work) = self.live.borrow().devices[did].admitted.as_ref() {
+            if let Some(work) = self.directory.borrow().devices[did].admitted.as_ref() {
                 work.retry_subscriptions();
             }
         }
@@ -108,7 +99,7 @@ impl Context {
     /// A failed directory description is diagnostic only: the committed
     /// runtime keeps serving and the latest pending fact is retained.
     pub(super) fn pending_description(&self, did: &str, reason: String) {
-        if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
+        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
             slot.blocked = Some(reason.clone());
         }
         self.problem(did, Some(reason));
@@ -117,7 +108,7 @@ impl Context {
 
     pub(super) fn clear_description_problem(&self, did: &str) {
         let work = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -131,7 +122,7 @@ impl Context {
 
     pub(super) fn resolved_description_target(&self, did: &str) {
         let cleared = {
-            let mut live = self.live.borrow_mut();
+            let mut live = self.directory.borrow_mut();
             let slot = live
                 .devices
                 .get_mut(did)
@@ -146,7 +137,7 @@ impl Context {
     pub(super) fn retire_work(&self, did: &str) {
         self.stop_lan(did);
         let work = self
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(did)
@@ -161,18 +152,20 @@ impl Context {
     pub(super) fn remove_source_slot(&self, did: &str) {
         self.registry.remove(&DeviceKey::new("xiaomi", did));
         self.retire_work(did);
-        if let Some(slot) = self.live.borrow_mut().devices.remove(did)
+        let slot = self.directory.borrow_mut().devices.remove(did);
+        if let Some(slot) = slot
             && let Some(loading) = slot.loading
         {
             loading.life.close();
         }
+        self.hub.borrow_mut().forget_device(did);
         self.problem(did, None);
         self.commands.remove(did);
         self.changed.notify(usize::MAX);
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
         if self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)

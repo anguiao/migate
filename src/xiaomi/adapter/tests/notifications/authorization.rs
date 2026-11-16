@@ -37,22 +37,22 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             let one = function(&c.context.registry, "one", "outlet:2");
             c.cloud.lock().unwrap().property_status = 503;
             assert!(one.execute(Command::On).await.is_err());
-            assert!(c.context.http_paused.get());
+            assert!(c.context.credentials.borrow().http_paused());
             peer.property("one", 2, true);
             until(|| one.snapshot().power() == Some(Power::On)).await;
             peer.online("one", false);
             until(|| {
-                !c.context.live.borrow().devices["one"]
+                !c.context.directory.borrow().devices["one"]
                     .cloud_access
                     .as_ref()
                     .unwrap()
                     .online
             })
             .await;
-            assert!(c.context.http_paused.get());
+            assert!(c.context.credentials.borrow().http_paused());
             peer.online("one", true);
             until(|| {
-                c.context.live.borrow().devices["one"]
+                c.context.directory.borrow().devices["one"]
                     .cloud_access
                     .as_ref()
                     .unwrap()
@@ -62,7 +62,7 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             .await;
             peer.property("one", 2, false);
             until(|| one.snapshot().power() == Some(Power::Off)).await;
-            assert!(c.context.http_paused.get());
+            assert!(c.context.credentials.borrow().http_paused());
             assert!(matches!(
                 one.snapshot().availability,
                 Availability::Unavailable(_)
@@ -94,7 +94,7 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 if scope_failure {
                     c.context.lan_scope_invalid.set(true);
-                    c.context.cloud_scope_valid.set(false);
+                    c.context.directory.borrow_mut().invalidate_scope();
                     c.context.update_all_availability();
                     c.context.changed.notify(usize::MAX);
                 } else {
@@ -119,9 +119,9 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                 async_io::Timer::after(Duration::from_millis(20)).await;
                 assert_eq!(one.snapshot(), snapshot);
                 if !scope_failure {
-                    assert!(c.context.live.borrow().devices["one"].cloud_forbidden);
+                    assert!(c.context.directory.borrow().devices["one"].cloud_forbidden);
                     c.context
-                        .live
+                        .directory
                         .borrow_mut()
                         .devices
                         .get_mut("one")
@@ -130,7 +130,7 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                     peer.online("one", true);
                     async_io::Timer::after(Duration::from_millis(20)).await;
                     assert!(
-                        c.context.live.borrow().devices["one"]
+                        c.context.directory.borrow().devices["one"]
                             .cloud_access
                             .is_none()
                     );
@@ -176,26 +176,19 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                     if rejection == 1 {
                         let handle = control
                             .context
-                            .live
+                            .hub
                             .borrow()
-                            .session
-                            .as_ref()
+                            .session()
                             .unwrap()
                             .handle
                             .clone();
                         local_device_offline(&control.context, &handle, "one");
                     }
-                    until(|| {
-                        matches!(
-                            *control.context.ha_sync.borrow(),
-                            super::super::super::credentials::HaSync::Paused
-                        )
-                    })
-                    .await;
+                    until(|| control.context.credentials.borrow().refresh_paused()).await;
                     assert_eq!(control.cloud.lock().unwrap().tokens, 1);
                     until(|| control.context.notifications.borrow().is_none()).await;
                     assert!(matches!(
-                        control.context.status.borrow().auth.ha,
+                        control.context.auth_report().ha,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     ));
                     function(&control.context.registry, "one", "outlet:2")
@@ -244,10 +237,8 @@ fn driver_authorization_rejection_rebuilds_with_fresh_token_then_pauses_on_secon
             assert_eq!(c.cloud.lock().unwrap().tokens, 1);
             peer.send(Packet::Disconnect(disconnect));
             until(|| {
-                matches!(
-                    *c.context.ha_sync.borrow(),
-                    super::super::super::credentials::HaSync::Paused
-                ) && c.context.notifications.borrow().is_none()
+                c.context.credentials.borrow().refresh_paused()
+                    && c.context.notifications.borrow().is_none()
             })
             .await;
             assert_eq!(c.cloud.lock().unwrap().tokens, 1);

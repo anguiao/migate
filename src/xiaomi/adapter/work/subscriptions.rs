@@ -465,7 +465,7 @@ impl DeviceWork {
         if self.life.is_closed() {
             return;
         }
-        let blocked = context.live.borrow().devices[did].blocked.clone();
+        let blocked = context.directory.borrow().devices[did].blocked.clone();
         let problem = blocked.or_else(|| self.diagnostic());
         context.problem(did, problem);
     }

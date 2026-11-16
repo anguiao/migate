@@ -60,7 +60,7 @@ fn failed_recognition(context: &super::super::state::Context, did: &str) {
     // Inject the state of a parser regression after restoring valid stored facts.
     // The original input and its committed result remain a complete pair.
     {
-        let mut live = context.live.borrow_mut();
+        let mut live = context.directory.borrow_mut();
         let slot = live.devices.get_mut(did).unwrap();
         slot.candidate = slot.committed.clone();
         slot.recompute_failed = true;
@@ -75,11 +75,11 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     let context = &rig.source.context;
     let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
     let before = app.current().configuration.clone();
-    let retained = context.live.borrow().devices["one"]
+    let retained = context.directory.borrow().devices["one"]
         .committed
         .clone()
         .unwrap();
-    let work = context.live.borrow().devices["one"]
+    let work = context.directory.borrow().devices["one"]
         .admitted
         .clone()
         .unwrap();
@@ -93,7 +93,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
         .push(extra);
     let candidate = changed.raw.recognize(false).unwrap();
     context
-        .live
+        .directory
         .borrow_mut()
         .devices
         .get_mut("two")
@@ -128,7 +128,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     );
     assert!(Rc::ptr_eq(
         &work,
-        context.live.borrow().devices["one"]
+        context.directory.borrow().devices["one"]
             .admitted
             .as_ref()
             .unwrap()
@@ -138,9 +138,9 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     assert!(app.plan().unwrap().is_none());
     assert!(!app.pending());
     assert!(app.failure().is_none());
-    assert!(context.live.borrow().devices["one"].recompute_failed);
+    assert!(context.directory.borrow().devices["one"].recompute_failed);
     assert_eq!(
-        context.live.borrow().devices["one"].candidate.as_ref(),
+        context.directory.borrow().devices["one"].candidate.as_ref(),
         Some(&retained)
     );
     assert!(
@@ -179,7 +179,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
         repair_ready(&c).await;
         let before = c.store.devices().load_configuration().unwrap();
         let key = DeviceKey::new("xiaomi", "group-1");
-        let retained = c.context.live.borrow().devices["group-1"]
+        let retained = c.context.directory.borrow().devices["group-1"]
             .committed
             .clone()
             .unwrap();
@@ -188,7 +188,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
         instance["services"][1]["properties"][2]["value-range"] = json!([3000, 6000, 1]);
         let candidate = SourceFixture::new("member-b", "devcea.light.ls2307", instance);
         c.context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut("member-b")
@@ -207,7 +207,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
         );
         c.publication.apply(c.publication.prepare(plan)).unwrap();
         assert_eq!(
-            c.context.live.borrow().devices["group-1"]
+            c.context.directory.borrow().devices["group-1"]
                 .committed
                 .as_ref(),
             Some(&retained)
@@ -235,14 +235,16 @@ fn a_new_description_resolves_the_retained_recognition_failure() {
     failed_recognition(&rig.source.context, "one");
     block_on(rig.run(|c| async move {
         until(|| {
-            c.context.live.borrow().devices["one"]
+            c.context.directory.borrow().devices["one"]
                 .cloud_access
                 .is_some()
         })
         .await;
-        assert!(c.context.live.borrow().devices["one"].recompute_failed);
+        assert!(c.context.directory.borrow().devices["one"].recompute_failed);
         assert_eq!(
-            c.context.live.borrow().devices["one"].blocked.as_deref(),
+            c.context.directory.borrow().devices["one"]
+                .blocked
+                .as_deref(),
             Some(RECOGNITION_FAILURE)
         );
         assert!(c.cloud.lock().unwrap().instance_reads.is_empty());
@@ -257,7 +259,7 @@ fn a_new_description_resolves_the_retained_recognition_failure() {
         }
         c.context.request_sync();
         until(|| {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             let slot = &live.devices["one"];
             !slot.recompute_failed
                 && slot.blocked.is_none()
@@ -305,7 +307,7 @@ fn startup_reparses_cached_source_before_committing_new_capabilities() {
             .battery()
             .is_none()
     );
-    let old_work = restored.context.live.borrow().devices["sensor"]
+    let old_work = restored.context.directory.borrow().devices["sensor"]
         .admitted
         .clone()
         .unwrap();
@@ -517,7 +519,7 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         );
         for group in &groups {
             assert!(registry.get(group.device().key()).is_some());
-            assert!(!source.context.live.borrow().devices[&group.device().key().id].group);
+            assert!(!source.context.directory.borrow().devices[&group.device().key().id].group);
             assert_eq!(
                 rig.store
                     .devices()
@@ -575,7 +577,7 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                 );
                 until(|| {
                     ["one", "multi", "two"].iter().all(|did| {
-                        let live = control.context.live.borrow();
+                        let live = control.context.directory.borrow();
                         let work = live.devices[*did].admitted.as_ref().unwrap();
                         work.observer().is_some()
                     })
@@ -648,26 +650,26 @@ fn invalid_certificate_keeps_account_and_topology_while_corrupt_topology_fails()
         if corrupt_credentials {
             let (adapter, ready) = result.unwrap();
             block_on(poll_once(ready.wait())).unwrap().unwrap();
-            assert_eq!(adapter.context.status.borrow().auth.certificate, None);
+            assert_eq!(adapter.context.auth_report().certificate, None);
             assert!(matches!(
-                adapter.context.status.borrow().auth.certificate_update,
+                adapter.context.auth_report().certificate_update,
                 crate::xiaomi::auth::CertificateUpdate::Failed(
                     crate::xiaomi::auth::FailureReason::InvalidCertificate
                 )
             ));
             assert_eq!(
-                adapter
-                    .context
-                    .live
-                    .borrow()
-                    .credentials
-                    .as_ref()
-                    .unwrap()
-                    .uid,
+                adapter.context.credentials.borrow().record().unwrap().uid,
                 uid
             );
-            assert!(adapter.context.live.borrow().scope.is_some());
-            assert!(adapter.context.live.borrow().devices.contains_key("one"));
+            assert!(adapter.context.directory.borrow().scope.is_some());
+            assert!(
+                adapter
+                    .context
+                    .directory
+                    .borrow()
+                    .devices
+                    .contains_key("one")
+            );
         } else {
             assert!(matches!(result, Err(AdapterError::Storage(_))));
         }
@@ -688,9 +690,16 @@ fn stopped_ha_or_missing_certificate_preserves_topology_and_maintenance() {
         rig.store.xiaomi().fixture_replace(&saved).unwrap();
         let (adapter, ready) = rig.reopen_adapter();
         block_on(poll_once(ready.wait())).unwrap().unwrap();
-        assert!(adapter.context.live.borrow().scope.is_some());
-        assert!(adapter.context.live.borrow().devices.contains_key("one"));
-        let report = adapter.context.status.borrow().auth.clone();
+        assert!(adapter.context.directory.borrow().scope.is_some());
+        assert!(
+            adapter
+                .context
+                .directory
+                .borrow()
+                .devices
+                .contains_key("one")
+        );
+        let report = adapter.context.auth_report().clone();
         assert_eq!(report.certificate.is_some(), ha_stopped);
         if ha_stopped {
             assert!(matches!(

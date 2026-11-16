@@ -83,7 +83,7 @@ fn replacement_source_rebuilds_baseline_and_rejects_retired_notifications() {
             *captured.borrow_mut() = work(control).function_observer(ID);
         })
         .await;
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
         let replacement = peer();
         replacement.value("one", MODE, json!(1));
         replacement.value("one", TEMP, json!(26.0));
@@ -131,7 +131,7 @@ fn retained_mode_keeps_recovery_reads_and_commands_require_the_fresh_mode() {
             .await;
         })
         .await;
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
 
         let replacement = peer();
         replacement.value("one", POWER, json!(true));
@@ -331,7 +331,7 @@ fn mcn04_replacement_source_reloads_state_and_range_and_rejects_old_notification
             *captured.borrow_mut() = work(control).function_observer(ID);
         })
         .await;
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
         let initial = function(&c.context.registry, "one", ID);
         assert!(!initial.air_conditioner_constraints_ready());
         let replacement = mcn04_peer();

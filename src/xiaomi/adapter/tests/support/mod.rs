@@ -65,7 +65,10 @@ pub(super) fn local_device_offline(
 ) {
     use crate::xiaomi::central::{CentralError, RequestOutcome, RequestStage};
 
-    let work = context.live.borrow().devices[did].admitted.clone().unwrap();
+    let work = context.directory.borrow().devices[did]
+        .admitted
+        .clone()
+        .unwrap();
     context.local_device_outcome(
         handle,
         &work,
@@ -81,11 +84,11 @@ pub(super) fn local_device_offline(
 /// and retire its attachments without going through description handling.
 pub(super) fn force_unavailable(context: &super::super::state::Context, did: &str, reason: &str) {
     let reason = reason.to_owned();
-    if let Some(slot) = context.live.borrow_mut().devices.get_mut(did) {
+    if let Some(slot) = context.directory.borrow_mut().devices.get_mut(did) {
         slot.blocked = Some(reason.clone());
     }
     if let Some(work) = context
-        .live
+        .directory
         .borrow()
         .devices
         .get(did)
@@ -292,7 +295,7 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                             .iter()
                             .all(|function| function.snapshot().power() != Some(Power::Unknown))
                         && c.context
-                            .live
+                            .directory
                             .borrow()
                             .devices
                             .get(*did)

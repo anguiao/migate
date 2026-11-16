@@ -98,9 +98,7 @@ fn stale_local_metadata_does_not_block_local_control_after_cloud_admission() {
             until(|| {
                 peer.lists() > 0
                     && control.context.cloud_candidate("multi", true).is_ok()
-                    && control.context.live.borrow().devices["multi"]
-                        .access
-                        .is_some()
+                    && control.context.hub.borrow().access("multi").is_some()
             })
             .await;
             // Directory metadata disagreement is not an access qualification.
@@ -196,8 +194,8 @@ fn cloud_members_wait_for_local_discovery_to_select_the_first_home() {
     let rig = Rig::new(false, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
-        until(|| c.context.status.borrow().catalog_problem.is_some()).await;
-        assert!(c.context.live.borrow().scope.is_none());
+        until(|| c.context.diagnostics().catalog_problem.is_some()).await;
+        assert!(c.context.directory.borrow().scope.is_none());
         assert!(c.context.registry.list().is_empty());
         assert_eq!(c.cloud.lock().unwrap().details, 0);
         c.announce();
@@ -209,7 +207,7 @@ fn cloud_members_wait_for_local_discovery_to_select_the_first_home() {
         })
         .await;
         assert_eq!(
-            c.context.live.borrow().scope.as_ref().unwrap().home_id,
+            c.context.directory.borrow().scope.as_ref().unwrap().home_id,
             "local"
         );
     }));
@@ -226,7 +224,7 @@ fn five_minute_member_sync_preserves_normal_periodic_channel_reads() {
             until(|| {
                 control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .values()
@@ -316,7 +314,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
         let peer = Rc::new(Peer::default());
         let control = &c;
         c.peer(peer, |peer| async move {
-            until(|| control.context.live.borrow().scope.is_some()).await;
+            until(|| control.context.directory.borrow().scope.is_some()).await;
             control.cloud.lock().unwrap().members = vec!["multi".into()];
             peer.list_changed(&["multi"]);
             initialized(control, &peer, &["multi"]).await;
@@ -399,9 +397,9 @@ fn incomplete_foreign_or_failed_directory_sync_cannot_remove_published_devices()
                 }
                 peer.list_changed(&["one"]);
                 until(|| {
-                    control.context.status.borrow().catalog_problem.is_some()
+                    control.context.diagnostics().catalog_problem.is_some()
                         || matches!(
-                            control.context.status.borrow().auth.ha,
+                            control.context.auth_report().ha,
                             crate::xiaomi::auth::AuthenticationState::Unavailable(_)
                         )
                 })
@@ -519,7 +517,7 @@ fn a_complete_cloud_snapshot_remains_valid_across_a_local_reconnect() {
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
-            until(|| control.context.cloud_scope_valid.get()).await;
+            until(|| control.context.directory.borrow().scope_valid()).await;
             let homes = {
                 let mut cloud = control.cloud.lock().unwrap();
                 cloud.members = vec!["multi".into()];
@@ -532,7 +530,7 @@ fn a_complete_cloud_snapshot_remains_valid_across_a_local_reconnect() {
         .await;
         until(|| {
             matches!(
-                c.context.status.borrow().gateway,
+                c.context.diagnostics().gateway,
                 GatewayStatus::Unavailable(_)
             )
         })
@@ -578,8 +576,7 @@ fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_con
             until(|| {
                 control
                     .context
-                    .status
-                    .borrow()
+                    .diagnostics()
                     .pending
                     .iter()
                     .any(|pending| pending.did == "multi" && pending.reason.contains("503"))
@@ -598,8 +595,7 @@ fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_con
             assert!(
                 control
                     .context
-                    .status
-                    .borrow()
+                    .diagnostics()
                     .pending
                     .iter()
                     .all(|pending| pending.did != "multi")

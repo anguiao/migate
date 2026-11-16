@@ -36,7 +36,7 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool) {
             crate::xiaomi::lan::TIMEOUT,
         );
         {
-            let mut live = context.live.borrow_mut();
+            let mut live = context.directory.borrow_mut();
             let lan = &mut live.devices.get_mut(did).unwrap().lan;
             lan.active = Some((record, client.clone()));
             lan.status = Some(LanStatus {
@@ -61,14 +61,14 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool) {
         context.reconcile_lan(did).unwrap();
     }
     assert!(
-        context.live.borrow().devices[did]
+        context.directory.borrow().devices[did]
             .lan
             .status
             .as_ref()
             .is_some_and(|status| status.state == LanState::Authenticating)
     );
     context.remove_source_slot(did);
-    assert!(!context.live.borrow().devices.contains_key(did));
+    assert!(!context.directory.borrow().devices.contains_key(did));
     block_on(future::or(
         async {
             context.tasks.run().await.unwrap();
@@ -184,7 +184,7 @@ fn cached_scope_restarts_with_ha_state(ha_stopped: bool) {
                 control.store.devices().load_configuration().unwrap(),
                 before
             );
-            let work = control.context.live.borrow().devices[did]
+            let work = control.context.directory.borrow().devices[did]
                 .admitted
                 .clone()
                 .unwrap();
@@ -342,7 +342,7 @@ fn sent_timeout_is_not_replayed_and_only_failed_device_recovers_with_new_baselin
             first.drop_write.store(false, Ordering::Relaxed);
             first.values.lock().unwrap().insert((2, 1), json!(false));
             until(|| {
-                control.context.live.borrow().devices[dids[0]]
+                control.context.directory.borrow().devices[dids[0]]
                     .lan
                     .status
                     .as_ref()
@@ -432,7 +432,7 @@ fn credential_replacement_result(drop_reply: bool) {
             until(|| old.writes.lock().unwrap().len() == 1).await;
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut(did)
@@ -532,7 +532,7 @@ fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
                     },
                     async {
                         let scheduled = |delay| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()
@@ -554,7 +554,7 @@ fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
                         peer.drop_business.store(false, Ordering::Relaxed);
                         rig.clock.advance(Duration::from_secs(2));
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()

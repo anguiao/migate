@@ -11,7 +11,7 @@ impl Context {
         cached_report: bool,
     ) {
         let work = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -373,7 +373,7 @@ impl Context {
         source_time: Option<i64>,
     ) {
         let work = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -404,7 +404,7 @@ impl Context {
         if !self.current_notifications(handle) {
             return;
         }
-        if let Some(slot) = self.live.borrow_mut().devices.get_mut(did) {
+        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
             if let Some(access) = &mut slot.cloud_access {
                 if online != access.online
                     && let Some(work) = &slot.admitted

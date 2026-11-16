@@ -17,7 +17,7 @@ fn rig() -> Rig {
     Rig::custom_lights(&[("one", "xiaomi.curtain.acn010", instance())])
 }
 fn work(c: &Control) -> Rc<super::work::DeviceWork> {
-    c.context.live.borrow().devices["one"]
+    c.context.directory.borrow().devices["one"]
         .admitted
         .as_ref()
         .unwrap()
@@ -71,7 +71,7 @@ fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
 
 async fn terminal(c: &Control, command: &str) -> String {
     let status = crate::terminal::AuthStatus::new(
-        c.context.status.borrow().auth.clone(),
+        c.context.auth_report().clone(),
         "/bin/migate".into(),
         "/data".into(),
     );

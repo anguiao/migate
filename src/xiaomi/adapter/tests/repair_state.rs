@@ -19,7 +19,7 @@ fn representative_cannot_mix_a_new_source_mode_with_an_old_rgb_cache() {
         })
         .await;
         let light = function(&c.context.registry, "group-1", "light:2");
-        let work = c.context.live.borrow().devices["member-a"]
+        let work = c.context.directory.borrow().devices["member-a"]
             .admitted
             .clone()
             .unwrap();

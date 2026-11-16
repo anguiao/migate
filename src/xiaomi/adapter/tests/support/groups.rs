@@ -96,7 +96,7 @@ pub(in super::super) async fn repair_ready(c: &Control) {
     c.announce();
     until(|| {
         c.context
-            .live
+            .directory
             .borrow()
             .devices
             .get("group-1")
@@ -106,7 +106,7 @@ pub(in super::super) async fn repair_ready(c: &Control) {
     until(|| {
         ["member-a", "member-b"].iter().all(|did| {
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get(*did)

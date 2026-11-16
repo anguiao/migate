@@ -83,7 +83,7 @@ fn cloud_poll_rate_limit_backs_off_without_disabling_cloud_control() {
             .await;
             c.clock.automatic.store(false, Ordering::Relaxed);
             assert_eq!(curtain(&c), before_snapshot);
-            assert!(!c.context.http_paused.get());
+            assert!(!c.context.credentials.borrow().http_paused());
             assert_eq!(
                 c.context.diagnostics().devices[0].selected_control,
                 Some(PathKind::Cloud)

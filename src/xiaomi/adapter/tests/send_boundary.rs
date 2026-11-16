@@ -1,6 +1,6 @@
 use super::*;
 use crate::xiaomi::{
-    adapter::{routing::PathPriority, state::Session},
+    adapter::{hub::Session, routing::PathPriority},
     central::{
         CentralError, RequestOutcome, RequestStage, RequestTimeout, SessionDriver, SessionHandle,
     },
@@ -110,7 +110,10 @@ impl AsyncWrite for Transport {
 }
 fn local(c: &Control, wire: Rc<Wire>) -> (SessionHandle, SessionDriver) {
     let (handle, driver) = SessionDriver::ready_for_test(Transport(wire), Duration::from_secs(1));
-    c.context.live.borrow_mut().session = Some(Session::new(handle.clone()));
+    c.context
+        .hub
+        .borrow_mut()
+        .install(Session::new(handle.clone()));
     c.context.local_list_success(&handle);
     c.context
         .observe_access(vec![super::list_scheduling::observation(&c.data[0], true)]);
@@ -130,7 +133,7 @@ fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revo
     for code in [-10_007, -704_042_001, -704_042_011, -704_090_001] {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             let (handle, _) = local(&c, Rc::new(Wire::default()));
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -151,8 +154,10 @@ fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revo
             assert_eq!(c.context.priority(), PathPriority::LocalFirst);
             assert!(c.context.local_candidate("one", false).is_err());
             assert!(
-                !c.context.live.borrow().devices["one"]
-                    .access
+                !c.context
+                    .hub
+                    .borrow()
+                    .access("one")
                     .as_ref()
                     .unwrap()
                     .as_ref()
@@ -167,7 +172,7 @@ fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revo
 fn stale_background_property_errors_do_not_revoke_a_new_hub_connection() {
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let (old, _) = local(&c, Rc::new(Wire::default()));
-        let work = c.context.live.borrow().devices["one"]
+        let work = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -182,8 +187,10 @@ fn stale_background_property_errors_do_not_revoke_a_new_hub_connection() {
         work.life.close();
         c.context.local_device_outcome(&current, &work, &offline);
         assert!(
-            c.context.live.borrow().devices["one"]
-                .access
+            c.context
+                .hub
+                .borrow()
+                .access("one")
                 .as_ref()
                 .unwrap()
                 .as_ref()
@@ -198,7 +205,7 @@ fn stale_local_device_errors_cannot_revoke_current_access() {
     for stale in 0..2 {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             let (handle, _) = local(&c, Rc::new(Wire::default()));
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -219,8 +226,10 @@ fn stale_local_device_errors_cannot_revoke_current_access() {
                 },
             );
             assert!(
-                c.context.live.borrow().devices["one"]
-                    .access
+                c.context
+                    .hub
+                    .borrow()
+                    .access("one")
                     .as_ref()
                     .unwrap()
                     .as_ref()
@@ -237,7 +246,7 @@ fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_writ
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_scope_valid.get()).await;
+        until(|| c.context.directory.borrow().scope_valid()).await;
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
         let one = function(&c.context.registry, "one", "outlet:2");
@@ -282,7 +291,7 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
             let wire = Rc::new(Wire::default());
             let (_, driver) = local(&c, wire.clone());
             let one = function(&c.context.registry, "one", "outlet:2");
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -337,7 +346,10 @@ fn only_current_session_list_restores_priority_after_disconnect() {
             Transport(Rc::new(Wire::default())),
             Duration::from_secs(1),
         );
-        c.context.live.borrow_mut().session = Some(Session::new(new.clone()));
+        c.context
+            .hub
+            .borrow_mut()
+            .install(Session::new(new.clone()));
         assert_eq!(c.context.priority(), PathPriority::CloudFirst);
         c.context.local_list_success(&old);
         assert_eq!(c.context.priority(), PathPriority::CloudFirst);
@@ -352,7 +364,7 @@ fn a_withdrawn_zero_byte_refresh_keeps_one_demand_until_device_recovery() {
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
         let one = function(&c.context.registry, "one", "outlet:2");
-        let work = c.context.live.borrow().devices["one"]
+        let work = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -426,7 +438,7 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
-        let work = c.context.live.borrow().devices["one"]
+        let work = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -499,7 +511,7 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                     )
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
-                let work = c.context.live.borrow().devices["one"]
+                let work = c.context.directory.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();
@@ -621,7 +633,7 @@ fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
     let rig = Rig::light("xiaomi.light.ceil04");
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_scope_valid.get()).await;
+        until(|| c.context.directory.borrow().scope_valid()).await;
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
         let light = function(&c.context.registry, "one", "light:2");
@@ -678,7 +690,7 @@ fn an_unsent_light_target_is_not_own_feedback() {
                     )
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
-                let work = c.context.live.borrow().devices["one"]
+                let work = c.context.directory.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();
@@ -767,7 +779,7 @@ fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_by
         Rig::custom_lights(&[("one", "xiaomi.motion.pir1", instance)]).run(|c| async move {
             let wire = Rc::new(Wire::default());
             let (handle, driver) = local(&c, wire.clone());
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -894,7 +906,7 @@ fn curtain_route_change_retries_only_a_request_with_no_local_bytes() {
         let rig = curtain_rig();
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(rig.run(|c| async move {
-            until(|| c.context.cloud_scope_valid.get()).await;
+            until(|| c.context.directory.borrow().scope_valid()).await;
             let wire = Rc::new(Wire::default());
             if sent {
                 wire.allow(1);

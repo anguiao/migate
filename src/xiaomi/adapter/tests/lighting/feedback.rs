@@ -8,7 +8,7 @@ fn retained_light_snapshot_cannot_replace_or_invalidate_a_fresh_read() {
         let control = &c;
         c.peer(peer, |_| async move {
             let light = ready_light(control).await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -57,7 +57,7 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
             peer.notify_value("one", BRIGHTNESS, json!(60), false);
             until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(light.light_action_current(action.token()));
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -107,17 +107,16 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             peer.state.borrow_mut().hold_writes = true;
             let first = old.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            let candidate = control.context.live.borrow().devices["one"]
+            let candidate = control.context.directory.borrow().devices["one"]
                 .candidate
                 .clone();
-            let access = control.context.live.borrow().devices["one"].access.clone();
-            let cloud_access = control.context.live.borrow().devices["one"]
+            let access = control.context.hub.borrow().access("one").cloned();
+            let cloud_access = control.context.directory.borrow().devices["one"]
                 .cloud_access
                 .clone();
             control.context.remove("one").unwrap();
-            let slot = super::super::super::state::DeviceSlot {
+            let slot = super::super::super::directory::DeviceSlot {
                 candidate,
-                access,
                 cloud_access,
                 // A genuine fresh confirmation clears the durable tombstone.
                 confirmed: true,
@@ -125,10 +124,20 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             };
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .insert("one".into(), slot);
+            control.context.observe_access_filtered(
+                &["one".into()],
+                access
+                    .into_iter()
+                    .map(|access| crate::xiaomi::central::DeviceEntry {
+                        did: "one".into(),
+                        access,
+                    })
+                    .collect(),
+            );
             control.context.reconcile("one").unwrap();
             let new = ready_replacement_light(control).await;
             let next = new.begin_light_action(brightness(55.0), false).unwrap();
@@ -141,7 +150,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             assert!(new.light_action_current(next.token()));
             assert!(poll_once(next.accepted()).await.is_none());
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -224,7 +233,7 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
 
                 // Fresh reads update snapshots without discarding the history
                 // that identifies later echoes of either accepted frame.
-                let work = control.context.live.borrow().devices["one"]
+                let work = control.context.directory.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();
@@ -314,7 +323,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
 
             // HTTP receipts and notification delivery share the device's
             // feedback ownership; inject at the notification dispatch boundary.
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -368,7 +377,7 @@ fn accepted_numeric_echoes_expire_three_seconds_after_ack_without_renewal() {
             freeze_light_clock(control);
             let action = light.begin_light_action(brightness(20.0), false).unwrap();
             action.accepted().await.unwrap();
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -620,7 +629,7 @@ fn in_flight_feedback_survives_valid_source_epoch_change() {
             peer.state.borrow_mut().hold_writes = true;
             let action = light.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();

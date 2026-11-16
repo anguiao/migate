@@ -151,8 +151,7 @@ fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
             .await;
             let status = control
                 .context
-                .status
-                .borrow()
+                .diagnostics()
                 .devices
                 .iter()
                 .find(|device| device.did == "sensor")
@@ -183,8 +182,7 @@ fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
             until(|| {
                 control
                     .context
-                    .status
-                    .borrow()
+                    .diagnostics()
                     .devices
                     .iter()
                     .find(|device| device.did == "sensor")
@@ -214,8 +212,7 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
                         == Some(40.0)
                     && control
                         .context
-                        .status
-                        .borrow()
+                        .diagnostics()
                         .devices
                         .iter()
                         .find(|device| device.did == "sensor")
@@ -231,8 +228,7 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
             until(|| {
                 control
                     .context
-                    .status
-                    .borrow()
+                    .diagnostics()
                     .devices
                     .iter()
                     .find(|device| device.did == "sensor")
@@ -262,8 +258,7 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
             until(|| {
                 control
                     .context
-                    .status
-                    .borrow()
+                    .diagnostics()
                     .devices
                     .iter()
                     .find(|device| device.did == "sensor")

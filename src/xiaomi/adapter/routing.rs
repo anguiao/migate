@@ -51,17 +51,16 @@ pub enum PathPriority {
 }
 impl Context {
     pub(super) fn priority(&self) -> PathPriority {
-        self.priority.get()
+        self.hub.borrow().priority()
     }
     pub(super) fn current_local(&self, handle: &SessionHandle) -> bool {
-        self.live
+        self.hub
             .borrow()
-            .session
-            .as_ref()
+            .session()
             .is_some_and(|session| session.handle.same_connection(handle))
     }
     pub(super) fn direct_candidate(&self, did: &str) -> Result<Client, String> {
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         let slot = live
             .devices
             .get(did)
@@ -121,19 +120,14 @@ impl Context {
     }
     pub(super) fn local_candidate(&self, did: &str, push: bool) -> Result<SessionHandle, String> {
         let virtual_group = self.is_virtual_group(did);
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         let slot = live
             .devices
             .get(did)
             .ok_or("device description unavailable")?;
-        let session = live.session.as_ref().ok_or("gateway disconnected")?;
-        if !self
-            .status
-            .borrow()
-            .auth
-            .certificate
-            .is_some_and(|validity| validity.currently_valid(self.clock.unix_now()))
-        {
+        let hub = self.hub.borrow();
+        let session = hub.session().ok_or("gateway disconnected")?;
+        if !self.credentials.borrow().hub_usable(self.clock.unix_now()) {
             return Err("gateway certificate not currently valid".into());
         }
         if virtual_group {
@@ -146,9 +140,8 @@ impl Context {
         if work.life.is_closed() {
             return Err("device source retired".into());
         }
-        let access = slot
-            .access
-            .as_ref()
+        let access = hub
+            .access(did)
             .ok_or("device access not available")?
             .as_ref()
             .map_err(ToString::to_string)?;
@@ -164,10 +157,11 @@ impl Context {
         Ok(session.handle.clone())
     }
     pub(super) fn is_group(&self, did: &str) -> bool {
-        self.live.borrow().devices.contains_key(did) && self.graph.borrow().rules.contains_key(did)
+        self.directory.borrow().devices.contains_key(did)
+            && self.graph.borrow().rules.contains_key(did)
     }
     pub(super) fn is_read_only(&self, did: &str) -> bool {
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         let Some(slot) = live.devices.get(did) else {
             return false;
         };
@@ -196,7 +190,7 @@ impl Context {
         self.cloud_candidate_for(did, http, self.has_sensors(did))
     }
     pub(super) fn has_sensors(&self, did: &str) -> bool {
-        self.live
+        self.directory
             .borrow()
             .devices
             .get(did)
@@ -210,7 +204,7 @@ impl Context {
             })
     }
     fn sensor_function(&self, did: &str, id: &str) -> bool {
-        self.live
+        self.directory
             .borrow()
             .devices
             .get(did)
@@ -228,21 +222,26 @@ impl Context {
     }
     fn cloud_candidate_for(&self, did: &str, http: bool, sensor: bool) -> Result<(), String> {
         if http {
-            if !self.cloud_scope_valid.get() {
+            if !self.directory.borrow().scope_valid() {
                 return Err("account/home scope not validated".into());
             }
-            if self.http_paused.get() || self.mijia_path().is_none() {
+            if self.credentials.borrow().http_paused() || self.mijia_path().is_none() {
                 return Err("Mijia HTTP unavailable".into());
             }
         } else {
             self.cloud_authentication()?;
         }
-        let live = self.live.borrow();
-        if !live.credentials.as_ref().is_some_and(|credentials| {
-            live.scope
-                .as_ref()
-                .is_some_and(|scope| scope.uid == credentials.uid)
-        }) {
+        let live = self.directory.borrow();
+        if !self
+            .credentials
+            .borrow()
+            .record()
+            .is_some_and(|credentials| {
+                live.scope
+                    .as_ref()
+                    .is_some_and(|scope| scope.uid == credentials.uid)
+            })
+        {
             return Err("account/home identity mismatch".into());
         }
         let slot = live
@@ -260,7 +259,9 @@ impl Context {
             return Err("device access forbidden".into());
         }
         let Some(access) = slot.cloud_access.as_ref() else {
-            return if !http && (self.mijia_path().is_none() || self.http_paused.get()) {
+            return if !http
+                && (self.mijia_path().is_none() || self.credentials.borrow().http_paused())
+            {
                 Ok(())
             } else {
                 Err("device information not available".into())
@@ -313,7 +314,7 @@ impl Context {
     }
     fn direct_function_candidate(&self, did: &str, id: &str) -> Option<Client> {
         {
-            let live = self.live.borrow();
+            let live = self.directory.borrow();
             let native = live.devices.get(did)?.committed.as_ref()?.native.as_ref()?;
             if native
                 .legacy_profile()
@@ -365,7 +366,7 @@ impl Context {
         id: &str,
     ) -> Vec<super::model::PathKind> {
         let Some(has_cloud_action) = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -402,7 +403,7 @@ impl Context {
             return Vec::new();
         }
         let has_plan = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)

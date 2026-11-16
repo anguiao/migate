@@ -47,7 +47,7 @@ fn state(c: &Control, id: &str) -> StateSnapshot {
         .unwrap()
 }
 fn work(c: &Control) -> Rc<super::super::work::DeviceWork> {
-    c.context.live.borrow().devices["one"]
+    c.context.directory.borrow().devices["one"]
         .admitted
         .as_ref()
         .unwrap()

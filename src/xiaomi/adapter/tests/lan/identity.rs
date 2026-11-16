@@ -50,7 +50,7 @@ fn retry_new_credentials_after_temporary_failure(
     if !old_is_active {
         peer.drop_replacement.store(true, Ordering::Relaxed);
         context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(&record.did)
@@ -76,7 +76,7 @@ fn retry_new_credentials_after_temporary_failure(
                             until(|| context.direct_candidate(&record.did).is_ok()).await;
                             peer.drop_replacement.store(true, Ordering::Relaxed);
                             context
-                                .live
+                                .directory
                                 .borrow_mut()
                                 .devices
                                 .get_mut(&record.did)
@@ -85,14 +85,14 @@ fn retry_new_credentials_after_temporary_failure(
                             context.changed.notify(usize::MAX);
                         }
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.problem.is_some())
                         })
                         .await;
-                        let status = context.live.borrow().devices[&record.did]
+                        let status = context.directory.borrow().devices[&record.did]
                             .lan
                             .status
                             .clone()
@@ -112,7 +112,7 @@ fn retry_new_credentials_after_temporary_failure(
                         rig.clock.advance(Duration::from_secs(1));
                         if reject_after_timeout {
                             until(|| {
-                                context.live.borrow().devices[&record.did]
+                                context.directory.borrow().devices[&record.did]
                                     .lan
                                     .status
                                     .as_ref()
@@ -219,7 +219,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
     rig.clock.advance(Duration::from_secs(7200));
     let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
-    assert!(context.status.borrow().auth.certificate.unwrap().not_after < rig.clock.wall());
+    assert!(context.auth_report().certificate.unwrap().not_after < rig.clock.wall());
     rig.network.lan_port.set(peer.address.port());
     rig.network
         .discover_at(peer.address, Duration::from_millis(20));
@@ -279,7 +279,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
                             }),
                         };
                         context
-                            .live
+                            .directory
                             .borrow_mut()
                             .devices
                             .get_mut(&record.did)
@@ -308,7 +308,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
                         );
                         info.lan = LanCredentials::NotIp;
                         context
-                            .live
+                            .directory
                             .borrow_mut()
                             .devices
                             .get_mut(&record.did)
@@ -316,7 +316,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
                             .cloud_access = Some(info);
                         context.changed.notify(usize::MAX);
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()
@@ -370,7 +370,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
     rig.network
         .discover_at(peer.address, Duration::from_millis(20));
     context
-        .live
+        .directory
         .borrow_mut()
         .devices
         .get_mut("656878122")
@@ -400,7 +400,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                     },
                     async {
                         until(|| {
-                            context.live.borrow().devices["656878122"]
+                            context.directory.borrow().devices["656878122"]
                                 .lan
                                 .status
                                 .as_ref()
@@ -415,7 +415,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         peer.reject_read.store(false, Ordering::Relaxed);
                         peer.accept_replacement.store(true, Ordering::Relaxed);
                         context
-                            .live
+                            .directory
                             .borrow_mut()
                             .devices
                             .get_mut("656878122")
@@ -429,7 +429,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         });
                         context.changed.notify(usize::MAX);
                         until(|| {
-                            context.live.borrow().devices["656878122"]
+                            context.directory.borrow().devices["656878122"]
                                 .lan
                                 .status
                                 .as_ref()
@@ -439,7 +439,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         let record = rig.store.lan().load(&scope, "656878122").unwrap().unwrap();
                         assert_eq!(record.token, replacement);
                         context
-                            .live
+                            .directory
                             .borrow_mut()
                             .devices
                             .get_mut("656878122")
@@ -448,7 +448,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         context.changed.notify(usize::MAX);
                         async_io::Timer::after(Duration::from_millis(30)).await;
                         assert!(
-                            context.live.borrow().devices["656878122"]
+                            context.directory.borrow().devices["656878122"]
                                 .lan
                                 .status
                                 .as_ref()
@@ -460,7 +460,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         assert!(
                             restored
                                 .context
-                                .live
+                                .directory
                                 .borrow()
                                 .devices
                                 .get("656878122")
@@ -524,7 +524,7 @@ fn discovered_new_address_is_saved_only_after_authenticated_read() {
                     },
                     async {
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()
@@ -603,14 +603,14 @@ fn discovered_address_error_controls_recovery(rejected: bool) {
                     },
                     async {
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Failed)
                         })
                         .await;
-                        let status = context.live.borrow().devices[&record.did]
+                        let status = context.directory.borrow().devices[&record.did]
                             .lan
                             .status
                             .clone()
@@ -732,7 +732,7 @@ fn occupied_address_recovers(old: &FakeDevice, expected_old_business: usize, tok
                         );
                         target.hold_read.store(false, Ordering::Relaxed);
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()
@@ -824,7 +824,7 @@ fn identity_mismatch_without_discovery_stops_without_retries() {
                     },
                     async {
                         until(|| {
-                            context.live.borrow().devices[&record.did]
+                            context.directory.borrow().devices[&record.did]
                                 .lan
                                 .status
                                 .as_ref()

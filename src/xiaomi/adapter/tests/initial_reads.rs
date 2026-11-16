@@ -5,7 +5,10 @@ use crate::xiaomi::capability::PropertyBinding;
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
 fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::work::DeviceWork> {
-    context.live.borrow().devices[did].admitted.clone().unwrap()
+    context.directory.borrow().devices[did]
+        .admitted
+        .clone()
+        .unwrap()
 }
 
 #[test]
@@ -218,7 +221,7 @@ fn cloud_offline_result_counts_before_it_retires_the_read_path() {
         c.clock.advance(Duration::from_millis(201));
         until(|| source.initial_reads_ready(&configuration)).await;
         assert!(
-            !c.context.live.borrow().devices["one"]
+            !c.context.directory.borrow().devices["one"]
                 .cloud_access
                 .as_ref()
                 .unwrap()
@@ -253,7 +256,7 @@ fn native_and_logical_replacements_need_their_own_initial_observations() {
     old.retire();
     rig.source
         .context
-        .live
+        .directory
         .borrow_mut()
         .devices
         .get_mut("one")

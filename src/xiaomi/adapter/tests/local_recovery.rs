@@ -26,7 +26,7 @@ fn one_device_read_timeout_keeps_other_devices_on_the_hub() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();

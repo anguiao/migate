@@ -129,7 +129,7 @@ fn curtain_disconnect_and_retirement_keep_observations_and_recovery_reads_all_pr
             *capture_source.borrow_mut() = work(control).function_observer("curtain:2");
         })
         .await;
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
         assert_eq!(curtain(&c), saved.borrow().unwrap());
         assert!(work(&c).function_observer("curtain:2").is_none());
         let replacement = peer();

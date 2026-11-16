@@ -99,7 +99,7 @@ fn resolve_initial_failure(
         return;
     }
     let current_work = context
-        .live
+        .directory
         .borrow()
         .devices
         .get(&work.key.id)
@@ -406,7 +406,7 @@ impl ReadFlight {
 }
 fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
     context
-        .live
+        .directory
         .borrow()
         .devices
         .values()

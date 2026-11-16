@@ -7,11 +7,7 @@
 //! are cloud-only; physical groups keep their own DID's real route.
 
 use super::{model::AdapterError, relations::ConfirmedGroup, state::Context};
-use crate::{
-    device::DeviceKey,
-    xiaomi::capability::RawDescription,
-    xiaomi::{cloud::CloudClient, mijia::CloudDeviceInfo},
-};
+use crate::{device::DeviceKey, xiaomi::capability::RawDescription, xiaomi::cloud::CloudClient};
 use futures_lite::future;
 use std::rc::Rc;
 
@@ -50,7 +46,7 @@ impl Context {
             .map(|group| group.membership.group_did.clone())
             .collect::<std::collections::BTreeSet<_>>();
         let stale = self
-            .live
+            .directory
             .borrow()
             .devices
             .iter()
@@ -63,72 +59,30 @@ impl Context {
         for group in active {
             let did = &group.membership.group_did;
             let existing = self
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get(did)
                 .is_some_and(|slot| slot.group);
-            let known = if existing {
-                self.graph.borrow().groups.get(did).map(|known| {
-                    (
-                        known.is_physical,
-                        known.model.clone(),
-                        known.instance_type.clone(),
-                    )
-                })
-            } else {
-                None
-            };
-            let recovered_target = existing
-                && self.live.borrow().devices[did].description_target_missing
-                && group.instance_type.is_some();
-            let needs_local = {
-                let mut live = self.live.borrow_mut();
-                let slot = live.devices.entry(did.clone()).or_default();
-                slot.confirmed = true;
-                // Retained relations with a read error cannot restore revoked access.
-                if group.error.is_none() {
-                    slot.cloud_forbidden = false;
-                }
-                slot.group = true;
-                slot.description_target_missing = group.instance_type.is_none();
-                slot.cloud_access =
-                    group
-                        .instance_type
-                        .as_ref()
-                        .map(|instance_type| CloudDeviceInfo {
-                            did: did.clone(),
-                            model: group.model.clone(),
-                            instance_type: instance_type.clone(),
-                            online: group.online,
-                            lan: crate::xiaomi::mijia::LanCredentials::NotIp,
-                        });
-                group.membership.is_physical
-                    && known.is_none_or(|(physical, model, instance_type)| {
-                        !physical || model != group.model || instance_type != group.instance_type
-                    })
-            };
-            {
-                let target = group
-                    .instance_type
-                    .as_ref()
-                    .map(|instance_type| (group.model.clone(), instance_type.clone()));
-                self.live
-                    .borrow_mut()
-                    .devices
-                    .get_mut(did)
-                    .unwrap()
-                    .retarget_loading(&target);
+            let needs_local = group.membership.is_physical
+                && (!existing
+                    || self.graph.borrow().groups.get(did).is_none_or(|known| {
+                        !known.is_physical
+                            || known.model != group.model
+                            || known.instance_type != group.instance_type
+                    }));
+            let (recovered_target, retired) = self.directory.borrow_mut().confirm_group(group);
+            if let Some(life) = retired {
+                life.close();
             }
             if recovered_target {
                 self.clear_description_problem(did);
             }
             if needs_local {
                 let access = self
-                    .live
+                    .hub
                     .borrow()
-                    .session
-                    .as_ref()
+                    .session()
                     .map(|session| session.access.clone());
                 if let Some(access) = access {
                     access.request_filtered(vec![did.clone()]);
@@ -141,13 +95,13 @@ impl Context {
                 );
                 continue;
             };
-            if !self.live.borrow().devices[did].needs_description() {
+            if !self.directory.borrow().devices[did].needs_description() {
                 self.resolved_description_target(did);
                 self.reconcile_group(did)?;
                 continue;
             }
             let life = {
-                let mut live = self.live.borrow_mut();
+                let mut live = self.directory.borrow_mut();
                 let target = Some((group.model.clone(), instance_type.clone()));
                 live.devices.get_mut(did).unwrap().start_loading(target)
             };
@@ -179,7 +133,7 @@ impl Context {
                 )
                 .await;
                 let cleared = {
-                    let mut live = context.live.borrow_mut();
+                    let mut live = context.directory.borrow_mut();
                     let Some(slot) = live.devices.get_mut(&group_did) else {
                         return Ok::<(), AdapterError>(());
                     };
@@ -193,10 +147,16 @@ impl Context {
                     return Ok(());
                 };
                 let current = context.current_mijia(&token)
-                    && context.live.borrow().scope.as_ref().is_some_and(|scope| {
-                        scope.uid == captured_scope.uid && scope.home_id == captured_scope.home_id
-                    })
-                    && context.relations.borrow().matches_fetch(
+                    && context
+                        .directory
+                        .borrow()
+                        .scope
+                        .as_ref()
+                        .is_some_and(|scope| {
+                            scope.uid == captured_scope.uid
+                                && scope.home_id == captured_scope.home_id
+                        })
+                    && context.directory.borrow().matches_group_fetch(
                         &group_did,
                         &record_did,
                         &model,
@@ -219,13 +179,10 @@ impl Context {
                         .and_then(|raw| raw.recognize(true))
                         {
                             Ok(description) => {
-                                if let Some(slot) =
-                                    context.live.borrow_mut().devices.get_mut(&group_did)
-                                {
-                                    slot.blocked = None;
-                                    slot.recompute_failed = false;
-                                    slot.candidate = Some(description);
-                                }
+                                context
+                                    .directory
+                                    .borrow_mut()
+                                    .accept_description(&group_did, description);
                                 context.clear_description_problem(&group_did);
                                 context.stage();
                             }

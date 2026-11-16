@@ -33,12 +33,7 @@ impl Context {
             return;
         }
         let did = &work.key.id;
-        {
-            let mut live = self.live.borrow_mut();
-            if let Some(Ok(access)) = &mut live.devices.get_mut(did).unwrap().access {
-                access.online = false;
-            }
-        }
+        self.hub.borrow_mut().device_offline(did);
         work.retry_subscriptions();
         self.update_availability(did);
         self.update_routing(&format!("hub reported device {did} offline or missing"));
@@ -47,12 +42,11 @@ impl Context {
     }
     pub(in crate::xiaomi::adapter) fn local_list_success(&self, handle: &SessionHandle) {
         if self.current_local(handle) {
-            let recovering =
-                self.priority.replace(PathPriority::LocalFirst) == PathPriority::CloudFirst;
+            let recovering = self.hub.borrow_mut().restore_priority();
             if recovering {
                 log::info!("Gateway device list succeeded; hub control priority restored");
                 let works = self
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .values()
@@ -69,41 +63,42 @@ impl Context {
         }
     }
     pub(in crate::xiaomi::adapter) fn install_work(self: &Rc<Self>, did: &str) {
-        let mut live = self.live.borrow_mut();
-        let work = live.devices.get(did).and_then(|slot| slot.admitted.clone());
+        let work = self
+            .directory
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.admitted.clone());
         let Some(work) = work else {
             return;
         };
         if let Some(session) = self.notifications.borrow().as_ref() {
             work.attach_cloud(session.handle.clone());
         }
-        if !live.devices.get(did).is_some_and(|slot| {
-            slot.access.as_ref().is_some_and(|access| {
-                access
-                    .as_ref()
-                    .is_ok_and(|access| access.spec_v2_access && access.push_available)
-            })
+        let hub = self.hub.borrow();
+        if !hub.access(did).is_some_and(|access| {
+            access
+                .as_ref()
+                .is_ok_and(|access| access.spec_v2_access && access.push_available)
         }) {
             return;
         }
-        let Some(session) = live.session.as_mut() else {
+        let Some(session) = hub.session() else {
             return;
         };
         let handle = session.handle.clone();
+        let tasks = session.tasks.clone();
+        drop(hub);
         if !work.attach_local(handle.clone()) {
             return;
         }
-        session
-            .tasks
-            .spawn(super::super::work::run(work, handle, self.clone()));
+        tasks.spawn(super::super::work::run(work, handle, self.clone()));
     }
     pub(in crate::xiaomi::adapter) fn disconnect(&self, reason: String) {
-        let priority_changed =
-            self.priority.replace(PathPriority::CloudFirst) != PathPriority::CloudFirst;
-        let session = self.live.borrow_mut().session.take();
+        let (session, priority_changed) = self.hub.borrow_mut().disconnect();
         let disconnected = if let Some(session) = session {
             let works = self
-                .live
+                .directory
                 .borrow()
                 .devices
                 .values()
@@ -117,8 +112,7 @@ impl Context {
         } else {
             false
         };
-        for slot in self.live.borrow_mut().devices.values_mut() {
-            slot.access = None;
+        for slot in self.directory.borrow().devices.values() {
             if (disconnected || priority_changed)
                 && let Some(work) = &slot.admitted
             {
@@ -136,7 +130,7 @@ impl Context {
         }
         self.disconnect("Xiaomi adapter stopped".into());
         let dids = self
-            .live
+            .directory
             .borrow()
             .devices
             .keys()
@@ -144,7 +138,7 @@ impl Context {
             .collect::<Vec<_>>();
         for did in dids {
             self.stop_lan(&did);
-            if let Some(work) = &self.live.borrow().devices[&did].admitted {
+            if let Some(work) = &self.directory.borrow().devices[&did].admitted {
                 work.physical()
                     .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
                 work.retire();

@@ -16,7 +16,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
             group.description().temperature_interval(),
             Some(TemperatureInterval::new(2700, 6500).unwrap())
         );
-        let runtime_before = c.context.live.borrow().devices["group-1"]
+        let runtime_before = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .expect("the admitted group has an installed native runtime");
@@ -28,7 +28,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         narrowed["services"][1]["properties"][2]["value-range"] = json!([3000, 6400, 1]);
         let confirmed = confirmed_for(&c, "member-a", "devcea.light.ls2307", &narrowed);
         {
-            let mut live = c.context.live.borrow_mut();
+            let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
             slot.candidate = Some(confirmed.into());
         }
@@ -41,7 +41,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         })
         .await;
 
-        let runtime_after = c.context.live.borrow().devices["group-1"]
+        let runtime_after = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .expect("the group still has an installed native runtime");
@@ -98,7 +98,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             until(|| {
                 control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .get("group-1")
@@ -112,7 +112,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
                 )
             })
             .await;
-            let runtime = control.context.live.borrow().devices["group-1"]
+            let runtime = control.context.directory.borrow().devices["group-1"]
                 .admitted
                 .clone()
                 .expect("the physical group has a native runtime");
@@ -140,7 +140,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             narrowed["services"][1]["properties"][2]["value-range"] = json!([3000, 6400, 1]);
             let confirmed = confirmed_for(control, "member-a", "devcea.light.ls2307", &narrowed);
             {
-                let mut live = control.context.live.borrow_mut();
+                let mut live = control.context.directory.borrow_mut();
                 let slot = live.devices.get_mut("member-a").unwrap();
                 slot.candidate = Some(confirmed.into());
             }
@@ -153,7 +153,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             })
             .await;
 
-            let current = control.context.live.borrow().devices["group-1"]
+            let current = control.context.directory.borrow().devices["group-1"]
                 .admitted
                 .clone()
                 .expect("the native runtime survives a logical replacement");
@@ -213,14 +213,15 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
 
         // Same-DID revocation re-admission: the native description and its
         // binding stay byte-for-byte identical.
-        let native = c.context.live.borrow().devices["one"]
+        let native = c.context.directory.borrow().devices["one"]
             .admitted
             .as_ref()
             .unwrap()
             .native
             .clone();
-        let access = c.context.live.borrow().devices["one"].access.clone();
-        let cloud_access = c.context.live.borrow().devices["one"].cloud_access.clone();
+        let cloud_access = c.context.directory.borrow().devices["one"]
+            .cloud_access
+            .clone();
         let before = c
             .context
             .registry
@@ -229,11 +230,10 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         c.context.revoke("one", "test removal").unwrap();
         assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
         {
-            let mut live = c.context.live.borrow_mut();
+            let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("one").unwrap();
             slot.candidate.as_mut().unwrap().native = Some(native);
             slot.confirmed = true;
-            slot.access = access;
             slot.cloud_access = cloud_access;
         }
         c.context.reconcile("one").unwrap();

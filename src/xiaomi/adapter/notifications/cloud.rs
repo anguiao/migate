@@ -60,8 +60,9 @@ pub(super) fn connection_key(context: &Context) -> Option<ConnectionKey> {
     if !context.current_ha(&key) {
         return None;
     }
-    let live = context.live.borrow();
-    let credentials = live.credentials.as_ref()?;
+    let live = context.directory.borrow();
+    let account = context.credentials.borrow();
+    let credentials = account.record()?;
     let authorization = credentials.ha_authorization()?;
     let scope = live.scope.as_ref()?;
     Some(ConnectionKey {
@@ -74,12 +75,12 @@ pub(super) fn connection_key(context: &Context) -> Option<ConnectionKey> {
 }
 fn connection_credentials(context: &Context) -> Option<(ConnectionKey, XiaomiRecord)> {
     let key = connection_key(context)?;
-    let credentials = context.live.borrow().credentials.as_ref().unwrap().clone();
+    let credentials = context.credentials.borrow().record().unwrap().clone();
     Some((key, credentials))
 }
 
 fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
-    let live = context.live.borrow();
+    let live = context.directory.borrow();
     let slot = live.devices.get(did)?;
     if context.is_virtual_group(did) {
         return None;
@@ -90,7 +91,7 @@ fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
         || context.lan_scope_invalid.get()
         || slot.cloud_access.is_none()
             && context.mijia_path().is_some()
-            && !context.http_paused.get()
+            && !context.credentials.borrow().http_paused()
     {
         return None;
     }
@@ -98,7 +99,7 @@ fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
 }
 pub(super) fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>) {
     let works = context
-        .live
+        .directory
         .borrow()
         .devices
         .values()
@@ -339,7 +340,7 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
                 });
                 *context.notifications.borrow_mut() = Some(session.clone());
                 for work in context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .values()
@@ -424,7 +425,7 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
                 handle.close();
                 session.tasks.clear();
                 for work in context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .values()

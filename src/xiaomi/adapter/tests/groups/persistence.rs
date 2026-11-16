@@ -46,7 +46,7 @@ fn failed_revocation_persistence_stops_the_source_after_closing_control() {
             .get(&DeviceKey::new("xiaomi", "group-1"))
             .is_none()
             || context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get("group-1")
@@ -79,14 +79,19 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         let group = DeviceKey::new("xiaomi", "group-1");
         let one = DeviceKey::new("xiaomi", "one");
         until(|| {
-            c.context.relations.borrow().snapshot().iter().any(|group| {
-                group.active
-                    && group
-                        .membership
-                        .members
-                        .iter()
-                        .any(|member| member == "one")
-            })
+            c.context
+                .directory
+                .borrow()
+                .confirmed_groups()
+                .iter()
+                .any(|group| {
+                    group.active
+                        && group
+                            .membership
+                            .members
+                            .iter()
+                            .any(|member| member == "one")
+                })
         })
         .await;
         until(|| {
@@ -184,7 +189,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         // The source below is intentionally not running. Settle the restored
         // member's first read as a failure so this test can exercise Matter
         // startup without waiting for the bounded offline deadline.
-        let member_work = failing.context.live.borrow().devices["one"]
+        let member_work = failing.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -235,7 +240,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         db.execute_batch("DROP TRIGGER fail_identity;").unwrap();
         let restored = c.reopen_adapter().0;
         {
-            let live = restored.context.live.borrow();
+            let live = restored.context.directory.borrow();
             assert!(
                 live.devices
                     .get("group-1")
@@ -440,7 +445,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
         // with unknown state and the reserved group identity.
         let restored = c.reopen_adapter().0;
         {
-            let live = restored.context.live.borrow();
+            let live = restored.context.directory.borrow();
             assert!(
                 live.devices
                     .get("group-1")

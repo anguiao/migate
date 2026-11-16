@@ -21,28 +21,30 @@ fn path_kind(path: ControlPath) -> PathKind {
 impl Context {
     pub(super) fn diagnostics(&self) -> AdapterStatus {
         self.update_routing("access conditions changed");
-        self.status.borrow().clone()
+        let cached = self.status.borrow();
+        AdapterStatus {
+            auth: self.auth_report(),
+            gateway: self.hub.borrow().gateway().clone(),
+            catalog_problem: self.catalog_problem(),
+            pending: cached.pending.clone(),
+            routing: cached.routing.clone(),
+            devices: cached.devices.clone(),
+        }
     }
     pub(super) fn update_routing(&self, reason: &str) {
         // Eligibility can change at a deadline before its maintenance task is polled.
         let reason = if reason == "access conditions changed" {
             let expired = self
-                .live
-                .borrow()
                 .credentials
-                .as_ref()
-                .and_then(|record| record.ha_authorization())
-                .is_some_and(|authorization| {
-                    authorization.tokens.expires_at <= self.clock.unix_now()
-                });
+                .borrow()
+                .token_expired(self.clock.unix_now());
             if expired {
                 "access token expired"
-            } else if self.live.borrow().session.is_some()
+            } else if self.hub.borrow().session().is_some()
                 && self
-                    .status
+                    .credentials
                     .borrow()
-                    .auth
-                    .certificate
+                    .certificate_validity()
                     .is_some_and(|validity| validity.not_after <= self.clock.unix_now())
             {
                 "hub certificate expired"
@@ -52,17 +54,20 @@ impl Context {
         } else {
             reason
         };
-        let previous = self.status.borrow().clone();
+        let previous = self.status.borrow();
+        let previous_routing = previous.routing.clone();
+        let previous_devices = previous.devices.clone();
+        drop(previous);
         let mut routing = RoutingStatus {
             priority: self.priority(),
-            local_connected: self.live.borrow().session.is_some(),
-            last_switch_reason: previous.routing.last_switch_reason.clone(),
+            local_connected: self.hub.borrow().session().is_some(),
+            last_switch_reason: previous_routing.last_switch_reason.clone(),
         };
-        if routing.priority != previous.routing.priority {
+        if routing.priority != previous_routing.priority {
             routing.last_switch_reason = Some(reason.into());
         }
         let dids = self
-            .live
+            .directory
             .borrow()
             .devices
             .iter()
@@ -99,27 +104,28 @@ impl Context {
                 if self.has_sensors(&did) && super::routing::unreliable_cloud_online(&did) {
                     None
                 } else {
-                    let live = self.live.borrow();
+                    let live = self.directory.borrow();
                     let slot = live.devices.get(&did).unwrap();
                     slot.cloud_access
                         .as_ref()
                         .map(|access| access.online)
                         .or_else(|| {
-                            slot.access
-                                .as_ref()
+                            self.hub
+                                .borrow()
+                                .access(&did)
                                 .and_then(|access| access.as_ref().ok())
                                 .map(|access| access.online)
                         })
                 };
             let notification = self.active_notification(&did);
-            let old = previous.devices.iter().find(|device| device.did == did);
+            let old = previous_devices.iter().find(|device| device.did == did);
             let switched = old.is_some_and(|old| {
                 old.selected_control != selected
                     || old.selected_read != selected_read
                     || old.notification_source != notification
             });
             let last_switch_reason = {
-                let mut live = self.live.borrow_mut();
+                let mut live = self.directory.borrow_mut();
                 let slot = live.devices.get_mut(&did).unwrap();
                 if switched {
                     slot.last_switch_reason = Some(reason.into());
@@ -142,7 +148,7 @@ impl Context {
             let sync_limited_reason = notification
                 .is_none()
                 .then(|| self.notification_reason(&did));
-            let work = self.live.borrow().devices[&did]
+            let work = self.directory.borrow().devices[&did]
                 .admitted
                 .as_ref()
                 .unwrap()
@@ -331,7 +337,7 @@ impl Context {
                     .unwrap()
                     .light_action_diagnostics();
             }
-            let lan = self.live.borrow().devices[&did].lan.status.clone();
+            let lan = self.directory.borrow().devices[&did].lan.status.clone();
             devices.push(DeviceStatus {
                 did,
                 lan,
@@ -361,7 +367,7 @@ impl Context {
         }
     }
     pub(super) fn note_notification_switch(&self, did: &str, reason: &str) {
-        self.live
+        self.directory
             .borrow_mut()
             .devices
             .get_mut(did)
@@ -373,7 +379,7 @@ impl Context {
         if self.is_virtual_group(did) {
             return "member feedback unavailable or subscriptions not ready".into();
         }
-        let work = self.live.borrow().devices[did].admitted.clone();
+        let work = self.directory.borrow().devices[did].admitted.clone();
         if let Some(work) = work {
             if work.notifications_preparing() {
                 return "notification subscriptions preparing".into();
@@ -397,43 +403,36 @@ impl Context {
         self.sync_changed.notify(usize::MAX);
     }
     pub(super) fn set_gateway(&self, status: GatewayStatus) {
-        let mut current = self.status.borrow_mut();
-        if current.gateway != status {
-            log::info!("Xiaomi gateway state: {status:?}");
-            current.gateway = status;
+        let changed = self.hub.borrow_mut().gateway_changed(status);
+        if changed {
+            log::info!("Xiaomi gateway state: {:?}", self.hub.borrow().gateway());
             self.status_changed.notify(usize::MAX);
         }
     }
     pub(super) fn set_catalog_problem(&self, problem: Option<String>) {
-        *self.cloud_problem.borrow_mut() = problem;
-        self.update_catalog_problem();
-    }
-    pub(super) fn set_access_problem(&self, problem: Option<String>) {
-        *self.access_problem.borrow_mut() = problem;
-        self.update_catalog_problem();
-    }
-    fn update_catalog_problem(&self) {
-        let problems = [
-            self.cloud_problem.borrow().clone(),
-            self.access_problem.borrow().clone(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-        let problem = (!problems.is_empty()).then(|| problems.join("; "));
-        let mut current = self.status.borrow_mut();
-        if current.catalog_problem != problem {
-            current.catalog_problem = problem;
+        if self.directory.borrow_mut().catalog_result(problem) {
             self.status_changed.notify(usize::MAX);
         }
     }
+    pub(super) fn set_access_problem(&self, problem: Option<String>) {
+        if self.hub.borrow_mut().access_result(problem) {
+            self.status_changed.notify(usize::MAX);
+        }
+    }
+    fn catalog_problem(&self) -> Option<String> {
+        let directory = self.directory.borrow();
+        let hub = self.hub.borrow();
+        let problems = [directory.problem(), hub.problem()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        (!problems.is_empty()).then(|| problems.join("; "))
+    }
     pub(super) fn problem(&self, did: &str, reason: Option<String>) {
         let name = self
-            .live
+            .hub
             .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.access.as_ref())
+            .access(did)
             .and_then(|access| access.as_ref().ok())
             .and_then(|access| access.name.clone())
             .unwrap_or_else(|| did.into());

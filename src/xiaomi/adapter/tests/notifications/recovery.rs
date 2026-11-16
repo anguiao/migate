@@ -19,7 +19,7 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
                 let due = c.clock.now() + Duration::from_secs(seconds);
                 advance_to(&c.clock, due).await;
                 until(|| peer.state.borrow().connects.len() == index + 2).await;
-                assert!(!c.context.http_paused.get());
+                assert!(!c.context.credentials.borrow().http_paused());
             }
             until(|| network.notification_results.get() == 8).await;
             let capped = c.clock.now() + Duration::from_secs(600);
@@ -53,7 +53,7 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             until(|| cloud_active(&c, "one")).await;
             let one = function(&c.context.registry, "one", "outlet:2");
             let binding = crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 };
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -106,7 +106,7 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
         future::or(peer.run(&listener), async {
             until(|| {
                 peer.count(property) == 4
-                    && c.context.live.borrow().devices["one"]
+                    && c.context.directory.borrow().devices["one"]
                         .admitted
                         .as_ref()
                         .unwrap()
@@ -122,7 +122,7 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
             assert_eq!(peer.count(property), 4);
             peer.online("one", false);
             until(|| {
-                !c.context.live.borrow().devices["one"]
+                !c.context.directory.borrow().devices["one"]
                     .cloud_access
                     .as_ref()
                     .unwrap()
@@ -132,7 +132,7 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
             peer.online("one", true);
             until(|| cloud_active(&c, "one")).await;
             assert_eq!(peer.count(property), 5);
-            assert!(!c.context.http_paused.get());
+            assert!(!c.context.credentials.borrow().http_paused());
         })
         .await;
     }));
@@ -171,7 +171,7 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
                 ))
             );
             until(|| {
-                c.context.live.borrow().devices["one"].cloud_forbidden
+                c.context.directory.borrow().devices["one"].cloud_forbidden
                     && !cloud_active(&c, "one")
                     && peer.state.borrow().seen.iter().any(|packet| {
                         matches!(packet, Packet::Unsubscribe(unsubscribe)
@@ -198,7 +198,7 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
             assert_eq!(c.cloud.lock().unwrap().tokens, token_requests);
             assert!(c.context.notifications.borrow().is_some());
             assert!(
-                c.context.live.borrow().devices["one"]
+                c.context.directory.borrow().devices["one"]
                     .admitted
                     .as_ref()
                     .unwrap()

@@ -57,7 +57,7 @@ fn function(c: &Control, id: &str) -> crate::device::Function {
 }
 
 fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {
-    c.context.live.borrow().devices[DID]
+    c.context.directory.borrow().devices[DID]
         .admitted
         .as_ref()
         .unwrap()
@@ -999,7 +999,7 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
             }),
         };
         c.context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(DID)
@@ -1008,7 +1008,7 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
         c.context.changed.notify(usize::MAX);
         eventually(|| {
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get(DID)
@@ -1042,7 +1042,7 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
         assert_eq!(direct_methods(&old, "get_prop").len(), old_shared);
         assert_eq!(
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get(DID)
@@ -1092,7 +1092,7 @@ fn v13_offline_cold_start_keeps_identity_functions_and_reads_a_new_baseline() {
         .await;
         let ids = c
             .context
-            .live
+            .directory
             .borrow()
             .devices
             .get(DID)
@@ -1127,7 +1127,7 @@ fn v13_offline_cold_start_keeps_identity_functions_and_reads_a_new_baseline() {
 
 fn status_text(c: &Control) -> String {
     let status = crate::terminal::AuthStatus::new(
-        c.context.status.borrow().auth.clone(),
+        c.context.auth_report().clone(),
         "/bin/migate".into(),
         "/data".into(),
     );
@@ -1162,14 +1162,14 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
         // Remove both eligible group paths without yielding to a background
         // re-authentication: the current availability must still be visible.
         c.context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut(DID)
             .unwrap()
             .lan
             .active = None;
-        c.context.http_paused.set(true);
+        c.context.credentials.borrow_mut().pause_http();
         work(&c).reconcile_state_reads(&c.context);
         assert_eq!(
             heater.snapshot().heater().unwrap().temperature_source,
@@ -1291,7 +1291,7 @@ fn v13_scope_revocation_stops_direct_without_deleting_saved_identity_or_function
         assert_eq!(c.store.devices().load_configuration().unwrap(), before);
         let ids = c
             .context
-            .live
+            .directory
             .borrow()
             .devices
             .get(DID)

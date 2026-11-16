@@ -384,7 +384,7 @@ fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
             assert_eq!(last.actual_path, Some(PathKind::Direct));
             assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
             let auth = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().auth.clone(),
+                control.context.auth_report().clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );

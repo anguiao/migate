@@ -43,12 +43,12 @@ fn home_relay_uses_current_hub_access_before_cloud_directory_recovers() {
                 c.peer(panel_peer(RelayMode::Wired), |peer| async move {
                     let relay = function(&control.context.registry, "one", "relay:2");
                     until(|| {
-                        control.context.status.borrow().catalog_problem.is_some()
+                        control.context.diagnostics().catalog_problem.is_some()
                             && relay.snapshot().power() == Some(Power::Off)
                             && control.publication.frozen().len() == 3
                     })
                     .await;
-                    assert!(!control.context.live.borrow().devices["one"].confirmed);
+                    assert!(!control.context.directory.borrow().devices["one"].confirmed);
                     let key = relay.function_key();
                     let endpoint = control
                         .publication
@@ -71,12 +71,7 @@ fn home_relay_uses_current_hub_access_before_cloud_directory_recovers() {
 
                     peer.state.borrow_mut().omit.insert("one".into());
                     peer.list_changed(&["one"]);
-                    until(|| {
-                        control.context.live.borrow().devices["one"]
-                            .access
-                            .is_none()
-                    })
-                    .await;
+                    until(|| control.context.hub.borrow().access("one").is_none()).await;
                     assert!(model.invoke(endpoint, 0).await.is_err());
                     assert_eq!(peer.count("rpcReq", "one", 2), 1);
 
@@ -114,7 +109,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                let work = control.context.live.borrow().devices["one"].admitted.clone().unwrap();
+                let work = control.context.directory.borrow().devices["one"].admitted.clone().unwrap();
                 [2, 3, 4].iter().all(|siid| {
                     let id = format!("relay:{siid}");
                     let function = work.physical().function(&id).unwrap();
@@ -186,7 +181,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             control.publication.apply(control.publication.prepare(plan)).unwrap();
             assert_eq!(control.publication.frozen().len(), 2);
             assert!(model.invoke(ep3, 0).await.is_err());
-            let status = crate::terminal::AuthStatus::new(control.context.status.borrow().auth.clone(), "/bin/migate".into(), "/data".into());
+            let status = crate::terminal::AuthStatus::new(control.context.auth_report().clone(), "/bin/migate".into(), "/data".into());
             let terminal = crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             assert!(terminal.handle_line("off one relay:3", 0).await.unwrap().unwrap().contains("command accepted"));
             assert_eq!(peer.count("rpcReq", "one", 3), 3);
@@ -247,7 +242,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             let two = function(&control.context.registry, "one", "relay:3");
             let three = function(&control.context.registry, "one", "relay:4");
             until(|| {
-                control.context.live.borrow().devices["one"]
+                control.context.directory.borrow().devices["one"]
                     .admitted
                     .as_ref()
                     .unwrap()
@@ -257,7 +252,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             .await;
             let mut changes = two.subscribe();
             let status = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().auth.clone(),
+                control.context.auth_report().clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );
@@ -309,7 +304,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -391,7 +386,7 @@ fn relay_power_subscriptions_are_independent_when_another_channel_is_rejected() 
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:3");
             let other = function(&control.context.registry, "one", "relay:4");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -424,7 +419,7 @@ fn mode_notification_stays_live_when_every_power_subscription_is_rejected() {
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -455,7 +450,7 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:3");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -466,7 +461,7 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
             })
             .await;
             let status = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().auth.clone(),
+                control.context.auth_report().clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );
@@ -507,7 +502,7 @@ fn retained_and_stale_modes_do_not_replace_confirmed_feedback() {
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -588,7 +583,7 @@ fn mode_without_notify_is_polled_but_never_treated_as_a_power_notification() {
         let control = &c;
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -644,7 +639,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
             until(|| {
                 relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                     && relay.snapshot().power() == Some(Power::Off)
-                    && c.context.live.borrow().devices["one"]
+                    && c.context.directory.borrow().devices["one"]
                         .admitted
                         .as_ref()
                         .unwrap()
@@ -669,7 +664,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
                     .iter()
                     .any(|(did, siid, piid)| did == "one" && *siid == 4 && *piid == 2)
             );
-            let work = c.context.live.borrow().devices["one"]
+            let work = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -680,7 +675,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
             );
             let old_source = work.function_observer("relay:4").unwrap();
             c.context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -732,7 +727,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
             let control = &c;
             c.peer(peer, |_| async move {
                 let relay = function(&control.context.registry, "one", "relay:2");
-                let work = control.context.live.borrow().devices["one"]
+                let work = control.context.directory.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();
@@ -744,10 +739,9 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
                 .await;
                 let handle = control
                     .context
-                    .live
+                    .hub
                     .borrow()
-                    .session
-                    .as_ref()
+                    .session()
                     .unwrap()
                     .handle
                     .clone();
@@ -796,7 +790,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                         .unwrap();
                     let before = control.publication.current().configuration.clone();
                     let status = crate::terminal::AuthStatus::new(
-                        control.context.status.borrow().auth.clone(),
+                        control.context.auth_report().clone(),
                         "/bin/migate".into(),
                         "/data".into(),
                     );
@@ -936,7 +930,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
 fn relay_power_read_reports_its_real_source_in_terminal_status() {
     let rig = rig();
     let status = Rc::new(crate::terminal::AuthStatus::new(
-        rig.source.context.status.borrow().auth.clone(),
+        rig.source.context.auth_report().clone(),
         "/bin/migate".into(),
         "/data".into(),
     ));
@@ -949,7 +943,7 @@ fn relay_power_read_reports_its_real_source_in_terminal_status() {
             let control = &c;
             c.peer(peer, |_| async move {
                 until(|| {
-                    let live = control.context.live.borrow();
+                    let live = control.context.directory.borrow();
                     let work = live.devices["one"].admitted.as_ref().unwrap();
                     let relay = work.physical().function("relay:3").unwrap();
                     relay.snapshot().power() == Some(Power::Off)
@@ -992,7 +986,7 @@ fn relay_power_read_reports_its_real_source_in_terminal_status() {
 fn relay_power_live_notification_records_source_without_accepting_retained_or_invalid_as_fresh() {
     let rig = rig();
     let status = Rc::new(crate::terminal::AuthStatus::new(
-        rig.source.context.status.borrow().auth.clone(),
+        rig.source.context.auth_report().clone(),
         "/bin/migate".into(),
         "/data".into(),
     ));
@@ -1008,7 +1002,7 @@ fn relay_power_live_notification_records_source_without_accepting_retained_or_in
                 .insert(("one".into(), 2, 1));
             let control = &c;
             c.peer(peer, |peer| async move {
-                let work = control.context.live.borrow().devices["one"]
+                let work = control.context.directory.borrow().devices["one"]
                     .admitted
                     .clone()
                     .unwrap();

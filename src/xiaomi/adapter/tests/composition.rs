@@ -45,7 +45,7 @@ fn terminal_describes_optional_recognition_failure_separately_from_connectivity(
             c.peer(peer, |_peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
                 let status = crate::terminal::AuthStatus::new(
-                    control.context.status.borrow().auth.clone(),
+                    control.context.auth_report().clone(),
                     "/bin/migate".into(),
                     "/data".into(),
                 );
@@ -102,7 +102,7 @@ fn composite_controls_route_commands_and_feedback_to_their_own_bindings() {
                 })
                 .await;
                 let status = crate::terminal::AuthStatus::new(
-                    control.context.status.borrow().auth.clone(),
+                    control.context.auth_report().clone(),
                     "/bin/migate".into(),
                     "/data".into(),
                 );
@@ -401,12 +401,12 @@ fn another_functions_ready_notification_does_not_suppress_fan_feedback() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                control.context.live.borrow().devices["one"]
+                control.context.directory.borrow().devices["one"]
                     .admitted
                     .is_some()
             })
             .await;
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();

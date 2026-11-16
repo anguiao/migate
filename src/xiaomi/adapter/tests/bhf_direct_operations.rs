@@ -58,7 +58,7 @@ fn function(c: &Control, id: &str) -> crate::device::Function {
 }
 
 fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {
-    c.context.live.borrow().devices[DID]
+    c.context.directory.borrow().devices[DID]
         .admitted
         .as_ref()
         .unwrap()
@@ -77,7 +77,7 @@ fn direct_requests(peer: &LegacyDevice, method: &str) -> Vec<Value> {
 
 fn status_text(c: &Control) -> String {
     let status = crate::terminal::AuthStatus::new(
-        c.context.status.borrow().auth.clone(),
+        c.context.auth_report().clone(),
         "/bin/migate".into(),
         "/data".into(),
     );

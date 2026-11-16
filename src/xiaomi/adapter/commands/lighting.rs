@@ -90,7 +90,7 @@ fn refresh_after_write(
         return;
     }
     let Some(work) = context
-        .live
+        .directory
         .borrow()
         .devices
         .get(&original.key.id)

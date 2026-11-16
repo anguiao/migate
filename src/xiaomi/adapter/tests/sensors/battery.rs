@@ -53,7 +53,7 @@ fn cloud_battery_read_failure_is_reported_and_success_clears_it() {
         })
         .await;
         assert_eq!(battery(&c.context, "sensor").unwrap().value, Some(55.0));
-        assert!(!c.context.http_paused.get());
+        assert!(!c.context.credentials.borrow().http_paused());
 
         {
             let mut cloud = c.cloud.lock().unwrap();
@@ -108,7 +108,7 @@ fn changed_battery_diagnostic_reuses_runtime_and_is_visible_immediately() {
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("sensor")
@@ -631,8 +631,7 @@ fn a_restored_sensor_without_battery_still_reports_why_capability_is_missing() {
         c.announce();
         until(|| {
             c.context
-                .status
-                .borrow()
+                .diagnostics()
                 .devices
                 .iter()
                 .any(|device| device.did == "sensor")

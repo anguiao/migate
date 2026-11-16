@@ -56,7 +56,7 @@ fn rejected_read_returns_to_existing_queue_after_recovery() {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let before = c.cloud.lock().unwrap().property_reads.len();
         c.cloud.lock().unwrap().read_status = 401;
-        let work = c.context.live.borrow().devices["one"]
+        let work = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -106,7 +106,7 @@ fn late_unauthorized_from_identical_old_session_cannot_stop_new_generation() {
         release.send(()).unwrap();
         assert!(command.await.is_err());
         async_io::Timer::after(Duration::from_millis(20)).await;
-        assert!(c.context.mijia_rejected.borrow().is_none());
+        assert!(c.context.credentials.borrow().mijia_rejected().is_none());
         assert_eq!(c.cloud.lock().unwrap().restores, 0);
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
         assert!(c.context.cloud_candidate("one", true).is_ok());
@@ -220,7 +220,7 @@ fn temporary_recovery_failure_backs_off_without_stopping_credentials() {
         until(|| {
             c.cloud.lock().unwrap().restores == 1
                 && matches!(
-                    c.context.status.borrow().auth.mijia,
+                    c.context.auth_report().mijia,
                     AuthenticationState::Unavailable(_)
                 )
         })
@@ -256,7 +256,7 @@ fn signature_failure_does_not_attempt_account_recovery() {
     block_on(rig.run(|c| async move {
         until(|| {
             matches!(
-                c.context.status.borrow().auth.mijia,
+                c.context.auth_report().mijia,
                 AuthenticationState::Unavailable(_)
             )
         })
@@ -299,8 +299,8 @@ fn miot_description_service_unauthorized_does_not_recover_mijia_session() {
         async_io::Timer::after(Duration::from_millis(20)).await;
         assert_eq!(c.cloud.lock().unwrap().restores, 0);
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
-        assert!(c.context.mijia_rejected.borrow().is_none());
-        assert!(!c.context.http_paused.get());
+        assert!(c.context.credentials.borrow().mijia_rejected().is_none());
+        assert!(!c.context.credentials.borrow().http_paused());
     }));
 }
 
@@ -317,7 +317,7 @@ fn account_protocol_failure_does_not_repeat_on_unrelated_credential_events() {
         until(|| {
             c.cloud.lock().unwrap().restores == 1
                 && matches!(
-                    c.context.status.borrow().auth.mijia,
+                    c.context.auth_report().mijia,
                     AuthenticationState::Unavailable(_)
                 )
         })

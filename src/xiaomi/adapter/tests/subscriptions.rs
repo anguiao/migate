@@ -20,24 +20,17 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 until(|| {
                     control
                         .context
-                        .status
-                        .borrow()
+                        .diagnostics()
                         .pending
                         .iter()
                         .any(|pending| pending.did == "one" && pending.reason.contains("read"))
-                        && control
-                            .context
-                            .status
-                            .borrow()
-                            .pending
-                            .iter()
-                            .any(|pending| {
-                                pending.did == "multi" && pending.reason.contains("subscribe")
-                            })
+                        && control.context.diagnostics().pending.iter().any(|pending| {
+                            pending.did == "multi" && pending.reason.contains("subscribe")
+                        })
                 })
                 .await;
                 until(|| {
-                    !control.context.live.borrow().devices["one"]
+                    !control.context.directory.borrow().devices["one"]
                         .admitted
                         .as_ref()
                         .unwrap()
@@ -52,8 +45,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 assert!(
                     control
                         .context
-                        .status
-                        .borrow()
+                        .diagnostics()
                         .pending
                         .iter()
                         .any(|pending| pending.did == "one" && pending.reason.contains("read"))
@@ -61,8 +53,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 assert!(
                     control
                         .context
-                        .status
-                        .borrow()
+                        .diagnostics()
                         .pending
                         .iter()
                         .any(|pending| pending.did == "multi"
@@ -98,7 +89,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 }
                 peer.list_changed(&["multi"]);
                 until(|| {
-                    control.context.live.borrow().devices["multi"]
+                    control.context.directory.borrow().devices["multi"]
                         .admitted
                         .as_ref()
                         .unwrap()

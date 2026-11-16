@@ -40,7 +40,7 @@ impl CommandOperation {
         let current = !work.life.is_closed()
             && !sink.life.is_closed()
             && context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get(&work.key.id)

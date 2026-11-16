@@ -1,7 +1,10 @@
 use super::*;
 use crate::xiaomi::capability::NativeDescription;
 use crate::xiaomi::{
-    adapter::state::{AccessRefresh, AccessRequest, Backoff},
+    adapter::{
+        hub::{AccessRefresh, AccessRequest},
+        state::Backoff,
+    },
     central::{DeviceAccess, DeviceEntry},
 };
 
@@ -179,13 +182,13 @@ fn initial_list_waits_for_baseline_suback_and_preserves_its_timeout() {
                 assert!(broker.next_optional().await.is_none());
                 until(|| {
                     matches!(
-                        c.context.status.borrow().gateway,
+                        c.context.diagnostics().gateway,
                         GatewayStatus::Unavailable(_)
                     )
                 })
                 .await;
                 assert_eq!(
-                    c.context.status.borrow().gateway,
+                    c.context.diagnostics().gateway,
                     GatewayStatus::Unavailable(
                         crate::xiaomi::central::CentralError::Timeout.to_string()
                     )
@@ -246,8 +249,10 @@ fn filtered_lists_only_update_requested_members_and_preserve_other_access() {
             assert!(matches!(one.availability(), Availability::Unavailable(_)));
             assert_eq!(multi.availability(), Availability::Available);
             assert!(
-                context.live.borrow().devices["multi"]
-                    .access
+                context
+                    .hub
+                    .borrow()
+                    .access("multi")
                     .as_ref()
                     .unwrap()
                     .as_ref()
@@ -261,7 +266,7 @@ fn filtered_lists_only_update_requested_members_and_preserve_other_access() {
             );
             assert_eq!(one.availability(), Availability::Available);
             context.observe_access_filtered(&["one".into()], Vec::new());
-            assert!(context.live.borrow().devices["one"].access.is_none());
+            assert!(context.hub.borrow().access("one").is_none());
             assert_eq!(multi.availability(), Availability::Available);
         })
         .await;

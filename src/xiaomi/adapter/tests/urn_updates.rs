@@ -57,7 +57,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let old = c.context.live.borrow().devices["one"]
+            let old = c.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();
@@ -80,7 +80,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
             peer.property("two", 2, false);
             until(|| two.snapshot().power() == Some(Power::Off)).await;
             assert!(
-                !c.context.live.borrow().devices["one"]
+                !c.context.directory.borrow().devices["one"]
                     .cloud_access
                     .as_ref()
                     .unwrap()
@@ -128,7 +128,12 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
                     .insert(urn.into(), json!({"type": urn, "services": [{}]}));
             }
             c.context.request_sync();
-            until(|| c.context.live.borrow().devices["one"].blocked.is_some()).await;
+            until(|| {
+                c.context.directory.borrow().devices["one"]
+                    .blocked
+                    .is_some()
+            })
+            .await;
             // The second device provides a shared-wire processing barrier.
             peer.property("two", 2, true);
             until(|| two.snapshot().power() == Some(Power::On)).await;
@@ -136,7 +141,7 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
             peer.property("two", 2, false);
             until(|| two.snapshot().power() == Some(Power::Off)).await;
             assert!(
-                !c.context.live.borrow().devices["one"]
+                !c.context.directory.borrow().devices["one"]
                     .cloud_access
                     .as_ref()
                     .unwrap()
@@ -171,7 +176,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
         let matter = PublishedLightModel::new(&c.publication, &c.store);
         let attributes = matter.read(committed.endpoint).await;
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().auth.clone(),
+            c.context.auth_report().clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -218,7 +223,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
             })
             .await;
             until(|| {
-                c.context.live.borrow().devices["one"]
+                c.context.directory.borrow().devices["one"]
                     .blocked
                     .as_deref()
                     .is_some_and(|reason| reason.contains(diagnostic))
@@ -445,7 +450,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         })
         .await;
         until(|| {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             assert!(
                 live.devices["one"].blocked.is_none(),
                 "unexpected description failure: {:?}",
@@ -464,7 +469,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
             Some(&committed)
         );
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().auth.clone(),
+            c.context.auth_report().clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -517,7 +522,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         .await;
 
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().auth.clone(),
+            c.context.auth_report().clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -625,7 +630,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let idle = || {
-            c.context.live.borrow().devices.values().all(|slot| {
+            c.context.directory.borrow().devices.values().all(|slot| {
                 slot.admitted.as_ref().is_some_and(|work| {
                     let state = work.refresh.borrow().snapshot();
                     work.physical().availability() == Availability::Available
@@ -646,7 +651,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             .expect("restored light has a committed configuration");
         let configuration_version = committed.configuration_version;
         let physical = c.context.registry.get(&key).unwrap();
-        let native_runtime = c.context.live.borrow().devices["one"]
+        let native_runtime = c.context.directory.borrow().devices["one"]
             .admitted
             .clone()
             .unwrap();
@@ -724,7 +729,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
 
         assert!(Rc::ptr_eq(
             &native_runtime,
-            c.context.live.borrow().devices["one"]
+            c.context.directory.borrow().devices["one"]
                 .admitted
                 .as_ref()
                 .unwrap()

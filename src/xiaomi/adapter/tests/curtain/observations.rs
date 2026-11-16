@@ -121,7 +121,7 @@ fn local_curtain_reads_and_subscribes_only_the_three_reported_properties() {
             until(|| {
                 control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .get("one")

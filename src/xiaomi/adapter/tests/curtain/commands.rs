@@ -584,7 +584,7 @@ fn accepted_command_without_a_read_route_refreshes_after_recovery() {
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
-            control.context.priority.set(PathPriority::CloudFirst);
+            control.context.hub.borrow_mut().degrade();
             assert!(control.context.read_path_for("one", "curtain:2").is_none());
             peer.release_property(
                 "one",

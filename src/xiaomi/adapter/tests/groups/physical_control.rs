@@ -20,7 +20,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         until(|| {
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get("group-1")
@@ -28,7 +28,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
         })
         .await;
         let (id, power) = {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             let record = live.devices["group-1"].admitted.as_ref().unwrap();
             let cached = record.native.clone();
             let function = cached
@@ -58,7 +58,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
             cloud.read_gates.insert(key.clone(), read_gate);
         }
         // A genuine gated HTTP read is already in flight before the write.
-        let work = c.context.live.borrow().devices["group-1"]
+        let work = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .unwrap();
@@ -133,7 +133,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         until(|| {
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get("group-1")
@@ -141,7 +141,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         })
         .await;
         let (id, power, brightness) = {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             let record = live.devices["group-1"].admitted.as_ref().unwrap();
             let cached = record.native.clone();
             let light = cached
@@ -184,7 +184,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
         }
         // All properties accepted while the readback is held: acceptance is
         // independent of actual fields, which are never optimistic targets.
-        let work = c.context.live.borrow().devices["group-1"]
+        let work = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .unwrap();
@@ -238,7 +238,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         until(|| c.cloud.lock().unwrap().homes > 0).await;
         until(|| {
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get("group-1")
@@ -246,7 +246,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         })
         .await;
         let (id, admitted) = {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             let slot = &live.devices["group-1"];
             (
                 slot.admitted.as_ref().unwrap().native.device().functions()[0]
@@ -270,7 +270,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         // by the assertions below instead of passing a request counter.
         until(|| {
             c.context
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get("group-1")
@@ -282,19 +282,26 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
         })
         .await;
         {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             let slot = live
                 .devices
                 .get("group-1")
                 .expect("retained relation keeps the group slot");
             assert!(slot.group);
-            assert!(c.context.relations.borrow().snapshot().iter().any(|group| {
-                group
-                    .membership
-                    .members
+            assert!(
+                c.context
+                    .directory
+                    .borrow()
+                    .confirmed_groups()
                     .iter()
-                    .any(|member| member == "member-a")
-            }));
+                    .any(|group| {
+                        group
+                            .membership
+                            .members
+                            .iter()
+                            .any(|member| member == "member-a")
+                    })
+            );
             assert!(std::rc::Rc::ptr_eq(
                 slot.admitted.as_ref().unwrap(),
                 &admitted
@@ -361,7 +368,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             until(|| {
                 control
                     .context
-                    .live
+                    .directory
                     .borrow()
                     .devices
                     .get("group-p")
@@ -378,7 +385,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             })
             .await;
             let id = {
-                let live = control.context.live.borrow();
+                let live = control.context.directory.borrow();
                 live.devices["group-p"]
                     .admitted
                     .as_ref()
@@ -400,7 +407,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             control.context.request_sync();
             until(|| control.context.is_virtual_group("group-p")).await;
             until(|| {
-                control.context.live.borrow().devices["group-p"]
+                control.context.directory.borrow().devices["group-p"]
                     .admitted
                     .as_ref()
                     .unwrap()

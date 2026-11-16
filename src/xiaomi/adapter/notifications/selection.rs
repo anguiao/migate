@@ -19,7 +19,7 @@ impl Context {
                         self.active_notification(&member.device.id)?
                     } else {
                         let work = self
-                            .live
+                            .directory
                             .borrow()
                             .devices
                             .get(&member.device.id)?
@@ -43,7 +43,7 @@ impl Context {
             );
         }
         let work = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -81,7 +81,7 @@ impl Context {
             return None;
         }
         let work = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -136,7 +136,7 @@ impl Context {
             return false;
         }
         let work = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -171,7 +171,7 @@ pub(super) async fn selections(context: Rc<Context>) -> Result<(), AdapterError>
     loop {
         let listener = context.changed.listen();
         let works = context
-            .live
+            .directory
             .borrow()
             .devices
             .values()

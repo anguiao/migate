@@ -2,6 +2,37 @@ use super::*;
 use crate::xiaomi::adapter::{PathKind, PathPriority};
 
 #[test]
+fn credential_report_checks_expiry_without_a_new_authentication_check() {
+    use crate::xiaomi::auth::{AuthenticationState, FailureReason};
+
+    let rig = Rig::new(true, &["one"]);
+    let context = &rig.source.context;
+    let checked = context.auth_report();
+    let expires_at = context
+        .credentials
+        .borrow()
+        .record()
+        .unwrap()
+        .ha_authorization()
+        .unwrap()
+        .tokens
+        .expires_at;
+    rig.clock
+        .advance(Duration::from_secs((expires_at - rig.clock.wall()) as u64));
+
+    for _ in 0..2 {
+        let report = context.auth_report();
+        assert_eq!(
+            report.ha,
+            AuthenticationState::Unavailable(FailureReason::AccessTokenExpired)
+        );
+        assert_eq!(report.completed_at(), checked.completed_at());
+        assert_eq!(report.certificate, checked.certificate);
+        assert!(context.mijia_path().is_some());
+    }
+}
+
+#[test]
 fn diagnostics_keep_current_control_and_valid_notification_conditions_separate() {
     let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
@@ -11,8 +42,8 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             until(|| {
-                control.context.cloud_scope_valid.get()
-                    && control.context.live.borrow().devices["one"]
+                control.context.directory.borrow().scope_valid()
+                    && control.context.directory.borrow().devices["one"]
                         .admitted
                         .as_ref()
                         .unwrap()
@@ -33,7 +64,7 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
             assert_eq!(one.selected_control, Some(PathKind::Local));
             assert_eq!(one.notification_source, Some(PathKind::Local));
             assert!(one.sync_limited_reason.is_none());
-            control.context.http_paused.set(true);
+            control.context.credentials.borrow_mut().pause_http();
             let status = control.context.diagnostics();
             assert_eq!(status.devices[0].selected_control, Some(PathKind::Local));
             assert_eq!(status.devices[0].usable_control_paths, [PathKind::Local]);
@@ -132,13 +163,9 @@ fn cloud_control_without_ready_notifications_is_sync_limited() {
                 .unwrap()
                 .contains("notification")
         );
-        c.context
-            .live
-            .borrow_mut()
-            .credentials
-            .as_mut()
-            .unwrap()
-            .uid = "foreign".into();
+        let mut foreign = c.context.credentials.borrow().record().unwrap().clone();
+        foreign.uid = "foreign".into();
+        c.context.adopt_credentials(foreign);
         let status = c.context.diagnostics();
         assert_eq!(status.devices[0].selected_control, None);
         assert!(
@@ -161,7 +188,7 @@ fn command_diagnostics_keep_inflight_actual_path_when_control_selection_changes(
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
-            until(|| control.context.cloud_scope_valid.get()).await;
+            until(|| control.context.directory.borrow().scope_valid()).await;
             peer.state.borrow_mut().hold_writes = true;
             let one = function(&control.context.registry, "one", "outlet:2");
             let mut command = Box::pin(one.execute(Command::On));
@@ -169,10 +196,9 @@ fn command_diagnostics_keep_inflight_actual_path_when_control_selection_changes(
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
             let handle = control
                 .context
-                .live
+                .hub
                 .borrow()
-                .session
-                .as_ref()
+                .session()
                 .unwrap()
                 .handle
                 .clone();
@@ -296,7 +322,7 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         until(|| !c.context.token_usable()).await;
         until(|| {
             matches!(
-                c.context.status.borrow().auth.ha,
+                c.context.auth_report().ha,
                 crate::xiaomi::auth::AuthenticationState::Unavailable(
                     crate::xiaomi::auth::FailureReason::AccessTokenExpired
                 )

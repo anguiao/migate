@@ -225,7 +225,7 @@ fn hub_restoration_keeps_sent_direct_receipt_and_fallback_uses_direct_then_cloud
                         action.accepted().await.unwrap();
                         assert_eq!(direct.writes.lock().unwrap().len(), 1);
                         assert_eq!(gateway.count("rpcReq", did, 0), 0);
-                        context.priority.set(PathPriority::CloudFirst);
+                        context.hub.borrow_mut().degrade();
                         assert!(matches!(
                             context.control_path(did),
                             Some(super::super::super::routing::ControlPath::Direct(_))
@@ -240,7 +240,7 @@ fn hub_restoration_keeps_sent_direct_receipt_and_fallback_uses_direct_then_cloud
                             Some(super::super::super::routing::ControlPath::Cloud(_))
                         ));
                         context
-                            .live
+                            .directory
                             .borrow_mut()
                             .devices
                             .get_mut(did)
@@ -300,7 +300,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
             })
             .await;
             until(|| {
-                let work = control.context.live.borrow().devices[did]
+                let work = control.context.directory.borrow().devices[did]
                     .admitted
                     .clone()
                     .unwrap();
@@ -321,7 +321,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
             let fresh = Client::new(656878122, peer.address, token, Duration::from_millis(500));
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut(did)
@@ -336,7 +336,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
             until(|| peer.packets.load(Ordering::Relaxed) > packets).await;
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut(did)
@@ -415,7 +415,7 @@ fn old_direct_read_cannot_override_a_new_cloud_read() {
             .await;
             let fan = function(&control.context.registry, did, "fan:2");
             until(|| fan.snapshot().fan().unwrap().power.value == Some(true)).await;
-            let work = control.context.live.borrow().devices[did]
+            let work = control.context.directory.borrow().devices[did]
                 .admitted
                 .clone()
                 .unwrap();
@@ -428,7 +428,7 @@ fn old_direct_read_cannot_override_a_new_cloud_read() {
             peer.values.lock().unwrap().insert((2, 1), json!(false));
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut(did)
@@ -509,7 +509,7 @@ fn a_held_direct_read_does_not_block_the_next_read_for_another_device() {
             })
             .await;
             let works = dids.map(|did| {
-                control.context.live.borrow().devices[did]
+                control.context.directory.borrow().devices[did]
                     .admitted
                     .clone()
                     .unwrap()

@@ -107,7 +107,7 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
             instance["services"][1]["properties"][2]["value-range"] = json!([min, max, 1]);
             let cached = confirmed_for(&c, "member-a", "devcea.light.ls2307", &instance);
             c.context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("member-a")

@@ -19,7 +19,7 @@ fn fan(c: &Control) -> FanSnapshot {
         .unwrap()
 }
 fn work(c: &Control) -> Rc<super::work::DeviceWork> {
-    c.context.live.borrow().devices["one"]
+    c.context.directory.borrow().devices["one"]
         .admitted
         .as_ref()
         .unwrap()
@@ -171,7 +171,7 @@ fn fan_recovery_reads_all_fields_and_rejects_retired_sources() {
             *captured.borrow_mut() = work(control).function_observer("fan:2");
         })
         .await;
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
         let previous = fan(&c);
         assert_eq!(previous.speed.value, Some(40));
         let replacement = peer();
@@ -310,7 +310,7 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
             assert_eq!(fan(control).speed.value, None);
             assert_eq!(fan(control).swing.value, None);
             let status = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().auth.clone(),
+                control.context.auth_report().clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );
@@ -436,7 +436,7 @@ fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
                     .is_none()
             );
             let status = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().auth.clone(),
+                control.context.auth_report().clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );

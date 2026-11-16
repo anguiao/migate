@@ -8,7 +8,7 @@ fn legacy_poll_reads_external_changes_with_cloud_notifications_ready() {
     block_on(rig.run(|control| async move {
         future::or(cloud.run(&listener), async {
             let ac = function(&control.context.registry, did, "air-conditioner:2");
-            let work = control.context.live.borrow().devices[did]
+            let work = control.context.directory.borrow().devices[did]
                 .admitted
                 .clone()
                 .unwrap();
@@ -96,7 +96,7 @@ fn slow_legacy_poll_does_not_accumulate_or_block_user_control() {
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| async move {
         let ac = function(&control.context.registry, did, "air-conditioner:2");
-        let work = control.context.live.borrow().devices[did]
+        let work = control.context.directory.borrow().devices[did]
             .admitted
             .clone()
             .unwrap();

@@ -369,7 +369,7 @@ fn shared_feedback_keeps_last_values_on_communication_failure_and_isolates_inval
 }
 
 fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {
-    c.context.live.borrow().devices[DID]
+    c.context.directory.borrow().devices[DID]
         .admitted
         .as_ref()
         .unwrap()
@@ -917,7 +917,7 @@ fn built_in_temperature_drops_from_matter_only_when_all_group_paths_are_unavaila
             .await;
 
             let device = work(&c);
-            c.context.http_paused.set(true);
+            c.context.credentials.borrow_mut().pause_http();
             device.reconcile_state_reads(&c.context);
             eventually(|| {
                 heater.snapshot().heater().unwrap().temperature_source
@@ -931,7 +931,7 @@ fn built_in_temperature_drops_from_matter_only_when_all_group_paths_are_unavaila
                 TemperatureSourceState::Unavailable
             );
 
-            c.context.http_paused.set(false);
+            c.context.credentials.borrow_mut().resume_http();
             device.reconcile_state_reads(&c.context);
             eventually(|| {
                 heater.snapshot().heater().unwrap().temperature_source
@@ -1586,7 +1586,12 @@ fn a_retired_mijia_session_cannot_apply_a_late_shared_result() {
             c.clock.advance(Duration::from_secs(16));
             eventually(|| c.cloud.lock().unwrap().rpc_reads.len() > reads).await;
 
-            *c.context.mijia_rejected.borrow_mut() = Some(u64::MAX);
+            let record = c.store.xiaomi().load().unwrap().unwrap();
+            c.store
+                .xiaomi()
+                .update_recovery(&record.recovery.credentials, &record.mijia)
+                .unwrap();
+            c.context.adopt_credentials(record);
             c.cloud
                 .lock()
                 .unwrap()
@@ -1597,7 +1602,6 @@ fn a_retired_mijia_session_cannot_apply_a_late_shared_result() {
             async_io::Timer::after(Duration::from_millis(150)).await;
             assert_eq!(blow.snapshot().fan().unwrap().speed.value, Some(2));
             assert_eq!(ventilation.snapshot().fan().unwrap().speed.value, Some(1));
-            *c.context.mijia_rejected.borrow_mut() = None;
         })
         .await;
     }));

@@ -10,7 +10,7 @@ fn observation_rig(members: &[&str]) -> Rig {
 }
 
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
-    c.context.live.borrow().devices[did]
+    c.context.directory.borrow().devices[did]
         .admitted
         .as_ref()
         .unwrap()
@@ -154,7 +154,7 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -205,7 +205,7 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
             let duplicate = work.native.clone();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("multi")
@@ -249,7 +249,7 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             freeze_initialized(control, &peer, &["one"]).await;
             until(|| {
-                control.context.live.borrow().devices["one"]
+                control.context.directory.borrow().devices["one"]
                     .cloud_access
                     .as_ref()
                     .is_some_and(|access| access.online)
@@ -266,13 +266,13 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         })
         .await;
 
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
         let before = retained.borrow().as_ref().unwrap().clone();
         let after = device_work(&c, "one");
         assert!(Rc::ptr_eq(&before, &after));
         assert!(!after.life.is_closed());
         assert!(after.test_local_subscribed_empty());
-        assert!(c.context.live.borrow().devices["one"].access.is_none());
+        assert!(c.context.hub.borrow().access("one").is_none());
         let one = function(&c.context.registry, "one", "outlet:2");
         assert_eq!(one.snapshot().availability, Availability::Available);
         assert_eq!(
@@ -321,7 +321,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                 .unwrap();
                 control
                     .context
-                    .live
+                    .directory
                     .borrow_mut()
                     .devices
                     .get_mut("one")
@@ -342,7 +342,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                 let second = device_work(control, "one");
                 control
                     .context
-                    .live
+                    .directory
                     .borrow_mut()
                     .devices
                     .get_mut("one")

@@ -112,7 +112,7 @@ fn route_switch_reselects_only_an_unsent_air_conditioner_step() {
         let rig = rig();
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(rig.run(|c| async move {
-            until(|| c.context.cloud_scope_valid.get()).await;
+            until(|| c.context.directory.borrow().scope_valid()).await;
             let wire = Rc::new(Wire::default());
             if sent {
                 wire.allow(1);
@@ -198,7 +198,7 @@ fn possibly_sent_failed_air_conditioner_step_is_not_replayed_or_followed() {
     let rig = rig();
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_scope_valid.get()).await;
+        until(|| c.context.directory.borrow().scope_valid()).await;
         let wire = Rc::new(Wire::default());
         wire.allow(1);
         let (handle, driver) = local(&c, wire.clone());

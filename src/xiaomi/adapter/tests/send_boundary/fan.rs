@@ -16,7 +16,7 @@ fn route_change_reselects_only_an_unsent_step_and_records_each_path() {
         let rig = fan_rig();
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(rig.run(|c| async move {
-            until(|| c.context.cloud_scope_valid.get()).await;
+            until(|| c.context.directory.borrow().scope_valid()).await;
             let wire = Rc::new(Wire::default());
             if sent {
                 wire.allow(1);
@@ -115,7 +115,7 @@ fn possibly_sent_rejected_step_is_never_replayed_or_followed() {
     let rig = fan_rig();
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
-        until(|| c.context.cloud_scope_valid.get()).await;
+        until(|| c.context.directory.borrow().scope_valid()).await;
         let wire = Rc::new(Wire::default());
         wire.allow(1);
         let (handle, driver) = local(&c, wire.clone());
@@ -223,7 +223,7 @@ fn transport_failure_after_fan_bytes_is_reported_as_uncertain() {
                 assert_eq!(last.actual_path, Some(PathKind::Local));
                 assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
                 let auth = crate::terminal::AuthStatus::new(
-                    c.context.status.borrow().auth.clone(),
+                    c.context.auth_report().clone(),
                     "/bin/migate".into(),
                     "/data".into(),
                 );

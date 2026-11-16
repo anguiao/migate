@@ -99,7 +99,7 @@ fn native_state_disconnect_retains_observation_and_reconnect_reads_without_chang
             *collected.borrow_mut() = Some(state(control, "contact:2:2"));
         })
         .await;
-        until(|| c.context.live.borrow().session.is_none()).await;
+        until(|| c.context.hub.borrow().session().is_none()).await;
         let observed = saved.borrow().clone().unwrap();
         assert_eq!(state(&c, "contact:2:2"), observed);
         assert_eq!(

@@ -17,20 +17,20 @@ fn native_group_description_restarts_after_its_loading_token_is_retired() {
     }
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().instance_reads.get(&urn) == Some(&1)).await;
-        let loading = c.context.live.borrow().devices["group-1"]
+        let loading = c.context.directory.borrow().devices["group-1"]
             .loading
             .clone()
             .unwrap()
             .life;
         c.cloud.lock().unwrap().instance_gates.remove(&urn);
-        let mut credentials = c.context.live.borrow().credentials.clone().unwrap();
+        let mut credentials = c.context.credentials.borrow().record().cloned().unwrap();
         credentials.ha.authorization.tokens.access_token = "replacement-access".into();
         c.store.xiaomi().fixture_replace(&credentials).unwrap();
         c.context.adopt_credentials(credentials);
         future::or(
             async {
                 until(|| {
-                    c.context.live.borrow().devices["group-1"]
+                    c.context.directory.borrow().devices["group-1"]
                         .loading
                         .as_ref()
                         .is_none_or(|current| !Rc::ptr_eq(&current.life, &loading))
@@ -79,7 +79,12 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
             cloud.catalog_groups[0]["extra"]["member_list"]["status"] = json!("invalid");
         }
         c.context.request_sync();
-        until(|| c.context.relations.borrow().snapshot()[0].error.is_some()).await;
+        until(|| {
+            c.context.directory.borrow().confirmed_groups()[0]
+                .error
+                .is_some()
+        })
+        .await;
         assert!(matches!(
             light.execute(Command::Off).await,
             Err(crate::device::CommandError::Unavailable(_))
@@ -88,7 +93,12 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
 
         c.cloud.lock().unwrap().catalog_groups[0]["extra"]["member_list"]["status"] = json!("1");
         c.context.request_sync();
-        until(|| c.context.relations.borrow().snapshot()[0].error.is_none()).await;
+        until(|| {
+            c.context.directory.borrow().confirmed_groups()[0]
+                .error
+                .is_none()
+        })
+        .await;
         assert_eq!(light.snapshot().availability, Availability::Available);
         light.execute(Command::Off).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().numeric_writes.len(), 2);
@@ -118,7 +128,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         let key = DeviceKey::new("xiaomi", "group-1");
         let committed = c.store.devices().load_configuration().unwrap().device(&key).cloned()
             .expect("native admission must use the complete configuration commit");
-        let _scope = c.context.live.borrow().scope.clone().unwrap();
+        let _scope = c.context.directory.borrow().scope.clone().unwrap();
         let old = c.store.devices().load_configuration().unwrap();
         assert!(
             old.devices
@@ -139,10 +149,10 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
             cloud.catalog_groups = vec![group_record("record-1", "group-1", &["one", "member-new"], false)];
         }
         c.context.request_sync();
-        until(|| c.context.relations.borrow().snapshot().iter().any(|group| group.membership.members.iter().any(|member| member == "member-new"))).await;
+        until(|| c.context.directory.borrow().confirmed_groups().iter().any(|group| group.membership.members.iter().any(|member| member == "member-new"))).await;
         until(|| c.publication.failure().is_some()).await;
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().auth.clone(),
+            c.context.auth_report().clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -206,7 +216,11 @@ fn new_group_does_not_wait_for_a_held_member_description() {
                 .is_some()
         })
         .await;
-        assert!(c.context.live.borrow().devices["one"].loading.is_some());
+        assert!(
+            c.context.directory.borrow().devices["one"]
+                .loading
+                .is_some()
+        );
         release.send(()).unwrap();
     }));
 }
@@ -222,9 +236,9 @@ fn first_binding_applies_the_initial_catalog_without_a_cached_scope() {
         until(|| {
             control
                 .context
-                .relations
+                .directory
                 .borrow()
-                .snapshot()
+                .confirmed_groups()
                 .iter()
                 .any(|group| {
                     group.active
@@ -236,7 +250,7 @@ fn first_binding_applies_the_initial_catalog_without_a_cached_scope() {
                 })
         })
         .await;
-        assert!(control.context.live.borrow().scope.is_some());
+        assert!(control.context.directory.borrow().scope.is_some());
         assert_eq!(control.cloud.lock().unwrap().catalogs, 1);
     }));
 }
@@ -276,7 +290,7 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
         })
         .await;
         {
-            let live = c.context.live.borrow();
+            let live = c.context.directory.borrow();
             let slot = &live.devices["group-1"];
             let record = slot.admitted.as_ref().unwrap();
             let cached = record.native.clone();
@@ -311,7 +325,7 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             c.context.control_path("group-1"),
             Some(super::super::routing::ControlPath::Cloud(_))
         ));
-        let first = c.context.live.borrow().devices["group-1"]
+        let first = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .unwrap();
@@ -348,15 +362,15 @@ fn repeated_and_failed_directories_keep_the_admitted_native_group() {
                 .is_some()
         })
         .await;
-        let first = c.context.live.borrow().devices["group-1"]
+        let first = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .unwrap();
         for (status, failed) in [(503, true), (200, false)] {
             c.cloud.lock().unwrap().catalog_status = status;
             c.context.request_sync();
-            until(|| c.context.status.borrow().catalog_problem.is_some() == failed).await;
-            let live = c.context.live.borrow();
+            until(|| c.context.diagnostics().catalog_problem.is_some() == failed).await;
+            let live = c.context.directory.borrow();
             let slot = &live.devices["group-1"];
             assert!(Rc::ptr_eq(slot.admitted.as_ref().unwrap(), &first));
             assert!(slot.cloud_access.is_some());

@@ -1,6 +1,7 @@
 use super::{
+    hub::{AccessRefresh, AccessRequest, Session},
     model::{AdapterError, GatewayStatus},
-    state::{AccessRefresh, AccessRequest, Backoff, Context, Session},
+    state::{Backoff, Context},
 };
 use crate::xiaomi::{
     central::{CentralError, CentralEvent, SessionHandle},
@@ -15,7 +16,7 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
     let mut reconnect = Backoff::new(6, 60);
     let mut first_deadline = Some(context.clock.now() + Duration::from_secs(30));
     loop {
-        let scope = context.live.borrow().scope.clone();
+        let scope = context.directory.borrow().scope.clone();
         let mut routes = scope
             .as_ref()
             .map(|scope| discovery.snapshot().routes(&scope.group_id(), None))
@@ -29,7 +30,7 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
             future::or(
                 async {
                     changes.changed().await?;
-                    if context.live.borrow().scope.is_none() {
+                    if context.directory.borrow().scope.is_none() {
                         context.request_sync();
                     }
                     Ok::<(), AdapterError>(())
@@ -61,7 +62,8 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
         {
             routes.rotate_left(index + 1);
         }
-        let Some(credentials) = context.live.borrow().credentials.clone() else {
+        let credentials = context.credentials.borrow().record().cloned();
+        let Some(credentials) = credentials else {
             let listener = context.changed.listen();
             listener.await;
             continue;
@@ -78,7 +80,7 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
                         gateway.did == selected.did
                             && gateway.group_id == selected.group_id
                             && gateway.addresses.contains(&address)
-                    }) && context.live.borrow().scope == scope
+                    }) && context.directory.borrow().scope == scope
                     {
                         connected = Some((selected, session));
                         break;
@@ -96,7 +98,7 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
             let session = Session::new(handle.clone());
             let access = session.access.clone();
             let tasks = session.tasks.clone();
-            context.live.borrow_mut().session = Some(session);
+            context.hub.borrow_mut().install(session);
             tasks.spawn(super::refresh::local(context.clone(), handle.clone()));
 
             context.set_gateway(GatewayStatus::Connected(selected.did.clone()));
@@ -123,10 +125,9 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
                         ),
                         CentralEvent::DeviceListChanged { dids } => {
                             events
-                                .live
+                                .hub
                                 .borrow()
-                                .session
-                                .as_ref()
+                                .session()
                                 .unwrap()
                                 .access
                                 .request_filtered(dids);
@@ -187,7 +188,7 @@ pub(super) async fn run(context: Rc<Context>, discovery: Discovery) -> Result<()
     }
 }
 pub(super) fn refresh_access(context: &Rc<Context>) {
-    if let Some(session) = &context.live.borrow().session {
+    if let Some(session) = context.hub.borrow().session() {
         session.access.request(context.clock.now());
     }
 }
@@ -251,7 +252,7 @@ async fn access_refreshes(
             Ok(_) => {
                 if let Some(dids) = affected {
                     for did in dids {
-                        if context.live.borrow().devices.contains_key(&did) {
+                        if context.directory.borrow().devices.contains_key(&did) {
                             context.reconcile(&did)?;
                         }
                     }
@@ -305,7 +306,7 @@ pub(super) async fn wait_retry(
     delay: Duration,
 ) -> Result<(), AdapterError> {
     let group = context
-        .live
+        .directory
         .borrow()
         .scope
         .as_ref()
@@ -315,10 +316,9 @@ pub(super) async fn wait_retry(
         .map(|group| discovery.snapshot().routes(group, previous))
         .unwrap_or_default();
     let credentials = context
-        .live
-        .borrow()
         .credentials
-        .as_ref()
+        .borrow()
+        .record()
         .map(|record| (record.uid.clone(), record.hub.clone()));
     let deadline = context.clock.now() + delay;
     future::or(
@@ -344,10 +344,9 @@ pub(super) async fn wait_retry(
                 loop {
                     let listener = context.changed.listen();
                     let current = context
-                        .live
-                        .borrow()
                         .credentials
-                        .as_ref()
+                        .borrow()
+                        .record()
                         .map(|record| (record.uid.clone(), record.hub.clone()));
                     if current != credentials {
                         return Ok(());

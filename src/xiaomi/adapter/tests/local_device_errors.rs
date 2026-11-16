@@ -111,17 +111,23 @@ fn local_device_offline_reads_continue_over_cloud_without_degrading_other_device
             initialized(control, &peer, &["one", "two"]).await;
             until(|| control.context.cloud_candidate("one", true).is_ok()).await;
             until(|| {
-                control.context.live.borrow().devices.values().all(|slot| {
-                    slot.admitted.as_ref().is_none_or(|work| {
-                        work.refresh.borrow().snapshot().inflight.is_empty()
-                            && work.refresh.borrow().snapshot().pending.is_empty()
+                control
+                    .context
+                    .directory
+                    .borrow()
+                    .devices
+                    .values()
+                    .all(|slot| {
+                        slot.admitted.as_ref().is_none_or(|work| {
+                            work.refresh.borrow().snapshot().inflight.is_empty()
+                                && work.refresh.borrow().snapshot().pending.is_empty()
+                        })
                     })
-                })
             })
             .await;
             peer.state.borrow_mut().hold_reads = true;
             let one = function(&control.context.registry, "one", "outlet:2");
-            let work = control.context.live.borrow().devices["one"]
+            let work = control.context.directory.borrow().devices["one"]
                 .admitted
                 .clone()
                 .unwrap();

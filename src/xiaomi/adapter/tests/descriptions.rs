@@ -44,7 +44,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         until(|| c.cloud.lock().unwrap().catalogs > catalogs).await;
         assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], reads);
         let status = crate::terminal::AuthStatus::new(
-            c.context.status.borrow().auth.clone(),
+            c.context.auth_report().clone(),
             "/bin/migate".into(),
             "/data".into(),
         );
@@ -94,7 +94,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         let reads_before_restart = c.cloud.lock().unwrap().instance_reads.clone();
         let (restored, _) = c.reopen_adapter();
         assert!(
-            restored.context.live.borrow().devices["one"]
+            restored.context.directory.borrow().devices["one"]
                 .candidate
                 .as_ref()
                 .unwrap()
@@ -104,7 +104,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         );
         assert!(restored.context.registry.list().is_empty());
         assert_eq!(
-            restored.context.live.borrow().devices["one"]
+            restored.context.directory.borrow().devices["one"]
                 .candidate
                 .as_ref()
                 .unwrap()
@@ -120,7 +120,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
 }
 
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
-    c.context.live.borrow().devices[did]
+    c.context.directory.borrow().devices[did]
         .admitted
         .as_ref()
         .unwrap()
@@ -160,15 +160,9 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .pending
-                    .iter()
-                    .any(|pending| {
-                        pending.did == "one" && pending.reason.contains("subscribe property 2.3")
-                    })
+                control.context.diagnostics().pending.iter().any(|pending| {
+                    pending.did == "one" && pending.reason.contains("subscribe property 2.3")
+                })
             })
             .await;
             peer.state.borrow_mut().sub_reject.clear();
@@ -185,7 +179,7 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
             .unwrap();
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -200,17 +194,9 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
                 !Rc::ptr_eq(&before, &current)
             })
             .await;
-            assert!(
-                control
-                    .context
-                    .status
-                    .borrow()
-                    .pending
-                    .iter()
-                    .all(|pending| {
-                        pending.did != "one" || !pending.reason.contains("subscribe property 2.3")
-                    })
-            );
+            assert!(control.context.diagnostics().pending.iter().all(|pending| {
+                pending.did != "one" || !pending.reason.contains("subscribe property 2.3")
+            }));
             let current = device_work(control, "one");
             until(|| current.test_local_subscribed_len() == current.bindings().len()).await;
         })
@@ -267,7 +253,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
             peer.value("one", TEMPERATURE, json!(6000));
             control
                 .context
-                .live
+                .directory
                 .borrow_mut()
                 .devices
                 .get_mut("one")
@@ -365,8 +351,7 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
             until(|| {
                 control
                     .context
-                    .status
-                    .borrow()
+                    .diagnostics()
                     .pending
                     .iter()
                     .any(|pending| pending.did == "multi" && pending.reason.contains("exhausted"))

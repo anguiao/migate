@@ -110,7 +110,7 @@ fn another_measurement_observer_cannot_keep_temperature_valid_without_its_own_pa
 
             // Keep humidity's valid cloud observer, but remove the temperature
             // observer and pause the shared HTTP route.
-            c.context.http_paused.set(true);
+            c.context.credentials.borrow_mut().pause_http();
             current.revoke_observer(ID);
             c.context.update_device_availability("sensor");
             assert_eq!(current.physical().availability(), Availability::Available);
@@ -208,7 +208,7 @@ fn recovered_read_path_waits_for_a_new_read_while_another_function_stays_availab
             let old = temperature.snapshot().measurement().unwrap();
 
             // Lose and restore the route before asynchronous selection runs.
-            c.context.http_paused.set(true);
+            c.context.credentials.borrow_mut().pause_http();
             c.context.update_device_availability("sensor");
             assert_eq!(current.physical().availability(), Availability::Available);
             assert_eq!(source(&c.context), TemperatureSourceState::Unavailable);
@@ -228,7 +228,7 @@ fn recovered_read_path_waits_for_a_new_read_while_another_function_stays_availab
                     .insert(("sensor".into(), 3, 1001), json!(22.0));
                 values.read_gates.insert(("sensor".into(), 3, 1001), gate);
             }
-            c.context.http_paused.set(false);
+            c.context.credentials.borrow_mut().resume_http();
             c.context.update_device_availability("sensor");
             assert_eq!(source(&c.context), TemperatureSourceState::AwaitingReading);
             assert_eq!(temperature.snapshot().measurement(), Some(old));
@@ -292,10 +292,10 @@ fn readmitted_device_gets_a_fresh_temperature_instance() {
         let old = old_physical.function(ID).unwrap();
         let historical = old.snapshot().measurement().unwrap();
         let native = current.native.clone();
-        let (access, cloud_access) = {
-            let live = c.context.live.borrow();
+        let cloud_access = {
+            let live = c.context.directory.borrow();
             let slot = &live.devices["sensor"];
-            (slot.access.clone(), slot.cloud_access.clone())
+            slot.cloud_access.clone()
         };
         {
             let mut values = c.cloud.lock().unwrap();
@@ -305,11 +305,10 @@ fn readmitted_device_gets_a_fresh_temperature_instance() {
         c.context.revoke("sensor", "test revocation").unwrap();
         assert_eq!(old.snapshot().temperature_source(), Some(TemperatureSourceState::Unavailable));
         {
-            let mut live = c.context.live.borrow_mut();
+            let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("sensor").unwrap();
             slot.candidate.as_mut().unwrap().native = Some(native);
             slot.confirmed = true;
-            slot.access = access;
             slot.cloud_access = cloud_access;
         }
         c.context.reconcile("sensor").unwrap();

@@ -277,7 +277,7 @@ pub(super) fn observe(
 impl Context {
     pub(super) fn is_independent_light(&self, did: &str, id: &str) -> bool {
         let graph = self.graph.borrow().clone();
-        self.live.borrow().devices.contains_key(did)
+        self.directory.borrow().devices.contains_key(did)
             && !graph.rules.contains_key(did)
             && !graph
                 .memberships
@@ -309,7 +309,7 @@ impl Context {
             .filter(|group_did| group_did.as_str() != did)
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         let groups = groups
             .iter()
             .filter_map(|group_did| {
@@ -389,7 +389,7 @@ impl Context {
         {
             return;
         }
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         let Some(slot) = live.devices.get(group_did) else {
             return;
         };

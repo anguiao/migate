@@ -10,7 +10,7 @@ impl Context {
         let Some(group) = graph.rules.get(did) else {
             return Vec::new();
         };
-        let live = self.live.borrow();
+        let live = self.directory.borrow();
         group
             .members
             .iter()
@@ -31,7 +31,7 @@ impl Context {
                 work.refresh();
             }
         } else if let Some(work) = self
-            .live
+            .directory
             .borrow()
             .devices
             .get(did)
@@ -48,7 +48,7 @@ impl Context {
         self.control_path(did).is_some()
             || self.observation_path(did).is_some()
             || self
-                .live
+                .directory
                 .borrow()
                 .devices
                 .get(did)
@@ -69,7 +69,7 @@ impl Context {
     pub(in crate::xiaomi::adapter) fn update_device_availability(&self, did: &str) {
         let available = self.device_path_available(did);
         let (work, blocked) = {
-            let live = self.live.borrow();
+            let live = self.directory.borrow();
             let slot = &live.devices[did];
             (slot.admitted.clone(), slot.blocked.clone())
         };
@@ -125,7 +125,7 @@ impl Context {
     }
     pub(in crate::xiaomi::adapter) fn update_all_availability(&self) {
         let dids = self
-            .live
+            .directory
             .borrow()
             .devices
             .keys()

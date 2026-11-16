@@ -148,7 +148,7 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
         .unwrap();
         let native = confirmed_for(&c, "member-a", "yeelink.light.light3", &instance);
         {
-            let mut live = c.context.live.borrow_mut();
+            let mut live = c.context.directory.borrow_mut();
             let member = live.devices.get_mut("member-a").unwrap();
             if let Some(access) = &mut member.cloud_access {
                 access.model = native.model().into();
@@ -177,7 +177,7 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
             "the committed native profile is restored without a stale logical mirror"
         );
         assert!(
-            restored.context.live.borrow().devices["member-a"]
+            restored.context.directory.borrow().devices["member-a"]
                 .blocked
                 .is_none(),
             "the valid committed native description is not blocked on restart"

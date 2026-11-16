@@ -159,7 +159,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "light:2");
-        let work = c.context.live.borrow().devices["member-a"]
+        let work = c.context.directory.borrow().devices["member-a"]
             .admitted
             .clone()
             .unwrap();
@@ -306,7 +306,7 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
                     }
                     Change::Rebuild => c.publication.stop_actions(),
                     Change::MemberOff => {
-                        let work = c.context.live.borrow().devices["member-b"]
+                        let work = c.context.directory.borrow().devices["member-b"]
                             .admitted
                             .clone()
                             .unwrap();
@@ -470,7 +470,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             .unwrap()
             .raw_values
             .insert(("group-1".into(), 2, 3), json!(6500));
-        let work = c.context.live.borrow().devices["group-1"]
+        let work = c.context.directory.borrow().devices["group-1"]
             .admitted
             .clone()
             .unwrap();
@@ -510,7 +510,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         let identity = committed.unique_id.clone();
         let endpoint = committed.endpoint;
         let version = committed.configuration_version;
-        let _scope = c.context.live.borrow().scope.clone().unwrap();
+        let _scope = c.context.directory.borrow().scope.clone().unwrap();
         let root = c.store.devices().load_configuration().unwrap().root_version;
 
         // A new genuine member input drops RGB. The existing group keeps
@@ -525,7 +525,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             .unwrap(),
         );
         {
-            let mut live = c.context.live.borrow_mut();
+            let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
             if let Some(access) = &mut slot.cloud_access {
                 access.model = downgraded.model().into();
@@ -611,7 +611,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         .unwrap();
         let recovered = confirmed_for(&c, "member-a", "devcea.light.ls2307", &ls);
         {
-            let mut live = c.context.live.borrow_mut();
+            let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
             if let Some(access) = &mut slot.cloud_access {
                 access.model = recovered.model().into();
@@ -759,7 +759,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .unwrap()
                     .raw_values
                     .insert((did.into(), 2, 1), json!(powers[index]));
-                let work = c.context.live.borrow().devices[did]
+                let work = c.context.directory.borrow().devices[did]
                     .admitted
                     .clone()
                     .unwrap();
@@ -803,7 +803,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                 );
                 assert!(member_writes(&c, did, 2, 1).is_empty());
                 if powers[index] != Some(true) {
-                    let work = c.context.live.borrow().devices[did]
+                    let work = c.context.directory.borrow().devices[did]
                         .admitted
                         .clone()
                         .unwrap();
@@ -837,7 +837,7 @@ fn rgb_action_keeps_the_member_sources_captured_by_its_first_frame() {
         // not join an action already in progress when that runtime appears.
         let delayed = c
             .context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut("member-b")
@@ -848,7 +848,7 @@ fn rgb_action_keeps_the_member_sources_captured_by_its_first_frame() {
         let action = group.begin_light_action(rgb(0x010203), false).unwrap();
         action.accepted().await.unwrap();
         c.context
-            .live
+            .directory
             .borrow_mut()
             .devices
             .get_mut("member-b")

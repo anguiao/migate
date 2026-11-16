@@ -107,7 +107,7 @@ fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range()
             assert!(function.air_conditioner_constraints_ready());
             assert!(work(control).mcn04_range(ID).unwrap().contains("directs"));
             let status = crate::terminal::AuthStatus::new(
-                control.context.status.borrow().auth.clone(),
+                control.context.auth_report().clone(),
                 "/bin/migate".into(),
                 "/data".into(),
             );
