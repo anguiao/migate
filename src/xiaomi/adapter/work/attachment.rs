@@ -1,5 +1,39 @@
 use super::*;
 
+/// Native connection receipts and active subscriptions share one authority.
+#[derive(Default)]
+pub(super) struct NativeAttachments {
+    pub(super) local: RefCell<LocalAttachment>,
+    pub(super) cloud: RefCell<CloudAttachment>,
+    pub(super) active: RefCell<BTreeMap<String, NotificationSource>>,
+    condition_generation: Cell<u64>,
+    retry_requested: Cell<bool>,
+    pub(super) changed: Event,
+}
+
+impl NativeAttachments {
+    pub(super) fn retire(&self, did: &str, property_subscriptions: bool) {
+        let local = self.local.borrow_mut().connection.take();
+        if let Some(local) = local {
+            if property_subscriptions {
+                drop(local.unsubscribe_properties(did));
+                drop(local.unsubscribe_events(did));
+            } else {
+                drop(local.unsubscribe_device(did));
+            }
+        }
+        self.local.borrow_mut().invalidate_prepare();
+        self.cloud.borrow_mut().online.take();
+        let cloud = self.cloud.borrow_mut().connection.take();
+        if let Some(cloud) = cloud {
+            drop(cloud.unsubscribe_device(did));
+        }
+        self.cloud.borrow_mut().prepare.invalidate();
+        self.active.borrow_mut().clear();
+        self.changed.notify(usize::MAX);
+    }
+}
+
 /// All preparation state for one source connection. A failed preparation
 /// remains exhausted until an actual condition change reopens it.
 #[derive(Default)]
@@ -93,11 +127,71 @@ impl CloudAttachment {
 }
 
 impl DeviceWork {
+    pub(in crate::xiaomi::adapter) fn observer(&self) -> Option<NotificationSource> {
+        self.native
+            .device()
+            .functions()
+            .iter()
+            .find_map(|function| self.function_observer(function.id()))
+    }
+    pub(in crate::xiaomi::adapter) fn function_observer(
+        &self,
+        id: &str,
+    ) -> Option<NotificationSource> {
+        self.attachments.active.borrow().get(id).cloned()
+    }
+    pub(in crate::xiaomi::adapter) fn install_observer(
+        &self,
+        id: &str,
+        source: NotificationSource,
+    ) {
+        self.install_observer_with_baseline(id, source, true);
+    }
+    pub(in crate::xiaomi::adapter) fn install_state_observer(
+        &self,
+        id: &str,
+        source: NotificationSource,
+    ) {
+        self.install_observer_with_baseline(id, source, false);
+    }
+    fn install_observer_with_baseline(&self, id: &str, source: NotificationSource, baseline: bool) {
+        for binding in self.channel_subscriptions(id) {
+            match (&source, binding) {
+                (NotificationSource::Local(handle), SubscriptionBinding::Property(binding)) => {
+                    handle.invalidate_received_property(&self.key.id, binding)
+                }
+                (NotificationSource::Local(handle), SubscriptionBinding::Event(binding)) => {
+                    handle.invalidate_received_event(&self.key.id, binding)
+                }
+                (NotificationSource::Cloud(handle), SubscriptionBinding::Property(binding)) => {
+                    handle.invalidate_received_property(&self.key.id, binding)
+                }
+                (NotificationSource::Cloud(handle), SubscriptionBinding::Event(binding)) => {
+                    handle.invalidate_received_event(&self.key.id, binding)
+                }
+            }
+        }
+        self.attachments
+            .active
+            .borrow_mut()
+            .insert(id.to_owned(), source);
+        if baseline {
+            self.function_source_changed(id);
+        } else {
+            self.observations.function_source_changed(id);
+        }
+    }
+    pub(in crate::xiaomi::adapter) fn revoke_observer(&self, id: &str) {
+        if self.attachments.active.borrow_mut().remove(id).is_some() {
+            self.function_source_changed(id);
+        }
+    }
+
     /// Attach one local connection. Repeating the same connection is
     /// idempotent; a different connection supersedes the old preparation
     /// receipt without touching the cloud attachment or observer.
     pub(in crate::xiaomi::adapter) fn attach_local(&self, handle: SessionHandle) -> bool {
-        let mut local = self.local.borrow_mut();
+        let mut local = self.attachments.local.borrow_mut();
         if local
             .connection
             .as_ref()
@@ -117,7 +211,7 @@ impl DeviceWork {
     }
     /// Withdraw only this local attachment. A cloud observer remains valid.
     pub(in crate::xiaomi::adapter) fn detach_local(&self, handle: &SessionHandle) -> bool {
-        let mut local = self.local.borrow_mut();
+        let mut local = self.attachments.local.borrow_mut();
         if !local
             .connection
             .as_ref()
@@ -132,7 +226,8 @@ impl DeviceWork {
         true
     }
     pub(in crate::xiaomi::adapter) fn local_attached(&self, handle: &SessionHandle) -> bool {
-        self.local
+        self.attachments
+            .local
             .borrow()
             .connection
             .as_ref()
@@ -141,7 +236,7 @@ impl DeviceWork {
     /// Attach one cloud notification connection. Repeating the same connection
     /// is idempotent; a new connection starts a fresh preparation generation.
     pub(in crate::xiaomi::adapter) fn attach_cloud(&self, handle: NotificationHandle) -> bool {
-        let mut cloud = self.cloud.borrow_mut();
+        let mut cloud = self.attachments.cloud.borrow_mut();
         if cloud
             .connection
             .as_ref()
@@ -157,7 +252,7 @@ impl DeviceWork {
     }
     /// Withdraw only this cloud attachment. A local observer remains valid.
     pub(in crate::xiaomi::adapter) fn detach_cloud(&self, handle: &NotificationHandle) -> bool {
-        let mut cloud = self.cloud.borrow_mut();
+        let mut cloud = self.attachments.cloud.borrow_mut();
         if !cloud
             .connection
             .as_ref()
@@ -172,7 +267,8 @@ impl DeviceWork {
         true
     }
     pub(in crate::xiaomi::adapter) fn cloud_attached(&self, handle: &NotificationHandle) -> bool {
-        self.cloud
+        self.attachments
+            .cloud
             .borrow()
             .connection
             .as_ref()
@@ -185,14 +281,14 @@ impl DeviceWork {
         if self.life.is_closed() || !self.cloud_attached(handle) {
             return None;
         }
-        let mut cloud = self.cloud.borrow_mut();
+        let mut cloud = self.attachments.cloud.borrow_mut();
         if cloud.online.as_ref().is_some_and(|state| {
-            !state.failed.get() || state.condition == self.condition_generation.get()
+            !state.failed.get() || state.condition == self.attachments.condition_generation.get()
         }) {
             return None;
         }
         let state = Rc::new(OnlinePreparation {
-            condition: self.condition_generation.get(),
+            condition: self.attachments.condition_generation.get(),
             failed: Cell::new(false),
         });
         cloud.online = Some(state.clone());
@@ -206,6 +302,7 @@ impl DeviceWork {
         !self.life.is_closed()
             && self.cloud_attached(handle)
             && self
+                .attachments
                 .cloud
                 .borrow()
                 .online
@@ -222,7 +319,7 @@ impl DeviceWork {
         }
     }
     pub(in crate::xiaomi::adapter) fn retire_online(&self) {
-        let mut cloud = self.cloud.borrow_mut();
+        let mut cloud = self.attachments.cloud.borrow_mut();
         if cloud.online.take().is_some() {
             drop(
                 cloud
@@ -235,6 +332,7 @@ impl DeviceWork {
     }
     pub(super) fn local_source_retired(&self) {
         let ids = self
+            .attachments
             .active
             .borrow()
             .iter()
@@ -244,10 +342,11 @@ impl DeviceWork {
         for id in ids {
             self.revoke_observer(&id);
         }
-        self.changed.notify(usize::MAX);
+        self.attachments.changed.notify(usize::MAX);
     }
     pub(super) fn cloud_source_retired(&self) {
         let ids = self
+            .attachments
             .active
             .borrow()
             .iter()
@@ -257,26 +356,26 @@ impl DeviceWork {
         for id in ids {
             self.revoke_observer(&id);
         }
-        self.changed.notify(usize::MAX);
+        self.attachments.changed.notify(usize::MAX);
     }
     pub(in crate::xiaomi::adapter) fn local_preparation_active(&self) -> bool {
-        let local = self.local.borrow();
+        let local = self.attachments.local.borrow();
         local.connection.is_some()
             && (!local.prepare.subscribed.is_empty() || local.prepare.running)
     }
     pub(in crate::xiaomi::adapter) fn cloud_preparation_active(&self) -> bool {
-        let cloud = self.cloud.borrow();
+        let cloud = self.attachments.cloud.borrow();
         cloud.connection.is_some()
             && (!cloud.prepare.subscribed.is_empty() || cloud.prepare.running)
     }
     pub(super) fn retire_local_preparation(&self) {
-        self.local.borrow_mut().invalidate_prepare();
+        self.attachments.local.borrow_mut().invalidate_prepare();
     }
     pub(super) fn retire_cloud_preparation(&self) {
-        self.cloud.borrow_mut().prepare.invalidate();
+        self.attachments.cloud.borrow_mut().prepare.invalidate();
     }
     pub(in crate::xiaomi::adapter) fn retire_local_notifications(&self) {
-        let handle = self.local.borrow().connection.clone();
+        let handle = self.attachments.local.borrow().connection.clone();
         if let Some(handle) = handle {
             drop(handle.unsubscribe_properties(&self.key.id));
             drop(handle.unsubscribe_events(&self.key.id));
@@ -284,7 +383,7 @@ impl DeviceWork {
         self.retire_local_preparation();
     }
     pub(in crate::xiaomi::adapter) fn retire_cloud_notifications(&self) {
-        let handle = self.cloud.borrow().connection.clone();
+        let handle = self.attachments.cloud.borrow().connection.clone();
         if let Some(handle) = handle {
             drop(handle.unsubscribe_properties(&self.key.id));
             drop(handle.unsubscribe_events(&self.key.id));
@@ -292,23 +391,25 @@ impl DeviceWork {
         self.retire_cloud_preparation();
     }
     pub(in crate::xiaomi::adapter) fn local_exhausted(&self) -> bool {
-        self.local.borrow().prepare.exhausted
+        self.attachments.local.borrow().prepare.exhausted
     }
     pub(in crate::xiaomi::adapter) fn cloud_exhausted(&self) -> bool {
-        self.cloud.borrow().prepare.exhausted
+        self.attachments.cloud.borrow().prepare.exhausted
     }
     pub(in crate::xiaomi::adapter) fn notifications_preparing(&self) -> bool {
-        self.local.borrow().prepare.running || self.cloud.borrow().prepare.running
+        self.attachments.local.borrow().prepare.running
+            || self.attachments.cloud.borrow().prepare.running
     }
     pub(in crate::xiaomi::adapter) fn retry_subscriptions(&self) {
-        self.condition_generation
-            .set(self.condition_generation.get() + 1);
-        self.local.borrow_mut().prepare.exhausted = false;
-        self.cloud.borrow_mut().prepare.exhausted = false;
-        self.retry_requested.set(true);
-        self.changed.notify(usize::MAX);
+        self.attachments
+            .condition_generation
+            .set(self.attachments.condition_generation.get() + 1);
+        self.attachments.local.borrow_mut().prepare.exhausted = false;
+        self.attachments.cloud.borrow_mut().prepare.exhausted = false;
+        self.attachments.retry_requested.set(true);
+        self.attachments.changed.notify(usize::MAX);
     }
     pub(in crate::xiaomi::adapter) fn take_subscription_retry(&self) -> bool {
-        self.retry_requested.replace(false)
+        self.attachments.retry_requested.replace(false)
     }
 }

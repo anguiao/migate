@@ -18,6 +18,7 @@ mod direct;
 mod local;
 mod polling;
 mod read;
+mod selection;
 
 pub(super) use cloud::cloud;
 pub(super) use direct::direct;
@@ -143,6 +144,8 @@ impl ReadQueue {
 
 #[derive(Default)]
 pub(super) struct RefreshState {
+    function_paths: BTreeMap<String, Option<ControlPath>>,
+    shared_path: Option<Option<ControlPath>>,
     pending: VecDeque<Refresh>,
     inflight: BTreeMap<PropertyKey, Rc<ReadFlight>>,
     dirty_again: BTreeSet<PropertyKey>,

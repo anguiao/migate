@@ -1,5 +1,5 @@
 use super::{
-    commands::{DeviceWriteGate, SharedFanPower},
+    commands::DeviceWriteGate,
     model::{
         AdapterError, NativeModeObservation, NativeValueObservation, PathKind, SubscriptionBinding,
         SubscriptionStatus,
@@ -7,7 +7,7 @@ use super::{
     notifications::NotificationSource,
     observations::{Observation, Observations, Origin},
     refresh::RefreshState,
-    state::{Context, Lifetime, LogicalSink},
+    state::{Context, Lifetime},
 };
 use crate::{
     device::{ActionToken, DeviceKey, LightDimension, PhysicalDevice},
@@ -32,11 +32,17 @@ use std::{
 mod attachment;
 mod frames;
 mod observation;
+use observation::{AirConditionerObservations, FanObservations, SharedFeedback};
+mod sink;
 mod subscriptions;
 
+#[cfg(test)]
+mod tests;
+
+use attachment::NativeAttachments;
 pub(super) use attachment::OnlinePreparation;
-use attachment::{CloudAttachment, LocalAttachment};
 pub(super) use frames::LightFrames;
+pub(super) use sink::LogicalSink;
 use subscriptions::subscriptions;
 
 const BATTERY_CHANNEL: &str = "battery";
@@ -55,16 +61,6 @@ pub(super) struct SourceRef {
     pub(super) sink: Rc<LogicalSink>,
 }
 
-#[derive(Default)]
-pub(super) struct SharedFeedbackState {
-    pub(super) pending: bool,
-    pub(super) native_mode: Option<NativeValueObservation>,
-    pub(super) fan_speed_index: Option<NativeValueObservation>,
-    pub(super) temperature: Option<NativeValueObservation>,
-    pub(super) source: Option<super::model::PathKind>,
-    pub(super) fan_reasons: BTreeMap<crate::xiaomi::capability::SharedFanChannel, String>,
-}
-
 /// One installed native runtime: the immutable native control description and
 /// the subscription/refresh/observation state attached to it. The logical
 /// sink below is only the current delivery target and is swapped by a
@@ -78,28 +74,16 @@ pub(super) struct DeviceWork {
     pub(super) light_write: Option<Rc<DeviceWriteGate>>,
     /// Current logical delivery target; logical-only replacement swaps it.
     sink: RefCell<Rc<LogicalSink>>,
-    local: RefCell<LocalAttachment>,
-    cloud: RefCell<CloudAttachment>,
-    active: RefCell<BTreeMap<String, NotificationSource>>,
-    observation_sources: RefCell<BTreeMap<String, PathKind>>,
-    property_sources: RefCell<BTreeMap<super::observations::PropertyKey, PathKind>>,
-    mcn04_problems: RefCell<BTreeMap<super::observations::PropertyKey, String>>,
-    mcn04_ranges: RefCell<BTreeMap<String, String>>,
-    fan_modes: RefCell<BTreeMap<String, NativeModeObservation>>,
-    shared_fan_power: RefCell<BTreeMap<String, Rc<RefCell<SharedFanPower>>>>,
-    shared_feedback: RefCell<SharedFeedbackState>,
-    standard_mode: RefCell<Option<NativeValueObservation>>,
-    shared_read_path: RefCell<Option<Option<super::routing::ControlPath>>>,
-    state_read_paths: RefCell<BTreeMap<String, Option<super::routing::ControlPath>>>,
-    condition_generation: Cell<u64>,
+    attachments: NativeAttachments,
+    air_conditioner: AirConditionerObservations,
+    fan: FanObservations,
+    shared_feedback: SharedFeedback,
     pub(super) refresh: RefCell<RefreshState>,
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
     committed_battery_issue: RefCell<Option<String>>,
     battery_subscription_problem: RefCell<Option<String>>,
     battery_read_problem: RefCell<Option<String>>,
-    retry_requested: Cell<bool>,
-    changed: Event,
     configuration_changed: Rc<Event>,
 }
 impl DeviceWork {
@@ -111,17 +95,7 @@ impl DeviceWork {
         configuration_changed: Rc<Event>,
         light_write: Option<Rc<DeviceWriteGate>>,
     ) -> Self {
-        for function in native.device().functions() {
-            if function
-                .air_conditioner()
-                .is_some_and(|ac| ac.mcn04().is_some())
-            {
-                sink.physical
-                    .function(function.id())
-                    .unwrap()
-                    .require_air_conditioner_source_constraints();
-            }
-        }
+        sink.initialize(&native);
         let key = native.device().key().clone();
         let battery_issue = native.device().battery_issue().map(str::to_owned);
         Self {
@@ -131,48 +105,21 @@ impl DeviceWork {
             observations: Observations::default(),
             light_write,
             sink: RefCell::new(sink),
-            local: RefCell::new(LocalAttachment::default()),
-            cloud: RefCell::new(CloudAttachment::default()),
-            active: RefCell::new(BTreeMap::new()),
-            observation_sources: RefCell::new(BTreeMap::new()),
-            property_sources: RefCell::new(BTreeMap::new()),
-            mcn04_problems: RefCell::new(BTreeMap::new()),
-            mcn04_ranges: RefCell::new(BTreeMap::new()),
-            fan_modes: RefCell::new(BTreeMap::new()),
-            shared_fan_power: RefCell::default(),
-            shared_feedback: RefCell::new(SharedFeedbackState::default()),
-            standard_mode: RefCell::new(None),
-            shared_read_path: RefCell::new(None),
-            state_read_paths: RefCell::new(BTreeMap::new()),
-            condition_generation: Cell::new(0),
+            attachments: NativeAttachments::default(),
+            air_conditioner: AirConditionerObservations::default(),
+            fan: FanObservations::default(),
+            shared_feedback: SharedFeedback::default(),
             refresh: RefCell::new(RefreshState::new(initial_reads_changed)),
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
             committed_battery_issue: RefCell::new(battery_issue),
             battery_subscription_problem: RefCell::new(None),
             battery_read_problem: RefCell::new(None),
-            retry_requested: Cell::new(false),
-            changed: Event::new(),
             configuration_changed,
         }
     }
-    pub(super) fn fan_mode_observation(&self, id: &str) -> NativeModeObservation {
-        self.fan_modes.borrow().get(id).copied().unwrap_or_default()
-    }
-    pub(super) fn shared_feedback(&self) -> std::cell::Ref<'_, SharedFeedbackState> {
-        self.shared_feedback.borrow()
-    }
-    pub(super) fn shared_fan_power(&self, id: &str) -> Rc<RefCell<SharedFanPower>> {
-        self.shared_fan_power
-            .borrow_mut()
-            .entry(id.to_owned())
-            .or_default()
-            .clone()
-    }
     fn reset_shared_fan_power(&self, id: &str) {
-        if let Some(power) = self.shared_fan_power.borrow().get(id) {
-            power.borrow_mut().require_read();
-        }
+        self.current_sink().require_fan_power_read(id);
     }
     pub(super) fn invalidate_interlocked_blow(&self) {
         let Some(function) = self.native.device().functions().iter().find(|function| {
@@ -186,12 +133,12 @@ impl DeviceWork {
             return;
         };
         let id = function.id();
-        self.shared_fan_power(id).borrow_mut().require_read();
+        self.current_sink()
+            .shared_fan_power(id)
+            .borrow_mut()
+            .require_read();
         self.observations
             .refresh(id, function.fan().unwrap().power());
-    }
-    pub(super) fn standard_mode_value(&self) -> Option<NativeValueObservation> {
-        self.standard_mode.borrow().clone()
     }
     pub(super) fn is_standard_mode_binding(
         &self,
@@ -232,45 +179,18 @@ impl DeviceWork {
     }
     /// Swap the logical delivery target and return the retired one.
     pub(super) fn replace_sink(&self, sink: Rc<LogicalSink>) -> Rc<LogicalSink> {
-        self.shared_fan_power.borrow_mut().clear();
-        let previous = self.physical();
-        for native in self
-            .native
-            .device()
-            .functions()
-            .iter()
-            .filter(|function| function.relay_mode().is_some())
-        {
-            let previous = previous.function(native.id()).unwrap().snapshot();
-            let next = sink.physical.function(native.id()).unwrap();
-            if let Some(power) = previous.power().and_then(crate::device::Power::value) {
-                next.observe(power);
-            }
-            if let Some(mode) = previous.relay_mode() {
-                next.observe_relay_mode(mode);
-            }
-        }
-        for function in self.native.device().functions() {
-            if function
-                .air_conditioner()
-                .is_some_and(|ac| ac.mcn04().is_some())
-            {
-                sink.physical
-                    .function(function.id())
-                    .unwrap()
-                    .require_air_conditioner_source_constraints();
-            }
-        }
+        sink.inherit_relays(&self.current_sink(), &self.native);
+        sink.initialize(&self.native);
         let old = std::mem::replace(&mut *self.sink.borrow_mut(), sink);
         self.refresh.borrow_mut().reset_initial();
-        for function in self.native.device().functions() {
-            if function
-                .air_conditioner()
-                .is_some_and(|ac| ac.mcn04().is_some())
-            {
-                self.function_source_changed(function.id());
-            }
+        let shared_available = self.refresh.borrow().shared_read_available();
+        if let Some(available) = shared_available {
+            self.set_shared_temperature_source_available(available);
         }
+        for id in self.channels() {
+            self.function_source_changed(&id);
+        }
+        self.refresh_shared_feedback();
         old
     }
     pub(super) fn physical(&self) -> PhysicalDevice {
@@ -341,51 +261,6 @@ impl DeviceWork {
             .map(|function| function.id().to_owned())
             .chain(self.battery_binding().map(|_| BATTERY_CHANNEL.to_owned()))
             .collect()
-    }
-    pub(super) fn observer(&self) -> Option<NotificationSource> {
-        self.native
-            .device()
-            .functions()
-            .iter()
-            .find_map(|function| self.function_observer(function.id()))
-    }
-    pub(super) fn function_observer(&self, id: &str) -> Option<NotificationSource> {
-        self.active.borrow().get(id).cloned()
-    }
-    pub(super) fn install_observer(&self, id: &str, source: NotificationSource) {
-        self.install_observer_with_baseline(id, source, true);
-    }
-    pub(super) fn install_state_observer(&self, id: &str, source: NotificationSource) {
-        self.install_observer_with_baseline(id, source, false);
-    }
-    fn install_observer_with_baseline(&self, id: &str, source: NotificationSource, baseline: bool) {
-        for binding in self.channel_subscriptions(id) {
-            match (&source, binding) {
-                (NotificationSource::Local(handle), SubscriptionBinding::Property(binding)) => {
-                    handle.invalidate_received_property(&self.key.id, binding)
-                }
-                (NotificationSource::Local(handle), SubscriptionBinding::Event(binding)) => {
-                    handle.invalidate_received_event(&self.key.id, binding)
-                }
-                (NotificationSource::Cloud(handle), SubscriptionBinding::Property(binding)) => {
-                    handle.invalidate_received_property(&self.key.id, binding)
-                }
-                (NotificationSource::Cloud(handle), SubscriptionBinding::Event(binding)) => {
-                    handle.invalidate_received_event(&self.key.id, binding)
-                }
-            }
-        }
-        self.active.borrow_mut().insert(id.to_owned(), source);
-        if baseline {
-            self.function_source_changed(id);
-        } else {
-            self.observations.function_source_changed(id);
-        }
-    }
-    pub(super) fn revoke_observer(&self, id: &str) {
-        if self.active.borrow_mut().remove(id).is_some() {
-            self.function_source_changed(id);
-        }
     }
     fn function_source_changed(&self, id: &str) {
         self.reset_shared_fan_power(id);
@@ -468,33 +343,17 @@ impl DeviceWork {
         self.life.close();
         self.refresh.borrow().notify_initial_changed();
         self.current_sink().close();
-        let local = self.local.borrow_mut().connection.take();
-        if let Some(local) = local {
-            if self.is_light()
-                || self.native.device().functions().iter().any(|function| {
-                    function.curtain().is_some()
-                        || function.fan().is_some()
-                        || function.air_conditioner().is_some()
-                        || function.heater().is_some()
-                })
-            {
-                drop(local.unsubscribe_properties(&self.key.id));
-                drop(local.unsubscribe_events(&self.key.id));
-            } else {
-                drop(local.unsubscribe_device(&self.key.id));
-            }
-        }
-        self.retire_local_preparation();
-        self.cloud.borrow_mut().online.take();
-        let cloud = self.cloud.borrow_mut().connection.take();
-        if let Some(cloud) = cloud {
-            drop(cloud.unsubscribe_device(&self.key.id));
-        }
-        self.retire_cloud_preparation();
-        self.active.borrow_mut().clear();
+        let property_subscriptions = self.is_light()
+            || self.native.device().functions().iter().any(|function| {
+                function.curtain().is_some()
+                    || function.fan().is_some()
+                    || function.air_conditioner().is_some()
+                    || function.heater().is_some()
+            });
+        self.attachments
+            .retire(&self.key.id, property_subscriptions);
         super::refresh::cancel(self);
         self.light_frames.borrow_mut().cancel_all();
-        self.changed.notify(usize::MAX);
     }
     pub(super) fn refresh(&self) {
         self.refresh_functions(true);
@@ -541,7 +400,7 @@ impl DeviceWork {
         if related.includes_shared() {
             self.observations
                 .invalidate_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
-            self.shared_feedback.borrow_mut().pending = true;
+            self.shared_feedback.await_feedback();
             self.refresh_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
         }
     }

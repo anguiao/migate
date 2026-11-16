@@ -11,15 +11,15 @@ mod fan;
 mod heater;
 mod shared;
 
+pub(super) use air_conditioner::AirConditionerObservations;
+pub(super) use fan::FanObservations;
+pub(super) use shared::SharedFeedback;
+
 impl DeviceWork {
     fn record_relay_power_source(&self, id: &str, source: PathKind) {
-        self.property_sources.borrow_mut().insert(
-            super::super::observations::key(id, self.binding(id)),
-            source,
-        );
-        self.observation_sources
-            .borrow_mut()
-            .insert(id.to_owned(), source);
+        self.observations
+            .record_property_source(id, self.binding(id), source);
+        self.observations.record_function_source(id, source);
     }
 
     pub(in crate::xiaomi::adapter) fn observe_relay_power_notification(
@@ -61,10 +61,8 @@ impl DeviceWork {
         if matches!(origin, Origin::Notification) {
             self.refresh.borrow_mut().satisfy_baseline(id, binding);
         }
-        self.property_sources.borrow_mut().insert(
-            super::super::observations::key(id, binding),
-            observation.source,
-        );
+        self.observations
+            .record_property_source(id, binding, observation.source);
         if self
             .physical()
             .function(id)
@@ -76,72 +74,15 @@ impl DeviceWork {
         Ok(())
     }
 
-    pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
-        for function in self.native.device().functions().iter().filter(|function| {
-            function.state().is_some()
-                || function.curtain().is_some()
-                || function.fan().is_some()
-                || function.air_conditioner().is_some()
-                || function.heater().is_some()
-                || function.relay_mode().is_some()
-        }) {
-            let id = function.id();
-            let path = context.read_path_for(&self.key.id, id);
-            let changed = {
-                let mut paths = self.state_read_paths.borrow_mut();
-                let changed =
-                    paths
-                        .get(id)
-                        .is_some_and(|old| match (old.as_ref(), path.as_ref()) {
-                            (Some(old), Some(new)) => !old.same(new),
-                            (None, None) => false,
-                            _ => true,
-                        });
-                paths.insert(id.into(), path.clone());
-                changed
-            };
-            if changed {
-                self.reset_shared_fan_power(id);
-                if function
-                    .air_conditioner()
-                    .is_some_and(|ac| ac.mcn04().is_some())
-                {
-                    self.physical()
-                        .function(id)
-                        .unwrap()
-                        .air_conditioner_source_changed();
-                }
-                if function.heater().is_some() {
-                    self.physical()
-                        .function(id)
-                        .unwrap()
-                        .heater_source_changed();
-                }
-                for binding in function.observation_bindings() {
-                    super::super::refresh::reconcile_state_read(
-                        self,
-                        context,
-                        id,
-                        binding,
-                        path.is_some(),
-                    );
-                }
-            }
-        }
-        self.reconcile_shared_feedback(context);
-    }
     pub(in crate::xiaomi::adapter) fn observation_source(&self, id: &str) -> Option<PathKind> {
-        self.observation_sources.borrow().get(id).copied()
+        self.observations.function_source(id)
     }
     pub(in crate::xiaomi::adapter) fn property_source(
         &self,
         id: &str,
         binding: PropertyBinding,
     ) -> Option<PathKind> {
-        self.property_sources
-            .borrow()
-            .get(&super::super::observations::key(id, binding))
-            .copied()
+        self.observations.property_source(id, binding)
     }
     pub(in crate::xiaomi::adapter) fn event_function(
         &self,
@@ -192,9 +133,8 @@ impl DeviceWork {
                 observation.received_at,
             )
             .expect("state function");
-        self.observation_sources
-            .borrow_mut()
-            .insert(function.id().into(), observation.source);
+        self.observations
+            .record_function_source(function.id(), observation.source);
     }
     pub(in crate::xiaomi::adapter) fn binding_channel(
         &self,

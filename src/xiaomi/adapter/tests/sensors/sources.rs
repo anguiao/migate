@@ -139,7 +139,10 @@ fn measurement_notification_sources_switch_and_recover_independently() {
 
 #[test]
 fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
-    block_on(Rig::sensors(&["sensor"]).run(|c| async move {
+    let rig = Rig::sensors(&["sensor"]);
+    let (release, gate) = flume::bounded(1);
+    rig.cloud.lock().unwrap().home_gate = Some(gate);
+    block_on(rig.run(|c| async move {
         c.announce();
         let peer = sensor_peer(19.0, 39.0);
         peer.state.borrow_mut().pushless.insert("sensor".into());
@@ -147,6 +150,14 @@ fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
         c.peer(peer, |peer| async move {
             until(|| {
                 measurement(&control.context, "sensor", "temperature:3:1001").value == Some(19.0)
+            })
+            .await;
+            control.cloud.lock().unwrap().home_gate = None;
+            release.send(()).unwrap();
+            // Local reads are usable before the authoritative cloud snapshot arrives.
+            until(|| {
+                let directory = control.context.directory.borrow();
+                directory.scope_valid() && directory.devices["sensor"].cloud_access.is_some()
             })
             .await;
             let status = control

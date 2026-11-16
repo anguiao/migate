@@ -453,13 +453,21 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             initialized(control, &peer, &["multi"]).await;
             peer.state.borrow_mut().omit.remove("one");
             peer.list_changed(&["one"]);
-            until(|| peer.count("get", "one", 2) == 1 && peer.count("subscribe", "one", 2) == 1)
+            until(|| peer.count("get", "one", 2) >= 1 && peer.count("subscribe", "one", 2) >= 1)
                 .await;
+            // Exercise a legitimate retry before the source is withdrawn.
+            until(|| peer.count("subscribe", "one", 2) >= 2).await;
+            control
+                .clock
+                .automatic
+                .store(false, std::sync::atomic::Ordering::Relaxed);
             let one = function(&control.context.registry, "one", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            let retired_reads = peer.count("get", "one", 2);
+            let retired_subscriptions = peer.count("subscribe", "one", 2);
             control.cloud.lock().unwrap().members = vec!["multi".into()];
             peer.list_changed(&["one"]);
             until(|| {
@@ -501,8 +509,8 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
                     .get(&DeviceKey::new("xiaomi", "one"))
                     .is_none()
             );
-            assert_eq!(peer.count("get", "one", 2), 1);
-            assert_eq!(peer.count("subscribe", "one", 2), 1);
+            assert_eq!(peer.count("get", "one", 2), retired_reads);
+            assert_eq!(peer.count("subscribe", "one", 2), retired_subscriptions);
         })
         .await;
     }));

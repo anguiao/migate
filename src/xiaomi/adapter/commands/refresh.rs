@@ -61,7 +61,7 @@ impl CommandOperation {
                 CommandTarget::Fan(FanCommand::Power(false) | FanCommand::Speed(0))
                     if uncertain =>
                 {
-                    work.shared_fan_power(&self.channel)
+                    sink.shared_fan_power(&self.channel)
                         .borrow_mut()
                         .require_read();
                 }

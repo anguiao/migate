@@ -28,6 +28,7 @@ pub(super) struct Observation {
 #[derive(Default)]
 struct Counts {
     source: u64,
+    last_source: Option<PathKind>,
     observed: u64,
     notified: u64,
     refresh: u64,
@@ -38,6 +39,7 @@ struct Counts {
 #[derive(Default)]
 pub(super) struct Observations {
     channels: RefCell<BTreeMap<PropertyKey, Counts>>,
+    function_sources: RefCell<BTreeMap<String, PathKind>>,
 }
 #[derive(Clone)]
 pub(super) struct ReadStamp {
@@ -54,6 +56,36 @@ pub(super) struct WriteStamp {
 }
 
 impl Observations {
+    pub(super) fn record_function_source(&self, id: &str, source: PathKind) {
+        self.function_sources
+            .borrow_mut()
+            .insert(id.to_owned(), source);
+    }
+
+    pub(super) fn function_source(&self, id: &str) -> Option<PathKind> {
+        self.function_sources.borrow().get(id).copied()
+    }
+
+    pub(super) fn record_property_source(
+        &self,
+        id: &str,
+        binding: PropertyBinding,
+        source: PathKind,
+    ) {
+        self.channels
+            .borrow_mut()
+            .entry(key(id, binding))
+            .or_default()
+            .last_source = Some(source);
+    }
+
+    pub(super) fn property_source(&self, id: &str, binding: PropertyBinding) -> Option<PathKind> {
+        self.channels
+            .borrow()
+            .get(&key(id, binding))
+            .and_then(|counts| counts.last_source)
+    }
+
     /// Retained snapshots may seed an unknown property, but never replace a
     /// real read or notification already accepted for this runtime.
     pub(super) fn permits(&self, id: &str, binding: PropertyBinding, origin: Origin) -> bool {

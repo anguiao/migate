@@ -54,7 +54,8 @@ impl DeviceWork {
         &self,
         binding: PropertyBinding,
     ) -> bool {
-        self.local
+        self.attachments
+            .local
             .borrow()
             .prepare
             .subscribed
@@ -65,26 +66,37 @@ impl DeviceWork {
         siid: u32,
         piid: u32,
     ) -> bool {
-        self.local
+        self.attachments
+            .local
             .borrow()
             .prepare
             .subscribed
             .contains(&PropertyBinding { siid, piid }.into())
     }
     pub(in crate::xiaomi::adapter) fn test_local_subscribed_len(&self) -> usize {
-        self.local.borrow().prepare.subscribed.len()
+        self.attachments.local.borrow().prepare.subscribed.len()
     }
     pub(in crate::xiaomi::adapter) fn test_local_subscribed_empty(&self) -> bool {
-        self.local.borrow().prepare.subscribed.is_empty()
+        self.attachments
+            .local
+            .borrow()
+            .prepare
+            .subscribed
+            .is_empty()
     }
     pub(in crate::xiaomi::adapter) fn test_local_attached(&self) -> bool {
-        self.local.borrow().connection.is_some()
+        self.attachments.local.borrow().connection.is_some()
     }
     pub(in crate::xiaomi::adapter) fn test_cloud_subscribed_empty(&self) -> bool {
-        self.cloud.borrow().prepare.subscribed.is_empty()
+        self.attachments
+            .cloud
+            .borrow()
+            .prepare
+            .subscribed
+            .is_empty()
     }
     pub(in crate::xiaomi::adapter) fn test_cloud_preparing(&self) -> bool {
-        self.cloud.borrow().prepare.running
+        self.attachments.cloud.borrow().prepare.running
     }
     /// Reproduce a real preparation cancellation while a queued handshake is
     /// still outstanding: advance its receipt generation and release `running`.

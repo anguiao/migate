@@ -292,7 +292,7 @@ pub(super) async fn send(
         target: CommandTarget::Fan(request.command),
         queued_at: request.queued_at(),
     };
-    let shared_power = bindings.shared_speed().map(|_| work.shared_fan_power(id));
+    let shared_power = bindings.shared_speed().map(|_| sink.shared_fan_power(id));
     let sequence = FanSequence {
         request,
         bindings,

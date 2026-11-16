@@ -1,18 +1,25 @@
 use super::*;
 
+#[derive(Default)]
+pub(in crate::xiaomi::adapter::work) struct AirConditionerObservations {
+    problems: RefCell<BTreeMap<super::super::super::observations::PropertyKey, String>>,
+    ranges: RefCell<BTreeMap<String, String>>,
+}
+
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn mcn04_problem(
         &self,
         id: &str,
         binding: PropertyBinding,
     ) -> Option<String> {
-        self.mcn04_problems
+        self.air_conditioner
+            .problems
             .borrow()
             .get(&super::super::super::observations::key(id, binding))
             .cloned()
     }
     pub(in crate::xiaomi::adapter) fn mcn04_range(&self, id: &str) -> Option<String> {
-        self.mcn04_ranges.borrow().get(id).cloned()
+        self.air_conditioner.ranges.borrow().get(id).cloned()
     }
     pub(in crate::xiaomi::adapter) fn observe_mcn04(
         &self,
@@ -43,7 +50,8 @@ impl DeviceWork {
             debug_assert_eq!(binding, patch.range);
             super::super::super::mcn04::range(ac, value).map(|constraints| {
                 physical.set_air_conditioner_constraints(constraints);
-                self.mcn04_ranges
+                self.air_conditioner
+                    .ranges
                     .borrow_mut()
                     .insert(id.to_owned(), value.as_str().unwrap().to_owned());
                 None
@@ -54,19 +62,20 @@ impl DeviceWork {
             Err(error) => Some(error.to_string()),
         };
         if let Some(problem) = problem {
-            self.mcn04_problems.borrow_mut().insert(key, problem);
+            self.air_conditioner
+                .problems
+                .borrow_mut()
+                .insert(key, problem);
         } else {
-            self.mcn04_problems.borrow_mut().remove(&key);
+            self.air_conditioner.problems.borrow_mut().remove(&key);
         }
         result?;
         self.observations.observed(self, id, binding, origin);
         if matches!(origin, Origin::Notification) {
             self.refresh.borrow_mut().satisfy_baseline(id, binding);
         }
-        self.property_sources.borrow_mut().insert(
-            super::super::super::observations::key(id, binding),
-            observation.source,
-        );
+        self.observations
+            .record_property_source(id, binding, observation.source);
         Ok(())
     }
     pub(in crate::xiaomi::adapter) fn observe_air_conditioner(
@@ -104,10 +113,8 @@ impl DeviceWork {
                 observation.received_at,
             );
         }
-        self.property_sources.borrow_mut().insert(
-            super::super::super::observations::key(id, binding),
-            observation.source,
-        );
+        self.observations
+            .record_property_source(id, binding, observation.source);
     }
     pub(in crate::xiaomi::adapter) fn decode_air_conditioner(
         function: &ParsedFunction,

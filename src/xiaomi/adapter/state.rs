@@ -4,9 +4,7 @@ use super::{
     tasks::TaskSet,
 };
 use crate::{
-    configuration::DerivedConfiguration,
-    device::{DeviceRegistry, PhysicalDevice},
-    storage::Store,
+    configuration::DerivedConfiguration, device::DeviceRegistry, storage::Store,
     xiaomi::mijia::MijiaClient,
 };
 use event_listener::Event;
@@ -39,25 +37,7 @@ impl Lifetime {
         }
     }
 }
-/// The current logical delivery target of one native runtime. It owns the
-/// physical device and the command-consumer lifetime; replacing it retires
-/// only logical delivery, never the native control or its subscriptions.
-pub(super) struct LogicalSink {
-    pub(super) physical: PhysicalDevice,
-    pub(super) life: Lifetime,
-}
-impl LogicalSink {
-    pub(super) fn new(physical: PhysicalDevice) -> Self {
-        Self {
-            physical,
-            life: Lifetime::default(),
-        }
-    }
-    pub(super) fn close(&self) {
-        self.physical.close();
-        self.life.close();
-    }
-}
+pub(super) use super::work::LogicalSink;
 #[derive(Default)]
 pub(super) struct DiagnosticCache {
     pub(super) routing: RoutingStatus,

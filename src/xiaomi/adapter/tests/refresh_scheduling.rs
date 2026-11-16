@@ -347,6 +347,12 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
             peer.list_changed(&["multi"]);
             // Hold time until the late device has a real read route and its own round.
             until(|| control.context.local_candidate("multi", false).is_ok()).await;
+            let work = control.context.directory.borrow().devices["multi"]
+                .admitted
+                .clone()
+                .unwrap();
+            // A global 710 ms deadline may belong to another device's preparation.
+            until(|| work.local_preparation_active()).await;
             wait_deadline(&control.clock, 900).await;
             advance_to(&control.clock, Duration::from_millis(710)).await;
             // The route can become usable before its subscriptions activate.
@@ -361,10 +367,6 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
                 sub.pkid,
                 vec![SubscribeReasonCode::QoS2],
             )));
-            let work = control.context.directory.borrow().devices["multi"]
-                .admitted
-                .clone()
-                .unwrap();
             until(|| {
                 work.test_local_subscribed_len() == work.bindings().len()
                     && ["outlet:3", "outlet:4", "outlet:9"].iter().all(|id| {
@@ -385,6 +387,12 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
             advance_to(&control.clock, Duration::from_millis(1100)).await;
             advance_to(&control.clock, Duration::from_millis(1300)).await;
             initialized(control, &peer, &["multi"]).await;
+            // Finish the last round before advancing to the other device's retry.
+            until(|| {
+                let refresh = work.refresh.borrow().snapshot();
+                refresh.pending.is_empty() && refresh.inflight.is_empty()
+            })
+            .await;
 
             control.clock.advance(Duration::from_millis(1899));
             settle_wire().await;

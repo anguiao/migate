@@ -37,6 +37,7 @@ mod repair_planning;
 mod repair_restart;
 mod repair_state;
 mod repair_takeover;
+mod runtime_feedback;
 mod send_boundary;
 mod source_runtime;
 mod subscriptions;

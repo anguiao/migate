@@ -1,6 +1,18 @@
 use super::*;
 
+#[derive(Default)]
+pub(in crate::xiaomi::adapter::work) struct FanObservations {
+    modes: RefCell<BTreeMap<String, NativeModeObservation>>,
+}
+
 impl DeviceWork {
+    pub(in crate::xiaomi::adapter) fn fan_mode_observation(
+        &self,
+        id: &str,
+    ) -> NativeModeObservation {
+        self.fan.modes.borrow().get(id).copied().unwrap_or_default()
+    }
+
     pub(in crate::xiaomi::adapter) fn observe_fan(
         &self,
         function: &ParsedFunction,
@@ -22,7 +34,7 @@ impl DeviceWork {
         }
         match value {
             FanObservation::Mode(value) => {
-                self.fan_modes.borrow_mut().insert(
+                self.fan.modes.borrow_mut().insert(
                     id.to_owned(),
                     super::super::super::model::NativeModeObservation {
                         value: Some(value),
@@ -36,7 +48,10 @@ impl DeviceWork {
                     && function.fan().unwrap().shared_speed().is_some()
                     && let crate::device::FanValue::Power(running) = &value
                 {
-                    self.shared_fan_power(id).borrow_mut().observe(*running);
+                    self.current_sink()
+                        .shared_fan_power(id)
+                        .borrow_mut()
+                        .observe(*running);
                     self.refresh_changed.notify(usize::MAX);
                 }
                 let function = self.physical().function(id).unwrap();
@@ -51,10 +66,8 @@ impl DeviceWork {
                 }
             }
         }
-        self.property_sources.borrow_mut().insert(
-            super::super::super::observations::key(id, binding),
-            observation.source,
-        );
+        self.observations
+            .record_property_source(id, binding, observation.source);
         true
     }
     pub(in crate::xiaomi::adapter) fn decode_fan(

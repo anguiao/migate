@@ -1,10 +1,60 @@
 use super::*;
+
+#[derive(Default)]
+pub(in crate::xiaomi::adapter) struct SharedFeedbackState {
+    pub(in crate::xiaomi::adapter) pending: bool,
+    pub(in crate::xiaomi::adapter) native_mode: Option<NativeValueObservation>,
+    pub(in crate::xiaomi::adapter) fan_speed_index: Option<NativeValueObservation>,
+    pub(in crate::xiaomi::adapter) temperature: Option<NativeValueObservation>,
+    pub(in crate::xiaomi::adapter) source: Option<PathKind>,
+    pub(in crate::xiaomi::adapter) fan_reasons:
+        BTreeMap<crate::xiaomi::capability::SharedFanChannel, String>,
+}
+
+#[derive(Default)]
+pub(in crate::xiaomi::adapter::work) struct SharedFeedback {
+    state: RefCell<SharedFeedbackState>,
+    standard_mode: RefCell<Option<NativeValueObservation>>,
+}
+
+impl SharedFeedback {
+    pub(in crate::xiaomi::adapter::work) fn await_feedback(&self) {
+        self.state.borrow_mut().pending = true;
+    }
+}
+
 use crate::xiaomi::{
     capability::{ReadInput, SHARED_FEEDBACK_CHANNEL},
     legacy_miio::{SharedFeedbackReading, decode_shared_feedback},
 };
 
 impl DeviceWork {
+    pub(in crate::xiaomi::adapter) fn shared_feedback(
+        &self,
+    ) -> std::cell::Ref<'_, SharedFeedbackState> {
+        self.shared_feedback.state.borrow()
+    }
+    pub(in crate::xiaomi::adapter) fn standard_mode_value(&self) -> Option<NativeValueObservation> {
+        self.shared_feedback.standard_mode.borrow().clone()
+    }
+
+    pub(in crate::xiaomi::adapter) fn set_shared_temperature_source_available(
+        &self,
+        available: bool,
+    ) {
+        if let Some(id) = self
+            .native
+            .plan()
+            .shared_feedback()
+            .and_then(|plan| plan.heater_temperature.as_ref())
+        {
+            self.physical()
+                .function(id)
+                .expect("planned heater exists")
+                .set_heater_temperature_source_available(available);
+        }
+    }
+
     /// Apply one shared legacy response as one group observation. The two fan
     /// levels and the built-in temperature share the same received time, while
     /// each field keeps its own raw value and explicit unknown reason.
@@ -47,7 +97,7 @@ impl DeviceWork {
             Origin::Read,
         );
         {
-            let mut state = self.shared_feedback.borrow_mut();
+            let mut state = self.shared_feedback.state.borrow_mut();
             state.pending = false;
             state.source = Some(observation.source);
             state.native_mode = Some(native_value(&reading.native_mode, observation));
@@ -165,58 +215,15 @@ impl DeviceWork {
                 .satisfy_baseline(function.id(), binding);
         }
         let valid = mode.accepts(raw);
-        *self.standard_mode.borrow_mut() =
+        *self.shared_feedback.standard_mode.borrow_mut() =
             Some(super::super::super::model::NativeValueObservation {
                 value: raw.clone(),
                 source_time: observation.source_time,
                 received_at: observation.received_at,
                 reason: (!valid).then(|| format!("unrecognized standard mode value {raw}")),
             });
-        self.property_sources.borrow_mut().insert(
-            super::super::super::observations::key(function.id(), binding),
-            observation.source,
-        );
+        self.observations
+            .record_property_source(function.id(), binding, observation.source);
         Some(valid)
-    }
-}
-
-impl DeviceWork {
-    /// The shared group is owned by the physical device: direct/cloud
-    /// availability decides whether the built-in temperature is eligible.
-    pub(in crate::xiaomi::adapter) fn reconcile_shared_feedback(&self, context: &Context) {
-        let Some(plan) = self.native.plan().shared_feedback() else {
-            return;
-        };
-        let path = context.shared_feedback_read_path(&self.key.id);
-        let changed = {
-            let mut previous = self.shared_read_path.borrow_mut();
-            let changed = match previous.as_ref() {
-                None => true,
-                Some(old) => match (old.as_ref(), path.as_ref()) {
-                    (Some(old), Some(new)) => !old.same(new),
-                    (None, None) => false,
-                    _ => true,
-                },
-            };
-            *previous = Some(path.clone());
-            changed
-        };
-        if !changed {
-            return;
-        }
-        let available = path.is_some();
-        if let Some(id) = &plan.heater_temperature {
-            self.physical()
-                .function(id)
-                .expect("planned heater exists")
-                .set_heater_temperature_source_available(available);
-        }
-        super::super::super::refresh::reconcile_input(
-            self,
-            context,
-            SHARED_FEEDBACK_CHANNEL,
-            ReadInput::SharedFeedback,
-            available,
-        );
     }
 }

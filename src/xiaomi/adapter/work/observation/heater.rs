@@ -30,10 +30,8 @@ impl DeviceWork {
             }
             physical.observe_heater(value, observation.source_time, observation.received_at);
         }
-        self.property_sources.borrow_mut().insert(
-            super::super::super::observations::key(id, binding),
-            observation.source,
-        );
+        self.observations
+            .record_property_source(id, binding, observation.source);
         true
     }
 
