@@ -35,8 +35,7 @@ impl RefreshState {
 }
 
 impl DeviceWork {
-    pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
-        let routes = context.device_routes(&self.key.id);
+    pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, routes: &DeviceRoutes) {
         for function in self.native.device().functions().iter().filter(|function| {
             function.state().is_some()
                 || function.curtain().is_some()
@@ -73,7 +72,7 @@ impl DeviceWork {
                 }
             }
         }
-        self.reconcile_shared_feedback(&routes);
+        self.reconcile_shared_feedback(routes);
     }
 
     fn reconcile_shared_feedback(&self, routes: &DeviceRoutes) {

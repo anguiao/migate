@@ -80,9 +80,9 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
     if work.life.is_closed() {
         return;
     }
-    work.reconcile_state_reads(context);
-    let retry = work.take_subscription_retry();
     let routes = context.device_routes(&did);
+    work.reconcile_state_reads(&routes);
+    let retry = work.take_subscription_retry();
     let mut keep_local = false;
     let mut keep_cloud = false;
     for id in work.channels() {
@@ -118,8 +118,8 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
             .find(|function| function.id() == id)
             .and_then(crate::xiaomi::capability::ParsedFunction::relay_mode)
         {
-            if let Ok(handle) = context.local_candidate(&did, true) {
-                let source = NotificationSource::Local(handle);
+            if let Ok(handle) = &routes.hub_push {
+                let source = NotificationSource::Local(handle.clone());
                 keep_local |= routes.functions[&id].notification.valid(&source)
                     && work.source_binding_ready(&source, binding);
             }

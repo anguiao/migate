@@ -170,19 +170,20 @@ impl StepRequest for FanSequence {
         sink: &LogicalSink,
     ) -> Result<VecDeque<(FanStep, StepTarget)>, CommandError> {
         let mut plan = self.power_on_plan();
-        if matches!(plan, PowerOnPlan::ReadPower)
-            && context.read_path_for(&self.work.key.id, &self.id).is_some()
-        {
-            self.work
-                .request_dirty_read(&self.id, self.bindings.power());
-        }
+        let mut request_power_read = true;
         while matches!(plan, PowerOnPlan::ReadPower) {
+            let readable = context.read_path_for(&self.work.key.id, &self.id).is_some();
+            if request_power_read && readable {
+                self.work
+                    .request_dirty_read(&self.id, self.bindings.power());
+            }
+            request_power_read = false;
             let changed = self.work.refresh_changed.listen();
             self.request.current_result()?;
             if self.work.life.is_closed() || sink.life.is_closed() {
                 return Err(CommandError::Cancelled);
             }
-            if context.read_path_for(&self.work.key.id, &self.id).is_none()
+            if !readable
                 || !self
                     .work
                     .refresh

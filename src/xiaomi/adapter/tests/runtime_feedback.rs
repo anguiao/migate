@@ -29,7 +29,7 @@ fn logical_replacement_reestablishes_an_available_shared_temperature_source() {
                 PhysicalDevice::new(work.native.physical_description("Replacement"));
             work.replace_sink(Rc::new(LogicalSink::new(physical)))
                 .close();
-            work.reconcile_state_reads(&c.context);
+            work.reconcile_state_reads(&c.context.device_routes(&work.key.id));
             let heater = work.physical().function("heater:3").unwrap();
             assert_eq!(
                 heater.snapshot().heater().unwrap().temperature_source,

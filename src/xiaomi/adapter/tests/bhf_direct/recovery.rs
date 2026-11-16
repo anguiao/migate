@@ -550,7 +550,7 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
             .active
             .take();
         c.context.credentials.borrow_mut().pause_http();
-        work(&c).reconcile_state_reads(&c.context);
+        work(&c).reconcile_state_reads(&c.context.device_routes(DID));
         assert_eq!(
             heater.snapshot().heater().unwrap().temperature_source,
             TemperatureSourceState::Unavailable
@@ -578,7 +578,7 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
             .lan
             .active = direct;
         c.context.credentials.borrow_mut().resume_http();
-        work(&c).reconcile_state_reads(&c.context);
+        work(&c).reconcile_state_reads(&c.context.device_routes(DID));
         let text = status_text(&c);
         assert!(
             text.contains(

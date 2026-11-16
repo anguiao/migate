@@ -390,7 +390,7 @@ fn built_in_temperature_drops_from_matter_only_when_all_group_paths_are_unavaila
 
             let device = work(&c);
             c.context.credentials.borrow_mut().pause_http();
-            device.reconcile_state_reads(&c.context);
+            device.reconcile_state_reads(&c.context.device_routes(&device.key.id));
             eventually(|| {
                 heater.snapshot().heater().unwrap().temperature_source
                     == TemperatureSourceState::Unavailable
@@ -404,7 +404,7 @@ fn built_in_temperature_drops_from_matter_only_when_all_group_paths_are_unavaila
             );
 
             c.context.credentials.borrow_mut().resume_http();
-            device.reconcile_state_reads(&c.context);
+            device.reconcile_state_reads(&c.context.device_routes(&device.key.id));
             eventually(|| {
                 heater.snapshot().heater().unwrap().temperature_source
                     == TemperatureSourceState::AwaitingReading
