@@ -231,17 +231,23 @@ impl Directory {
         }
     }
 
-    pub(super) fn device_error(&mut self, did: &str, error: &CloudError) {
-        if let Some(slot) = self.devices.get_mut(did) {
-            if error.is_device_offline()
-                && let Some(access) = &mut slot.cloud_access
-            {
-                access.online = false;
-            }
-            if error.is_device_forbidden() {
-                slot.cloud_forbidden = true;
-            }
+    pub(super) fn device_error(&mut self, did: &str, error: &CloudError) -> bool {
+        let Some(slot) = self.devices.get_mut(did) else {
+            return false;
+        };
+        let mut changed = false;
+        if error.is_device_offline()
+            && let Some(access) = &mut slot.cloud_access
+            && access.online
+        {
+            access.online = false;
+            changed = true;
         }
+        if error.is_device_forbidden() && !slot.cloud_forbidden {
+            slot.cloud_forbidden = true;
+            changed = true;
+        }
+        changed
     }
 
     pub(super) fn problem(&self) -> Option<&str> {

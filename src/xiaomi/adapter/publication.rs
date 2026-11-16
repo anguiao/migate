@@ -21,7 +21,10 @@ use crate::{
     },
     device::{Availability, CommandReceiver, DeviceKey, FunctionKey, PhysicalDevice, RelayMode},
 };
-use std::{collections::BTreeMap, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
 
 /// The live Xiaomi source continues running while Matter instances restart.
 #[derive(Clone)]
@@ -372,9 +375,35 @@ impl SourceHandle {
     /// prepare, commit and install.
     pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
         self.planned();
+        let mut routing_affected = plan
+            .operations
+            .iter()
+            .filter(|operation| {
+                matches!(
+                    operation.kind,
+                    OperationKind::Added
+                        | OperationKind::Removed
+                        | OperationKind::ReplacedNative
+                        | OperationKind::ReplacedAuthority
+                )
+            })
+            .map(|operation| operation.key.id.clone())
+            .collect::<BTreeSet<_>>();
+        let rules_changed = {
+            let graph = self.0.graph.borrow();
+            // Both versions matter when a group loses a member or its rule.
+            graph
+                .rules
+                .keys()
+                .chain(plan.derived.rules.keys())
+                .filter(|did| graph.rules.get(*did) != plan.derived.rules.get(*did))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
         let changed = !prepared.installed.is_empty()
             || !prepared.removed.is_empty()
-            || self.0.graph.borrow().rules != plan.derived.rules;
+            || !rules_changed.is_empty();
+        routing_affected.extend(rules_changed);
         for key in &prepared.removed {
             self.0.retire_work(&key.id);
             let mut directory = self.0.directory.borrow_mut();
@@ -472,7 +501,22 @@ impl SourceHandle {
             }
             self.0.refresh_all_group_states();
         }
-        self.0.update_routing("committed configuration installed");
+        {
+            let directory = self.0.directory.borrow();
+            routing_affected.retain(|did| {
+                directory
+                    .devices
+                    .get(did)
+                    .is_some_and(|slot| slot.admitted.is_some())
+            });
+        }
+        if !routing_affected.is_empty() {
+            self.0.update_routing_for(
+                routing_affected.iter().map(String::as_str),
+                "committed configuration installed",
+                None,
+            );
+        }
         let entries = self.entries(&plan.configuration);
         self.0.changed.notify(usize::MAX);
         entries

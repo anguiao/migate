@@ -63,23 +63,33 @@ impl Context {
         if !self.current_mijia(path) {
             return;
         }
-        if error.is_unauthorized() {
+        let global_change = if error.is_unauthorized() {
             self.credentials
                 .borrow_mut()
                 .reject_mijia(path.generation, self.clock.unix_now());
             self.status_changed.notify(usize::MAX);
             self.mijia_changed.notify(usize::MAX);
+            true
         } else if error.is_temporary() {
             let newly_paused = self.credentials.borrow_mut().pause_http();
             if newly_paused {
                 self.directory.borrow_mut().sync_failed(self.clock.now());
                 self.request_sync();
             }
+            newly_paused
+        } else {
+            false
+        };
+        if global_change {
+            self.update_all_availability();
+            self.update_routing(&format!("Mijia HTTP request failed: {error}"));
         } else if let Some(did) = did {
-            self.directory.borrow_mut().device_error(did, error);
+            let access_changed = self.directory.borrow_mut().device_error(did, error);
+            if access_changed {
+                self.update_availability(did);
+                self.update_device_routing(did, &format!("Mijia HTTP request failed: {error}"));
+            }
         }
-        self.update_all_availability();
-        self.update_routing(&format!("Mijia HTTP request failed: {error}"));
         self.changed.notify(usize::MAX);
         self.refresh_changed.notify(usize::MAX);
     }

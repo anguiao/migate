@@ -1,11 +1,5 @@
 use super::*;
 
-fn recorded(c: &Control, did: &str) -> Option<String> {
-    c.context.directory.borrow().devices[did]
-        .last_switch_reason
-        .clone()
-}
-
 #[test]
 fn unavailable_first_admission_has_a_baseline_and_readmission_drops_the_old_history() {
     let rig = Rig::new(true, &["one"]);

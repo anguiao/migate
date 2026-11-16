@@ -2,8 +2,15 @@ use super::*;
 use crate::xiaomi::adapter::{PathKind, PathPriority};
 
 mod deadlines;
+mod event_scope;
 mod history;
 mod publishing;
+
+fn recorded(c: &Control, did: &str) -> Option<String> {
+    c.context.directory.borrow().devices[did]
+        .last_switch_reason
+        .clone()
+}
 
 #[test]
 fn credential_report_checks_expiry_without_a_new_authentication_check() {
