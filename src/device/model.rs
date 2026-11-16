@@ -96,9 +96,6 @@ impl FunctionKind {
                 | Self::Heater { .. }
         )
     }
-    pub fn is_state_sensor(self) -> bool {
-        matches!(self, Self::Contact | Self::Motion | Self::Occupancy)
-    }
     pub fn is_read_only(self) -> bool {
         !self.is_control()
     }

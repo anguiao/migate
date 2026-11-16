@@ -1,334 +1,18 @@
 mod observation;
+mod runtime;
+
+use runtime::AmbientSource;
+pub(super) use runtime::{AirConditionerRuntime, RuntimeState};
 
 use super::{
-    command::{CommandCoordinator, CommandReceiver},
+    command::CommandReceiver,
     model::{
         AmbientTemperature, Availability, BatterySnapshot, FunctionDescription, FunctionKey,
-        FunctionSnapshot, FunctionState, MeasurementSnapshot, PhysicalDeviceDescription, Power,
-        TemperatureSourceState,
+        FunctionSnapshot, PhysicalDeviceDescription, Power,
     },
 };
 use event_listener::Event;
 use std::sync::{Arc, Mutex};
-enum RuntimeValue {
-    Control(Box<ControlRuntime>),
-    Curtain(Box<CurtainRuntime>),
-    Fan(Box<FanRuntime>),
-    AirConditioner(Box<AirConditionerRuntime>),
-    Heater(Box<HeaterRuntime>),
-    Measurement(MeasurementRuntime),
-    StateSensor(super::StateSnapshot),
-}
-struct MeasurementRuntime {
-    snapshot: MeasurementSnapshot,
-    temperature_source: Option<TemperatureSourceState>,
-}
-struct ControlRuntime {
-    power: Power,
-    relay_mode: Option<super::RelayMode>,
-    lighting: Option<super::LightSnapshot>,
-    commands: CommandCoordinator,
-}
-struct FanRuntime {
-    snapshot: super::FanSnapshot,
-    commands: super::fan_command::FanCoordinator,
-}
-pub(super) struct HeaterRuntime {
-    pub(super) thermostat:
-        super::thermostat::ThermostatRuntime<super::HeaterCommand, super::HeaterMode>,
-}
-impl HeaterRuntime {
-    fn snapshot(&self) -> super::HeaterSnapshot {
-        let observation = &self.thermostat.observation;
-        let current = observation.current_temperature;
-        super::HeaterSnapshot {
-            power: observation.power,
-            temperature: observation.target_temperature,
-            current_temperature: current.measurement,
-            temperature_source: current.source,
-        }
-    }
-}
-pub(super) struct AirConditionerRuntime {
-    pub(super) thermostat: super::thermostat::ThermostatRuntime<
-        super::AirConditionerCommand,
-        super::AirConditionerMode,
-    >,
-    speed: super::model::PropertyObservation<super::AirConditionerFanSpeed>,
-    swing: super::model::PropertyObservation<bool>,
-    ambient_source: Option<AmbientSource>,
-    pub(super) constraints: Option<super::air_conditioner::AirConditionerConstraints>,
-    pub(super) dynamic_constraints: bool,
-    pub(super) constraints_current: bool,
-    pub(super) planning_mode: Option<super::AirConditionerMode>,
-    pub(super) observed_mode: Option<super::AirConditionerMode>,
-    pub(super) mode_revision: u64,
-}
-impl AirConditionerRuntime {
-    fn snapshot(&self) -> super::AirConditionerSnapshot {
-        let observation = &self.thermostat.observation;
-        super::AirConditionerSnapshot {
-            power: observation.power,
-            mode: observation.mode,
-            temperature: observation.target_temperature,
-            speed: self.speed,
-            swing: self.swing,
-        }
-    }
-}
-#[derive(Clone)]
-struct AmbientSource {
-    key: FunctionKey,
-    function: Option<Function>,
-}
-struct CurtainRuntime {
-    snapshot: super::CurtainSnapshot,
-    commands: super::curtain_command::CurtainCoordinator,
-    projection: super::curtain_projection::CurtainProjection,
-}
-pub(super) struct RuntimeState {
-    value: RuntimeValue,
-    pub(super) revision: u64,
-}
-impl RuntimeState {
-    fn curtain() -> Self {
-        Self {
-            value: RuntimeValue::Curtain(Box::new(CurtainRuntime {
-                snapshot: super::CurtainSnapshot::default(),
-                commands: super::curtain_command::CurtainCoordinator::default(),
-                projection: super::curtain_projection::CurtainProjection::default(),
-            })),
-            revision: 0,
-        }
-    }
-    fn control(lighting: Option<super::LightSnapshot>) -> Self {
-        Self {
-            value: RuntimeValue::Control(Box::new(ControlRuntime {
-                power: Power::Unknown,
-                relay_mode: None,
-                lighting,
-                commands: CommandCoordinator::new(),
-            })),
-            revision: 0,
-        }
-    }
-    fn fan() -> Self {
-        Self {
-            value: RuntimeValue::Fan(Box::new(FanRuntime {
-                snapshot: super::FanSnapshot::default(),
-                commands: super::fan_command::FanCoordinator::default(),
-            })),
-            revision: 0,
-        }
-    }
-    fn new_heater() -> Self {
-        Self {
-            value: RuntimeValue::Heater(Box::new(HeaterRuntime {
-                thermostat: super::thermostat::ThermostatRuntime::default(),
-            })),
-            revision: 0,
-        }
-    }
-    fn new_air_conditioner() -> Self {
-        Self {
-            value: RuntimeValue::AirConditioner(Box::new(AirConditionerRuntime {
-                thermostat: super::thermostat::ThermostatRuntime::default(),
-                speed: super::model::PropertyObservation::default(),
-                swing: super::model::PropertyObservation::default(),
-                ambient_source: None,
-                constraints: None,
-                dynamic_constraints: false,
-                constraints_current: false,
-                planning_mode: None,
-                observed_mode: None,
-                mode_revision: 0,
-            })),
-            revision: 0,
-        }
-    }
-    fn measurement_state(temperature: bool) -> Self {
-        Self {
-            value: RuntimeValue::Measurement(MeasurementRuntime {
-                snapshot: MeasurementSnapshot {
-                    value: None,
-                    source_time: None,
-                    received_at: None,
-                },
-                temperature_source: temperature.then_some(TemperatureSourceState::Unavailable),
-            }),
-            revision: 0,
-        }
-    }
-    fn state_sensor() -> Self {
-        Self {
-            value: RuntimeValue::StateSensor(super::StateSnapshot {
-                active: None,
-                input: None,
-                source_time: None,
-                received_at: None,
-            }),
-            revision: 0,
-        }
-    }
-    fn has_control_state(&self) -> bool {
-        matches!(
-            self.value,
-            RuntimeValue::Control(_)
-                | RuntimeValue::Curtain(_)
-                | RuntimeValue::Fan(_)
-                | RuntimeValue::AirConditioner(_)
-                | RuntimeValue::Heater(_)
-        )
-    }
-    pub(super) fn fan_commands(&self) -> Option<&super::fan_command::FanCoordinator> {
-        match &self.value {
-            RuntimeValue::Fan(fan) => Some(&fan.commands),
-            _ => None,
-        }
-    }
-    pub(super) fn fan_commands_mut(&mut self) -> Option<&mut super::fan_command::FanCoordinator> {
-        match &mut self.value {
-            RuntimeValue::Fan(fan) => Some(&mut fan.commands),
-            _ => None,
-        }
-    }
-    pub(super) fn fan_power(&self) -> Option<bool> {
-        match &self.value {
-            RuntimeValue::Fan(fan) => fan.snapshot.power.value,
-            _ => None,
-        }
-    }
-    pub(super) fn heater(&self) -> Option<&HeaterRuntime> {
-        match &self.value {
-            RuntimeValue::Heater(heater) => Some(heater),
-            _ => None,
-        }
-    }
-    pub(super) fn heater_mut(&mut self) -> Option<&mut HeaterRuntime> {
-        match &mut self.value {
-            RuntimeValue::Heater(heater) => Some(heater),
-            _ => None,
-        }
-    }
-    pub(super) fn air_conditioner(&self) -> Option<&AirConditionerRuntime> {
-        match &self.value {
-            RuntimeValue::AirConditioner(air_conditioner) => Some(air_conditioner),
-            _ => None,
-        }
-    }
-    pub(super) fn air_conditioner_mut(&mut self) -> Option<&mut AirConditionerRuntime> {
-        match &mut self.value {
-            RuntimeValue::AirConditioner(air_conditioner) => Some(air_conditioner),
-            _ => None,
-        }
-    }
-    pub(super) fn curtain_commands(&self) -> Option<&super::curtain_command::CurtainCoordinator> {
-        match &self.value {
-            RuntimeValue::Curtain(curtain) => Some(&curtain.commands),
-            _ => None,
-        }
-    }
-    pub(super) fn curtain_commands_mut(
-        &mut self,
-    ) -> Option<&mut super::curtain_command::CurtainCoordinator> {
-        match &mut self.value {
-            RuntimeValue::Curtain(curtain) => Some(&mut curtain.commands),
-            _ => None,
-        }
-    }
-    pub(super) fn update_curtain_projection(
-        &mut self,
-        update: impl FnOnce(&mut super::curtain_projection::CurtainProjection),
-    ) -> bool {
-        let RuntimeValue::Curtain(curtain) = &mut self.value else {
-            unreachable!("curtain function has curtain state")
-        };
-        let before = curtain.projection.target(curtain.snapshot);
-        update(&mut curtain.projection);
-        let changed = before != curtain.projection.target(curtain.snapshot);
-        if changed {
-            self.revision = self.revision.wrapping_add(1);
-        }
-        changed
-    }
-    pub(super) fn commands(&self) -> Option<&CommandCoordinator> {
-        match &self.value {
-            RuntimeValue::Control(control) => Some(&control.commands),
-            RuntimeValue::Curtain(_)
-            | RuntimeValue::Fan(_)
-            | RuntimeValue::AirConditioner(_)
-            | RuntimeValue::Heater(_)
-            | RuntimeValue::Measurement(_)
-            | RuntimeValue::StateSensor(_) => None,
-        }
-    }
-    pub(super) fn commands_mut(&mut self) -> Option<&mut CommandCoordinator> {
-        match &mut self.value {
-            RuntimeValue::Control(control) => Some(&mut control.commands),
-            RuntimeValue::Curtain(_)
-            | RuntimeValue::Fan(_)
-            | RuntimeValue::AirConditioner(_)
-            | RuntimeValue::Heater(_)
-            | RuntimeValue::Measurement(_)
-            | RuntimeValue::StateSensor(_) => None,
-        }
-    }
-    pub(super) fn power(&self) -> Option<Power> {
-        match &self.value {
-            RuntimeValue::Control(control) => Some(control.power),
-            RuntimeValue::Curtain(_)
-            | RuntimeValue::Fan(_)
-            | RuntimeValue::AirConditioner(_)
-            | RuntimeValue::Heater(_)
-            | RuntimeValue::Measurement(_)
-            | RuntimeValue::StateSensor(_) => None,
-        }
-    }
-    fn set_power(&mut self, new: Power) {
-        if let RuntimeValue::Control(control) = &mut self.value {
-            control.power = new;
-        }
-    }
-    fn control_parts(&self) -> Option<(Power, Option<super::LightSnapshot>)> {
-        match &self.value {
-            RuntimeValue::Control(control) => Some((control.power, control.lighting)),
-            RuntimeValue::Curtain(_)
-            | RuntimeValue::Fan(_)
-            | RuntimeValue::AirConditioner(_)
-            | RuntimeValue::Heater(_)
-            | RuntimeValue::Measurement(_)
-            | RuntimeValue::StateSensor(_) => None,
-        }
-    }
-    fn set_control_parts(&mut self, power: Power, lighting: Option<super::LightSnapshot>) {
-        if let RuntimeValue::Control(control) = &mut self.value {
-            control.power = power;
-            control.lighting = lighting;
-        }
-    }
-    fn lighting_mut(&mut self) -> Option<&mut super::LightSnapshot> {
-        match &mut self.value {
-            RuntimeValue::Control(control) => control.lighting.as_mut(),
-            RuntimeValue::Curtain(_)
-            | RuntimeValue::Fan(_)
-            | RuntimeValue::AirConditioner(_)
-            | RuntimeValue::Heater(_)
-            | RuntimeValue::Measurement(_)
-            | RuntimeValue::StateSensor(_) => None,
-        }
-    }
-    fn measurement_mut(&mut self) -> Option<&mut MeasurementRuntime> {
-        match &mut self.value {
-            RuntimeValue::Measurement(measurement) => Some(measurement),
-            RuntimeValue::Control(_)
-            | RuntimeValue::Curtain(_)
-            | RuntimeValue::Fan(_)
-            | RuntimeValue::AirConditioner(_)
-            | RuntimeValue::Heater(_)
-            | RuntimeValue::StateSensor(_) => None,
-        }
-    }
-}
 
 struct PhysicalState {
     availability: Availability,
@@ -356,7 +40,7 @@ pub(super) struct Inner {
 
 /// Clear runtime light state in place; outlets keep their existing power cache.
 fn clear_light_state(description: &FunctionDescription, state: &mut RuntimeState) -> bool {
-    let Some((power, Some(before_lighting))) = state.control_parts() else {
+    let Some((power, before_lighting)) = state.light_parts() else {
         return false;
     };
     let mut lighting = before_lighting;
@@ -364,10 +48,10 @@ fn clear_light_state(description: &FunctionDescription, state: &mut RuntimeState
     lighting.temperature_kelvin = None;
     lighting.color = None;
     lighting.mode = description.inferred_color_mode();
-    let before = (power, Some(before_lighting));
-    let after = (Power::Unknown, Some(lighting));
+    let before = (power, before_lighting);
+    let after = (Power::Unknown, lighting);
     if before != after {
-        state.set_control_parts(after.0, after.1);
+        state.set_light_parts(after.0, after.1);
         state.revision = state.revision.wrapping_add(1);
         true
     } else {
@@ -606,31 +290,8 @@ impl Function {
         physical: Arc<PhysicalInner>,
     ) -> (Self, Option<CommandReceiver>) {
         let key = FunctionKey::new(physical_key, description.id.clone());
-        let lighting = description.kind.is_light().then_some(super::LightSnapshot {
-            brightness_percent: None,
-            temperature_kelvin: None,
-            color: None,
-            mode: description.inferred_color_mode(),
-        });
-        let state = if description.kind == super::FunctionKind::Curtain {
-            RuntimeState::curtain()
-        } else if matches!(description.kind, super::FunctionKind::Fan { .. }) {
-            RuntimeState::fan()
-        } else if matches!(description.kind, super::FunctionKind::AirConditioner { .. }) {
-            RuntimeState::new_air_conditioner()
-        } else if matches!(description.kind, super::FunctionKind::Heater { .. }) {
-            RuntimeState::new_heater()
-        } else if description.kind.is_measurement() {
-            RuntimeState::measurement_state(matches!(
-                description.kind,
-                super::FunctionKind::Temperature(_)
-            ))
-        } else if description.kind.is_state_sensor() {
-            RuntimeState::state_sensor()
-        } else {
-            RuntimeState::control(lighting)
-        };
-        let controllable = state.has_control_state();
+        let state = RuntimeState::new(description.kind);
+        let controllable = description.kind.is_control();
         let function = Self(Arc::new(Inner {
             description,
             key,
@@ -666,110 +327,11 @@ impl Function {
         let availability = physical.availability.clone();
         let revision = state.revision.wrapping_add(physical.revision);
         drop(physical);
-        let ambient_temperature = match &state.value {
-            RuntimeValue::AirConditioner(runtime) => Some(match &runtime.ambient_source {
-                None => AmbientTemperature::Unbound,
-                Some(source) => match &source.function {
-                    None => AmbientTemperature::SourceMissing,
-                    Some(function) => match function
-                        .snapshot()
-                        .temperature_source()
-                        .expect("ambient source is a temperature function")
-                    {
-                        TemperatureSourceState::Unavailable => {
-                            AmbientTemperature::SourceUnavailable
-                        }
-                        TemperatureSourceState::AwaitingReading => {
-                            AmbientTemperature::AwaitingReading
-                        }
-                        TemperatureSourceState::Available(value) => {
-                            AmbientTemperature::Available(value)
-                        }
-                    },
-                },
-            }),
-            _ => None,
-        };
-        let temperature_source = match &state.value {
-            RuntimeValue::Measurement(measurement) => measurement.temperature_source,
-            RuntimeValue::Heater(heater) => Some(heater.snapshot().temperature_source),
-            _ => None,
-        };
-        let state = match (&self.description().kind, &state.value) {
-            (super::FunctionKind::Outlet, RuntimeValue::Control(control))
-                if control.lighting.is_none() =>
-            {
-                FunctionState::Outlet {
-                    power: control.power,
-                }
-            }
-            (super::FunctionKind::Relay, RuntimeValue::Control(control)) => FunctionState::Relay {
-                power: control.power,
-                mode: control.relay_mode,
-            },
-            (super::FunctionKind::Light(_), RuntimeValue::Control(control))
-                if control.lighting.is_some() =>
-            {
-                FunctionState::Light {
-                    power: control.power,
-                    lighting: control.lighting.expect("light has lighting state"),
-                }
-            }
-            (super::FunctionKind::Fan { .. }, RuntimeValue::Fan(fan)) => {
-                FunctionState::Fan { fan: fan.snapshot }
-            }
-            (super::FunctionKind::AirConditioner { .. }, RuntimeValue::AirConditioner(runtime)) => {
-                FunctionState::AirConditioner {
-                    air_conditioner: runtime.snapshot(),
-                }
-            }
-            (super::FunctionKind::Heater { .. }, RuntimeValue::Heater(runtime)) => {
-                FunctionState::Heater {
-                    heater: runtime.snapshot(),
-                }
-            }
-            (super::FunctionKind::Curtain, RuntimeValue::Curtain(curtain)) => {
-                FunctionState::Curtain {
-                    curtain: curtain.snapshot,
-                }
-            }
-            (super::FunctionKind::Temperature(_), RuntimeValue::Measurement(measurement)) => {
-                FunctionState::Temperature {
-                    measurement: measurement.snapshot,
-                }
-            }
-            (super::FunctionKind::Humidity(_), RuntimeValue::Measurement(measurement)) => {
-                FunctionState::Humidity {
-                    measurement: measurement.snapshot,
-                }
-            }
-            (super::FunctionKind::CarbonDioxide(_), RuntimeValue::Measurement(measurement)) => {
-                FunctionState::CarbonDioxide {
-                    measurement: measurement.snapshot,
-                }
-            }
-            (super::FunctionKind::Illuminance(_), RuntimeValue::Measurement(measurement)) => {
-                FunctionState::Illuminance {
-                    measurement: measurement.snapshot,
-                }
-            }
-            (super::FunctionKind::Contact, RuntimeValue::StateSensor(state)) => {
-                FunctionState::Contact {
-                    state: state.clone(),
-                }
-            }
-            (super::FunctionKind::Motion, RuntimeValue::StateSensor(state)) => {
-                FunctionState::Motion {
-                    state: state.clone(),
-                }
-            }
-            (super::FunctionKind::Occupancy, RuntimeValue::StateSensor(state)) => {
-                FunctionState::Occupancy {
-                    state: state.clone(),
-                }
-            }
-            _ => unreachable!("runtime value matches the function kind"),
-        };
+        let ambient_temperature = state
+            .air_conditioner()
+            .map(|runtime| runtime.ambient_temperature());
+        let temperature_source = state.temperature_source();
+        let state = state.value.snapshot();
         FunctionSnapshot {
             state,
             availability,

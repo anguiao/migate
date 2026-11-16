@@ -1,5 +1,5 @@
-use super::{Function, FunctionSnapshot, MeasurementSnapshot, Power, RuntimeState, RuntimeValue};
-use crate::device::model::PropertyObservation;
+use super::{Function, FunctionSnapshot, Power, RuntimeState, runtime::RuntimeValue};
+use crate::device::{MeasurementSnapshot, model::PropertyObservation};
 
 impl Function {
     /// Update the function's acquisition eligibility without changing its last reading.
@@ -383,7 +383,7 @@ impl Function {
         received_at: i64,
     ) -> Result<FunctionSnapshot, crate::device::CommandError> {
         let mut state = self.0.state.lock().unwrap();
-        let RuntimeValue::StateSensor(current) = &mut state.value else {
+        let Some(current) = state.state_sensor_mut() else {
             return Err(crate::device::CommandError::Unsupported);
         };
         let observed = crate::device::StateSnapshot {
@@ -412,15 +412,12 @@ impl Function {
         self.update_power(&mut state, power);
     }
     pub(crate) fn observe_relay_mode(&self, mode: super::super::RelayMode) -> bool {
-        if self.description().kind != super::super::FunctionKind::Relay {
-            return false;
-        }
         let mut state = self.0.state.lock().unwrap();
-        let super::RuntimeValue::Control(control) = &mut state.value else {
-            unreachable!()
+        let RuntimeValue::Relay(relay) = &mut state.value else {
+            return false;
         };
-        if control.relay_mode != Some(mode) {
-            control.relay_mode = Some(mode);
+        if relay.mode != Some(mode) {
+            relay.mode = Some(mode);
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
             true
@@ -443,11 +440,8 @@ impl Function {
     ) -> FunctionSnapshot {
         let (patch, clear_temperature) = observation.into_parts();
         let mut state = self.0.state.lock().unwrap();
-        let (before_power, Some(before_lighting)) =
-            state.control_parts().expect("light has control state")
-        else {
-            unreachable!("light has lighting state")
-        };
+        let (before_power, before_lighting) =
+            state.light_parts().expect("light has lighting state");
         let mut power = before_power;
         if let Some(value) = patch.power {
             power = value.into();
@@ -468,8 +462,8 @@ impl Function {
         if let Some(value) = patch.mode {
             lighting.mode = Some(value);
         }
-        if (before_power, Some(before_lighting)) != (power, Some(lighting)) {
-            state.set_control_parts(power, Some(lighting));
+        if (before_power, before_lighting) != (power, lighting) {
+            state.set_light_parts(power, lighting);
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
@@ -493,8 +487,8 @@ impl Function {
     /// Replace a derived light snapshot, including fields that became unknown.
     pub(crate) fn replace_light_state(&self, power: Power, lighting: crate::device::LightSnapshot) {
         let mut state = self.0.state.lock().unwrap();
-        if state.control_parts() != Some((power, Some(lighting))) {
-            state.set_control_parts(power, Some(lighting));
+        if state.light_parts() != Some((power, lighting)) {
+            state.set_light_parts(power, lighting);
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
