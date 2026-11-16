@@ -388,7 +388,6 @@ fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            auth.update_adapter(status);
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &auth);
             let text = terminal

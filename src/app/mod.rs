@@ -106,6 +106,10 @@ impl App {
         self.current.borrow().clone()
     }
 
+    pub(crate) fn diagnostics(&self) -> crate::xiaomi::adapter::AdapterStatus {
+        self.source.diagnostics()
+    }
+
     pub(crate) fn failure(&self) -> Option<String> {
         self.failure.borrow().clone()
     }
@@ -118,8 +122,10 @@ impl App {
         self.source.accessible_descriptions()
     }
 
-    pub(crate) fn configurable_devices(&self) -> BTreeSet<DeviceKey> {
-        let current = self.current();
+    pub(crate) fn configurable_devices(
+        &self,
+        current: &EffectiveConfiguration,
+    ) -> BTreeSet<DeviceKey> {
         current
             .entries
             .iter()

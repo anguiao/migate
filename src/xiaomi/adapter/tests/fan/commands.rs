@@ -95,8 +95,7 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
             let after = function.begin_fan(FanCommand::Speed(80)).unwrap();
             for _ in 0..30 { future::yield_now().await; }
             assert_eq!(writes(&peer).len(), 1);
-            let status = crate::terminal::AuthStatus::new(control.context.auth_report().clone(), "/bin/migate".into(), "/data".into());
-            status.update_adapter(control.context.diagnostics());
+            let status = crate::terminal::AuthStatus::new(control.context.auth_report(), "/bin/migate".into(), "/data".into());
             let terminal = crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             let text = terminal.handle_line("status one", 0).await.unwrap().unwrap();
             assert!(text.contains("queued fan commands: swing on, power off, speed level 80."), "{text}");
@@ -118,7 +117,6 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
             accept(&peer, SPEED).await;
             after.accepted().await.unwrap();
             assert_eq!(function.snapshot(), before);
-            status.update_adapter(control.context.diagnostics());
             let text = terminal.handle_line("status one", 0).await.unwrap().unwrap();
             assert!(text.contains("target speed level 80; properties 2.1=true (hub), 2.3=0 (hub), 8.1=80 (hub); actual path hub; accepted."), "{text}");
         }).await;

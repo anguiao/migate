@@ -75,7 +75,6 @@ async fn terminal(c: &Control, command: &str) -> String {
         "/bin/migate".into(),
         "/data".into(),
     );
-    status.update_adapter(c.context.diagnostics());
     crate::terminal::bridge::Context::committed(c.publication.clone(), &status)
         .handle_line(command, 0)
         .await

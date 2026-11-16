@@ -90,7 +90,7 @@ pub(super) fn format_gateway(status: &GatewayStatus) -> String {
     }
 }
 
-pub(super) fn path(path: PathKind) -> &'static str {
+pub(in crate::terminal) fn path(path: PathKind) -> &'static str {
     match path {
         PathKind::Local => "hub",
         PathKind::Direct => "direct",
@@ -427,7 +427,11 @@ fn native_diagnostic(value: &crate::xiaomi::adapter::DiagnosticObservation) -> S
     text
 }
 
-pub(super) fn format_command(channel: &str, state: &str, command: &CommandStatus) -> String {
+pub(in crate::terminal) fn format_command(
+    channel: &str,
+    state: &str,
+    command: &CommandStatus,
+) -> String {
     let mut text = format!(
         "{channel} {state} command #{}: target {}; {} {}; actual path {}; {}.",
         command.id,

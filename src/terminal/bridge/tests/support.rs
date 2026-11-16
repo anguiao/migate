@@ -12,7 +12,7 @@ use crate::{
     storage::{DeviceStore, StorageError, Store},
     terminal::AuthStatus,
     xiaomi::{
-        adapter::publication::SourceEntry,
+        adapter::{AdapterStatus, GatewayStatus, publication::SourceEntry},
         auth::{AuthReport, AuthenticationState, CertificateUpdate},
         capability::tests::model_fixture::native_for,
     },
@@ -77,7 +77,7 @@ pub(super) fn saved_description(store: &Store, key: &DeviceKey) -> PhysicalDevic
         .clone()
 }
 
-fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageError> {
+pub(super) fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageError> {
     let configuration = store.load_configuration()?;
     let accessible_descriptions = configuration
         .descriptions
@@ -124,9 +124,21 @@ pub(crate) async fn handle_line(
     line: &str,
     now: i64,
 ) -> Result<Option<String>, StorageError> {
+    handle_line_with_diagnostics(registry, store, status, diagnostics(), line, now).await
+}
+
+/// Exercise formatting with an explicit diagnostic input, without a live source.
+pub(crate) async fn handle_line_with_diagnostics(
+    registry: &DeviceRegistry,
+    store: &DeviceStore,
+    status: &AuthStatus,
+    diagnostics: AdapterStatus,
+    line: &str,
+    now: i64,
+) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
     view(registry, store)?
-        .handle_words(&words, now, status)
+        .handle_words(&words, now, status, || diagnostics)
         .await
 }
 
@@ -172,4 +184,20 @@ pub(crate) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     handle_line(&registry, &store.devices(), &status, &line, 0)
         .await
         .unwrap()
+}
+
+pub(super) fn diagnostics() -> AdapterStatus {
+    AdapterStatus {
+        auth: AuthReport::for_test(
+            AuthenticationState::NotSignedIn,
+            None,
+            CertificateUpdate::NotNeeded,
+            0,
+        ),
+        gateway: GatewayStatus::Discovering,
+        catalog_problem: None,
+        pending: Vec::new(),
+        routing: Default::default(),
+        devices: Vec::new(),
+    }
 }

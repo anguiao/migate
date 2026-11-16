@@ -1,55 +1,44 @@
-use super::{
-    AuthStatus,
-    primitives::{Observation, observed_text},
-};
+use super::primitives::{Observation, observed_text};
 use crate::{
-    device::FunctionDescription, terminal::status::property_diagnostics,
-    xiaomi::adapter::ObservedPropertyStatus,
+    device::FunctionDescription,
+    terminal::status::{format_command, path, property_diagnostics},
+    xiaomi::adapter::{DeviceStatus, FunctionStatus, ObservedPropertyStatus},
 };
+use std::fmt::Write as _;
 
-/// Supplies the diagnostics belonging to one terminal command's input.
-pub(in crate::terminal::bridge) trait DiagnosticSource {
-    fn function_properties(&self, did: &str, id: &str) -> Vec<ObservedPropertyStatus>;
-    fn function_sync(&self, did: &str, id: &str) -> String;
-    fn function_commands(&self, did: &str, id: &str) -> Vec<String>;
-}
-
-impl DiagnosticSource for AuthStatus {
-    fn function_properties(&self, did: &str, id: &str) -> Vec<ObservedPropertyStatus> {
-        self.function_properties(did, id)
-    }
-
-    fn function_sync(&self, did: &str, id: &str) -> String {
-        self.function_sync(did, id)
-    }
-
-    fn function_commands(&self, did: &str, id: &str) -> Vec<String> {
-        self.function_commands(did, id)
-    }
-}
-
-/// The formatters read captured values and never query the diagnostic source.
-pub(super) struct FunctionDiagnostics {
-    pub(super) properties: Vec<ObservedPropertyStatus>,
+/// One function borrows all diagnostics from the command's captured input.
+pub(super) struct FunctionDiagnostics<'a> {
+    pub(super) properties: &'a [ObservedPropertyStatus],
     pub(super) synchronization: String,
     commands: Vec<String>,
 }
 
-impl FunctionDiagnostics {
-    pub(super) fn capture(
-        source: &impl DiagnosticSource,
-        did: &str,
-        id: &str,
-        show_commands: bool,
-    ) -> Self {
+impl<'a> FunctionDiagnostics<'a> {
+    pub(super) fn capture(device: Option<&'a DeviceStatus>, id: &str, show_commands: bool) -> Self {
+        let function = device.and_then(|device| {
+            device
+                .functions
+                .iter()
+                .find(|function| function.function == id)
+        });
+        let commands = show_commands
+            .then(|| {
+                device
+                    .and_then(|device| device.commands.iter().find(|channel| channel.channel == id))
+            })
+            .flatten();
         Self {
-            properties: source.function_properties(did, id),
-            synchronization: source.function_sync(did, id),
-            commands: if show_commands {
-                source.function_commands(did, id)
-            } else {
-                Vec::new()
-            },
+            properties: function.map_or(&[], |function| function.properties.as_slice()),
+            synchronization: synchronization(function),
+            commands: commands
+                .into_iter()
+                .flat_map(|channel| [("in-flight", &channel.inflight), ("last", &channel.last)])
+                .filter_map(|(state, command)| {
+                    command
+                        .as_ref()
+                        .map(|command| format_command(id, state, command))
+                })
+                .collect(),
         }
     }
 
@@ -86,4 +75,23 @@ impl FunctionDiagnostics {
         lines.extend(self.commands.iter().map(|command| format!("    {command}")));
         lines
     }
+}
+
+pub(super) fn synchronization(function: Option<&FunctionStatus>) -> String {
+    let Some(function) = function else {
+        return "synchronization diagnostics unavailable".into();
+    };
+    let mut details = format!(
+        "selected read {}; notification source {}; observation source {}",
+        function.selected_read.map(path).unwrap_or("none"),
+        function.notification_source.map(path).unwrap_or("none"),
+        function.observation_source.map(path).unwrap_or("unknown")
+    );
+    if let Some(reason) = &function.read_problem {
+        let _ = write!(details, "; read: {reason}");
+    }
+    if let Some(reason) = &function.sync_limited_reason {
+        let _ = write!(details, "; synchronization limited: {reason}");
+    }
+    details
 }

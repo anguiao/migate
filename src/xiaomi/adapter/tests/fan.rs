@@ -314,7 +314,6 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            status.update_adapter(control.context.diagnostics());
             let result =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status)
                     .handle_line("status one", 0)
@@ -440,7 +439,6 @@ fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            status.update_adapter(control.context.diagnostics());
             for command in ["list", "status one"] {
                 let text = crate::terminal::bridge::Context::committed(
                     control.publication.clone(),

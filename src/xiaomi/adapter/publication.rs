@@ -73,6 +73,11 @@ impl DeviceSlot {
 }
 
 impl SourceHandle {
+    /// Capture current diagnostics without waiting for the publication callback.
+    pub fn diagnostics(&self) -> super::AdapterStatus {
+        self.0.diagnostics()
+    }
+
     /// Whether every initial observation needed by the committed publication has a result.
     pub(crate) fn initial_reads_ready(&self, configuration: &CommittedConfiguration) -> bool {
         super::initial_reads::ready(&self.0, configuration)

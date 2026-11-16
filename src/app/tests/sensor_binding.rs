@@ -163,7 +163,7 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
         let sensor = function(&app, "sensor", "temperature:3:1001");
         sensor.set_temperature_source_available(true);
         sensor.observe_measurement(21.5, Some(100), 200).unwrap();
-        status.update_adapter(crate::xiaomi::adapter::AdapterStatus {
+        let diagnostics = crate::xiaomi::adapter::AdapterStatus {
             auth: crate::xiaomi::auth::AuthReport::for_test(
                 crate::xiaomi::auth::AuthenticationState::Authenticated,
                 None,
@@ -204,7 +204,7 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
                     properties: Vec::new(),
                 }],
             }],
-        });
+        };
         run(
             &terminal,
             "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
@@ -215,14 +215,32 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
         assert!(output.contains("Ambient temperature: 21.50 °C"), "{output}");
         assert!(output.contains("sensor/temperature:3:1001"), "{output}");
         assert!(output.contains("upstream time 100"), "{output}");
+        let registry = crate::device::DeviceRegistry::new();
+        for device in app.current().devices() {
+            registry.insert(device);
+        }
+        let formatted = crate::terminal::bridge::tests::support::handle_line_with_diagnostics(
+            &registry,
+            &store.devices(),
+            &status,
+            diagnostics,
+            "status ac",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(
-            output.contains("selected read hub; notification source none"),
-            "{output}"
+            formatted.contains("selected read hub; notification source none"),
+            "{formatted}"
         );
-        assert!(output.contains("read: temporary read failure"), "{output}");
         assert!(
-            output.contains("synchronization limited: subscription rejected"),
-            "{output}"
+            formatted.contains("read: temporary read failure"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("synchronization limited: subscription rejected"),
+            "{formatted}"
         );
         assert!(matches!(
             published

@@ -15,7 +15,6 @@ fn native_state_terminal_distinguishes_event_subscriptions_and_observation_metad
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            status.update_adapter(control.context.diagnostics());
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             let text = terminal

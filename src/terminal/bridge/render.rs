@@ -4,20 +4,19 @@ mod diagnostics;
 mod measurement;
 mod primitives;
 
-use super::{AuthStatus, View};
+use super::View;
 use crate::device::{
     AmbientTemperature, Availability, DeviceKey, Function, FunctionKey, FunctionState,
     MeasurementSnapshot,
 };
 pub(super) use configuration::configuration_lines;
-pub(super) use diagnostics::DiagnosticSource;
 use diagnostics::FunctionDiagnostics;
 use measurement::AmbientSource;
 
 pub(super) fn render(
     view: &View,
     did: Option<&str>,
-    status: &impl DiagnosticSource,
+    status: &crate::xiaomi::adapter::AdapterStatus,
     show_commands: bool,
 ) -> String {
     let mut lines = Vec::new();
@@ -64,8 +63,15 @@ pub(super) fn render(
         if let Some(battery) = physical.battery_snapshot() {
             lines.push(measurement::battery_line(battery));
         }
+        let diagnostic = status.devices.iter().find(|device| device.did == key.id);
         for function in physical.functions() {
-            lines.extend(function_lines(view, function, status, show_commands));
+            lines.extend(function_lines(
+                view,
+                function,
+                status,
+                diagnostic,
+                show_commands,
+            ));
             if let Some(issue) = crate::matter::measurement_mapping_issue(function) {
                 lines.push(format!("    Matter mapping unsupported: {issue}."));
             }
@@ -81,13 +87,14 @@ pub(super) fn render(
 fn function_lines(
     view: &View,
     function: &Function,
-    status: &impl DiagnosticSource,
+    status: &crate::xiaomi::adapter::AdapterStatus,
+    diagnostic: Option<&crate::xiaomi::adapter::DeviceStatus>,
     show_commands: bool,
 ) -> Vec<String> {
     let key = function.function_key();
     let description = function.description();
     let snapshot = function.snapshot();
-    let diagnostics = FunctionDiagnostics::capture(status, &key.device.id, &key.id, show_commands);
+    let diagnostics = FunctionDiagnostics::capture(diagnostic, &key.id, show_commands);
     match snapshot.state {
         FunctionState::AirConditioner { air_conditioner } => {
             let ambient = snapshot
@@ -174,7 +181,7 @@ fn ambient_source(
     view: &View,
     key: &FunctionKey,
     ambient: AmbientTemperature,
-    status: &impl DiagnosticSource,
+    status: &crate::xiaomi::adapter::AdapterStatus,
 ) -> Option<AmbientSource> {
     let source = view.current.configuration.temperature_bindings.get(key)?;
     let device = view.get(&source.device);
@@ -190,7 +197,18 @@ fn ambient_source(
         key: source.clone(),
         label: device.map(|device| device.label()),
         last_reading,
-        synchronization: status.function_sync(&source.device.id, &source.id),
+        synchronization: diagnostics::synchronization(
+            status
+                .devices
+                .iter()
+                .find(|device| device.did == source.device.id)
+                .and_then(|device| {
+                    device
+                        .functions
+                        .iter()
+                        .find(|function| function.function == source.id)
+                }),
+        ),
     })
 }
 

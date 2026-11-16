@@ -180,7 +180,6 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
             "/bin/migate".into(),
             "/data".into(),
         );
-        status.update_adapter(c.context.diagnostics());
         let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
         let before = terminal
             .handle_line("status one", 0)
@@ -229,7 +228,6 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
                     .is_some_and(|reason| reason.contains(diagnostic))
             })
             .await;
-            status.update_adapter(c.context.diagnostics());
             let after = terminal
                 .handle_line("status one", 0)
                 .await
@@ -473,7 +471,6 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
             "/bin/migate".into(),
             "/data".into(),
         );
-        status.update_adapter(c.context.diagnostics());
         let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
         let status_line = terminal
             .handle_line("status one", 0)
@@ -526,7 +523,6 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
             "/bin/migate".into(),
             "/data".into(),
         );
-        status.update_adapter(c.context.diagnostics());
         let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
         let report = terminal
             .handle_line("status one", 0)

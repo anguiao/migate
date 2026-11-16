@@ -465,7 +465,6 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            status.update_adapter(control.context.diagnostics());
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             let details = terminal

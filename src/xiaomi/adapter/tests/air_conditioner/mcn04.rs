@@ -111,7 +111,6 @@ fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range()
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            status.update_adapter(control.context.diagnostics());
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             let output = terminal

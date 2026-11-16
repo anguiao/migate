@@ -1,36 +1,30 @@
 mod format;
 
 use format::{
-    check_command, format_authentication, format_certificate, format_command, format_device,
-    format_gateway, format_routing, path,
+    check_command, format_authentication, format_certificate, format_device, format_gateway,
+    format_routing,
 };
+pub(super) use format::{format_command, path, property_diagnostics, timestamp};
 pub use format::{format_report, login_command};
-pub(super) use format::{property_diagnostics, timestamp};
 
 use crate::xiaomi::{
-    adapter::{
-        AdapterStatus, DeviceStatus, GatewayStatus, ObservedPropertyStatus, PendingDevice,
-        RoutingStatus,
-    },
+    adapter::{AdapterStatus, GatewayStatus},
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::CertificateStatus,
 };
 use std::{cell::RefCell, fmt::Write as _, path::PathBuf};
 use time::OffsetDateTime;
 
-struct BridgeDiagnostics {
+struct AdapterLogState {
     gateway: GatewayStatus,
     catalog_problem: Option<String>,
-    pending: Vec<PendingDevice>,
-    routing: RoutingStatus,
-    devices: Vec<DeviceStatus>,
 }
 
 pub struct AuthStatus {
     report: RefCell<AuthReport>,
     executable: PathBuf,
     data_dir: PathBuf,
-    adapter: RefCell<Option<BridgeDiagnostics>>,
+    last_adapter: RefCell<Option<AdapterLogState>>,
 }
 
 impl AuthStatus {
@@ -39,7 +33,7 @@ impl AuthStatus {
             report: RefCell::new(report),
             executable,
             data_dir,
-            adapter: RefCell::new(None),
+            last_adapter: RefCell::new(None),
         }
     }
 
@@ -57,122 +51,33 @@ impl AuthStatus {
     }
 
     pub fn render(&self, now: i64) -> String {
-        let mut report =
-            format_report(&self.report.borrow(), now, &self.executable, &self.data_dir);
-        if let Some(adapter) = &*self.adapter.borrow() {
-            let _ = write!(report, "\n{}", format_gateway(&adapter.gateway));
-            if let Some(problem) = &adapter.catalog_problem {
-                let _ = write!(report, "\nDevice description: {problem}.");
-            }
-            let _ = write!(report, "\n{}", format_routing(&adapter.routing));
+        format_report(&self.report.borrow(), now, &self.executable, &self.data_dir)
+    }
+
+    pub(super) fn render_adapter(&self, adapter: &AdapterStatus, now: i64) -> String {
+        let mut report = format_report(&adapter.auth, now, &self.executable, &self.data_dir);
+        let _ = write!(report, "\n{}", format_gateway(&adapter.gateway));
+        if let Some(problem) = &adapter.catalog_problem {
+            let _ = write!(report, "\nDevice description: {problem}.");
         }
-        if self.adapter.borrow().is_some()
-            && (matches!(
-                self.report.borrow().ha,
-                AuthenticationState::SignInRequired(_)
-            ) || matches!(
-                self.report.borrow().mijia,
-                AuthenticationState::SignInRequired(_)
-            ))
+        let _ = write!(report, "\n{}", format_routing(&adapter.routing));
+        if matches!(adapter.auth.ha, AuthenticationState::SignInRequired(_))
+            || matches!(adapter.auth.mijia, AuthenticationState::SignInRequired(_))
         {
             report.push_str("\nStop MiGate, sign in with the same data directory, then restart.");
         }
         report
     }
 
-    pub fn render_devices(&self, now: i64, did: Option<&str>) -> String {
-        let mut report = self.render(now);
-        self.append_devices(&mut report, did);
-        report
-    }
-
-    pub(super) fn append_devices(&self, report: &mut String, did: Option<&str>) {
-        if let Some(adapter) = &*self.adapter.borrow() {
-            for device in adapter
-                .devices
-                .iter()
-                .filter(|device| did.is_none_or(|did| device.did == did))
-            {
-                let _ = write!(report, "\n{}", format_device(device));
-            }
-        }
-    }
-
-    pub(super) fn function_properties(&self, did: &str, id: &str) -> Vec<ObservedPropertyStatus> {
-        self.adapter
-            .borrow()
-            .as_ref()
-            .and_then(|adapter| adapter.devices.iter().find(|device| device.did == did))
-            .and_then(|device| {
-                device
-                    .functions
-                    .iter()
-                    .find(|function| function.function == id)
-            })
-            .map(|function| function.properties.clone())
-            .unwrap_or_default()
-    }
-
-    pub(super) fn function_sync(&self, did: &str, id: &str) -> String {
-        let adapter = self.adapter.borrow();
-        let Some(function) = adapter
-            .as_ref()
-            .and_then(|adapter| adapter.devices.iter().find(|device| device.did == did))
-            .and_then(|device| {
-                device
-                    .functions
-                    .iter()
-                    .find(|function| function.function == id)
-            })
-        else {
-            return "synchronization diagnostics unavailable".into();
-        };
-        let mut details = format!(
-            "selected read {}; notification source {}; observation source {}",
-            function.selected_read.map(path).unwrap_or("none"),
-            function.notification_source.map(path).unwrap_or("none"),
-            function.observation_source.map(path).unwrap_or("unknown")
-        );
-        if let Some(reason) = &function.read_problem {
-            let _ = write!(details, "; read: {reason}");
-        }
-        if let Some(reason) = &function.sync_limited_reason {
-            let _ = write!(details, "; synchronization limited: {reason}");
-        }
-        details
-    }
-
-    pub(super) fn function_commands(&self, did: &str, id: &str) -> Vec<String> {
-        self.adapter
-            .borrow()
-            .as_ref()
-            .and_then(|adapter| adapter.devices.iter().find(|device| device.did == did))
-            .and_then(|device| device.commands.iter().find(|channel| channel.channel == id))
-            .map(|channel| {
-                [("in-flight", &channel.inflight), ("last", &channel.last)]
-                    .into_iter()
-                    .filter_map(|(state, command)| {
-                        command
-                            .as_ref()
-                            .map(|command| format_command(id, state, command))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     pub fn update_adapter(&self, status: AdapterStatus) {
         if self.replace(status.auth) {
             self.log(current_time());
         }
-        let next = BridgeDiagnostics {
+        let next = AdapterLogState {
             gateway: status.gateway,
             catalog_problem: status.catalog_problem,
-            pending: status.pending,
-            routing: status.routing,
-            devices: status.devices,
         };
-        let mut adapter = self.adapter.borrow_mut();
+        let mut adapter = self.last_adapter.borrow_mut();
         if adapter
             .as_ref()
             .is_none_or(|old| old.gateway != next.gateway)
@@ -187,14 +92,6 @@ impl AuthStatus {
             log::warn!("Device description: {problem}.");
         }
         *adapter = Some(next);
-    }
-
-    pub fn pending(&self) -> Vec<PendingDevice> {
-        self.adapter
-            .borrow()
-            .as_ref()
-            .map(|adapter| adapter.pending.clone())
-            .unwrap_or_default()
     }
 
     pub fn log(&self, now: i64) {
@@ -267,6 +164,16 @@ impl AuthStatus {
                 "Complete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request."
             );
         }
+    }
+}
+
+pub(super) fn append_devices(report: &mut String, adapter: &AdapterStatus, did: Option<&str>) {
+    for device in adapter
+        .devices
+        .iter()
+        .filter(|device| did.is_none_or(|did| device.did == did))
+    {
+        let _ = write!(report, "\n{}", format_device(device));
     }
 }
 

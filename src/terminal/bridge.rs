@@ -9,12 +9,19 @@ use crate::{
     RuntimeError,
     device::{Command, DeviceKey, FunctionKey, FunctionKind, HeaterCommand, HeaterMode},
     storage::StorageError,
+    xiaomi::adapter::AdapterStatus,
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, map-type DID FUNCTION switch|light, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
-fn invalid(view: &View, status: &AuthStatus, now: i64, reason: &str) -> String {
+fn invalid(
+    view: &View,
+    status: &AuthStatus,
+    diagnostics: &AdapterStatus,
+    now: i64,
+    reason: &str,
+) -> String {
     format!(
         "{reason}\n{COMMAND_HELP}\n{}",
-        view.render_status(status, now)
+        view.render_status(status, diagnostics, now)
     )
 }
 impl View {
@@ -23,58 +30,72 @@ impl View {
         words: &[&str],
         now: i64,
         status: &AuthStatus,
+        diagnostics: impl FnOnce() -> AdapterStatus,
     ) -> Result<Option<String>, StorageError> {
+        let diagnostics = std::cell::LazyCell::new(diagnostics);
         let view = self;
         let registry = self;
         let text = match words {
             [] => return Ok(None),
-            ["help"] => format!("{COMMAND_HELP}\n{}", view.render_status(status, now)),
+            ["help"] => format!(
+                "{COMMAND_HELP}\n{}",
+                view.render_status(status, &diagnostics, now)
+            ),
             ["list"] => {
-                let mut text = render(registry, None, status, true);
-                for pending in status.pending() {
-                    let key = DeviceKey::new("xiaomi", &pending.did);
-                    let name = registry
-                        .get(&key)
-                        .map(|physical| physical.label())
-                        .unwrap_or_else(|| pending.name.clone());
-                    text.push_str(&format!(
-                        "\n{} ({}): pending ({})",
-                        pending.did, name, pending.reason
-                    ));
+                let mut text = render(registry, None, &diagnostics, true);
+                for pending in &diagnostics.pending {
+                    text.push('\n');
+                    text.push_str(&view.pending_line(pending));
                 }
                 text
             }
             ["status"] => format!(
                 "{}\n{}",
-                render(registry, None, status, false),
-                view.render_devices(status, now, None)
+                render(registry, None, &diagnostics, false),
+                view.render_devices(status, &diagnostics, now, None)
             ),
             ["status", did] => {
                 if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
-                    let details = configuration_lines(registry, did);
-                    if details.is_empty() {
-                        invalid(registry, status, now, "Unknown device DID.")
+                    if view.contains_did(did) {
+                        let mut lines = vec![format!("{did}: not published")];
+                        lines.extend(configuration_lines(registry, did));
+                        lines.push(view.render_devices(status, &diagnostics, now, Some(did)));
+                        lines.join("\n")
+                    } else if let Some(pending) = diagnostics
+                        .pending
+                        .iter()
+                        .find(|pending| pending.did == *did)
+                    {
+                        view.pending_line(pending)
                     } else {
-                        format!(
-                            "{did}: not published\n{}\n{}",
-                            details.join("\n"),
-                            view.render_devices(status, now, Some(did))
-                        )
+                        invalid(registry, status, &diagnostics, now, "Unknown device DID.")
                     }
                 } else {
                     format!(
                         "{}\n{}",
-                        render(registry, Some(did), status, false),
-                        view.render_devices(status, now, Some(did))
+                        render(registry, Some(did), &diagnostics, false),
+                        view.render_devices(status, &diagnostics, now, Some(did))
                     )
                 }
             }
             [verb @ ("on" | "off"), did, id] => {
                 let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        &diagnostics,
+                        now,
+                        "Unknown device DID.",
+                    )));
                 };
                 let Some(function) = physical.function(id) else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown function.")));
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        &diagnostics,
+                        now,
+                        "Unknown function.",
+                    )));
                 };
                 let target = if physical.functions().len() == 1 {
                     did.to_string()
@@ -98,15 +119,28 @@ impl View {
             }
             ["mode", did, id, mode @ ("off" | "heat")] => {
                 let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        &diagnostics,
+                        now,
+                        "Unknown device DID.",
+                    )));
                 };
                 let Some(function) = physical.function(id) else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown function.")));
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        &diagnostics,
+                        now,
+                        "Unknown function.",
+                    )));
                 };
                 if !matches!(function.description().kind, FunctionKind::Heater { .. }) {
                     return Ok(Some(invalid(
                         registry,
                         status,
+                        &diagnostics,
                         now,
                         "Function does not support heating mode control.",
                     )));
@@ -134,15 +168,28 @@ impl View {
             }
             ["temperature", did, id, value] => {
                 let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown device DID.")));
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        &diagnostics,
+                        now,
+                        "Unknown device DID.",
+                    )));
                 };
                 let Some(function) = physical.function(id) else {
-                    return Ok(Some(invalid(registry, status, now, "Unknown function.")));
+                    return Ok(Some(invalid(
+                        registry,
+                        status,
+                        &diagnostics,
+                        now,
+                        "Unknown function.",
+                    )));
                 };
                 if !matches!(function.description().kind, FunctionKind::Heater { .. }) {
                     return Ok(Some(invalid(
                         registry,
                         status,
+                        &diagnostics,
                         now,
                         "Function does not support heating temperature control.",
                     )));
@@ -151,6 +198,7 @@ impl View {
                     return Ok(Some(invalid(
                         registry,
                         status,
+                        &diagnostics,
                         now,
                         "Temperature must be a whole number.",
                     )));
@@ -171,7 +219,13 @@ impl View {
                     Err(error) => format!("{target}: {error}"),
                 }
             }
-            _ => invalid(registry, status, now, "Invalid command usage."),
+            _ => invalid(
+                registry,
+                status,
+                &diagnostics,
+                now,
+                "Invalid command usage.",
+            ),
         };
         Ok(Some(text))
     }
@@ -221,7 +275,11 @@ impl Context<'_> {
                     Err(error) => format!("Sensor unbinding failed: {error}"),
                 }))
             }
-            _ => self.view().handle_words(&words, now, self.status).await,
+            _ => {
+                self.view()
+                    .handle_words(&words, now, self.status, || self.app.diagnostics())
+                    .await
+            }
         }
     }
 }

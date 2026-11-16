@@ -196,7 +196,6 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
                 "/bin/migate".into(),
                 "/data".into(),
             );
-            status.update_adapter(control.context.diagnostics());
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
             let text = terminal

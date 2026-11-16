@@ -95,16 +95,16 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
     block_on(async {
         let (_directory, store, status, registry, device, mut receiver) = heater();
         let function = device.function("heater:3").unwrap();
+        let view = support::view(&registry, &store.devices()).unwrap();
         function.observe_heater(HeaterValue::Power(false), Some(1), 1);
         function.observe_heater(HeaterValue::Temperature(25), Some(1), 1);
 
         let (result, ()) = zip(
-            handle_line(
-                &registry,
-                &store.devices(),
-                &status,
-                "temperature bath heater:3 30",
+            view.handle_words(
+                &["temperature", "bath", "heater:3", "30"],
                 0,
+                &status,
+                || panic!("accepted temperature control must not sample diagnostics"),
             ),
             async {
                 let request = next_heater(&mut receiver).await;
@@ -121,13 +121,9 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
         );
 
         let (result, ()) = zip(
-            handle_line(
-                &registry,
-                &store.devices(),
-                &status,
-                "mode bath heater:3 heat",
-                0,
-            ),
+            view.handle_words(&["mode", "bath", "heater:3", "heat"], 0, &status, || {
+                panic!("accepted mode control must not sample diagnostics")
+            }),
             async {
                 let request = next_heater(&mut receiver).await;
                 assert_eq!(request.command, HeaterCommand::Mode(HeaterMode::Heat));
@@ -143,13 +139,9 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
         );
 
         let (result, ()) = zip(
-            handle_line(
-                &registry,
-                &store.devices(),
-                &status,
-                "mode bath heater:3 off",
-                0,
-            ),
+            view.handle_words(&["mode", "bath", "heater:3", "off"], 0, &status, || {
+                panic!("accepted mode control must not sample diagnostics")
+            }),
             async {
                 let request = next_heater(&mut receiver).await;
                 assert_eq!(request.command, HeaterCommand::Mode(HeaterMode::Off));

@@ -227,7 +227,6 @@ fn transport_failure_after_fan_bytes_is_reported_as_uncertain() {
                     "/bin/migate".into(),
                     "/data".into(),
                 );
-                auth.update_adapter(status);
                 let terminal =
                     crate::terminal::bridge::Context::committed(c.publication.clone(), &auth);
                 let text = terminal

@@ -244,6 +244,113 @@ fn list_and_status_read_shared_power_and_persisted_names() {
 }
 
 #[test]
+fn command_diagnostics_are_sampled_only_for_reports() {
+    block_on(async {
+        let (_dir, store, status, registry, mut receivers) = fixture();
+        let view = support::view(&registry, &store.devices()).unwrap();
+        let samples = std::cell::Cell::new(0);
+        let diagnostics = || {
+            samples.set(samples.get() + 1);
+            support::diagnostics()
+        };
+        assert!(
+            view.handle_words(&[], 0, &status, diagnostics)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(samples.get(), 0, "empty input must not sample diagnostics");
+        for verb in ["on", "off"] {
+            let (result, ()) = future::zip(
+                view.handle_words(&[verb, "one", "outlet:2"], 0, &status, diagnostics),
+                async {
+                    next_power(&mut receivers[0])
+                        .await
+                        .unwrap()
+                        .accept()
+                        .unwrap();
+                },
+            )
+            .await;
+            assert_eq!(result.unwrap().unwrap(), "one: command accepted");
+            assert_eq!(
+                samples.get(),
+                0,
+                "accepted control must not sample diagnostics"
+            );
+        }
+        for words in [
+            vec!["list"],
+            vec!["status"],
+            vec!["status", "one"],
+            vec!["help"],
+            vec!["status", "missing"],
+            vec!["on", "one", "missing"],
+        ] {
+            let before = samples.get();
+            view.handle_words(&words, 0, &status, diagnostics)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(samples.get(), before + 1, "{words:?} must sample once");
+        }
+    });
+}
+
+#[test]
+fn committed_raw_description_stays_known_without_visible_details() {
+    block_on(async {
+        let (_dir, store, status, _registry, _receivers) = fixture();
+        let mut configuration = store.devices().load_configuration().unwrap();
+        configuration.devices.clear();
+        for source in &mut configuration.descriptions {
+            source.diagnostic = Some("retired unsupported source".into());
+        }
+        configuration.validate().unwrap();
+        let derived = configuration.derive();
+        let view = super::View {
+            current: std::rc::Rc::new(crate::app::EffectiveConfiguration {
+                configuration,
+                derived: derived.into(),
+                entries: Vec::new(),
+                published: DeviceRegistry::new(),
+            }),
+            pending: true,
+            failure: Some("withdrawal save failed".into()),
+            accessible_descriptions: Default::default(),
+            configurable_devices: Default::default(),
+        };
+        let mut diagnostics = support::diagnostics();
+        for pending in [false, true] {
+            if pending {
+                diagnostics
+                    .pending
+                    .push(crate::xiaomi::adapter::PendingDevice {
+                        did: "one".into(),
+                        name: "Retired source".into(),
+                        reason: "description unavailable".into(),
+                    });
+            }
+            let text = view
+                .handle_words(&["status", "one"], 0, &status, || diagnostics.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(text.starts_with("one: not published\n"), "{text}");
+            assert!(!text.contains("outlet:2"), "{text}");
+            assert!(!text.contains("recognition issue"), "{text}");
+            assert!(!text.contains(": pending ("), "{text}");
+        }
+        let unknown = view
+            .handle_words(&["status", "missing"], 0, &status, || diagnostics.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(unknown.starts_with("Unknown device DID.\n"), "{unknown}");
+    });
+}
+
+#[test]
 fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
     use crate::{
         device::{LightMode, LightPatch, Rgb},
@@ -528,7 +635,7 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             .unwrap()
             .local_status()
             .unwrap();
-        status.update_adapter(crate::xiaomi::adapter::AdapterStatus {
+        let diagnostics = crate::xiaomi::adapter::AdapterStatus {
             auth: report,
             gateway: crate::xiaomi::adapter::GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
@@ -539,18 +646,32 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             }],
             routing: Default::default(),
             devices: Vec::new(),
-        });
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        };
+        let list = support::handle_line_with_diagnostics(
+            &registry,
+            &store.devices(),
+            &status,
+            diagnostics.clone(),
+            "list",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(list.contains("Home edited name"));
         assert!(!list.contains("New cloud name"));
         assert!(list.contains("subscription rejected"));
-        let help = handle_line(&registry, &store.devices(), &status, "help", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let help = support::handle_line_with_diagnostics(
+            &registry,
+            &store.devices(),
+            &status,
+            diagnostics.clone(),
+            "help",
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(help.contains("FUNCTION"));
         assert!(help.contains("list"));
         assert!(help.contains("on DID FUNCTION"));
@@ -566,7 +687,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             .unwrap()
             .local_status()
             .unwrap();
-        status.update_adapter(AdapterStatus {
+        let diagnostics = AdapterStatus {
             auth: report,
             gateway: GatewayStatus::Connected("hub".into()),
             catalog_problem: None,
@@ -599,11 +720,12 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
                     commands: Vec::new(),
                 })
                 .collect(),
-        });
-        let selected = handle_line(
+        };
+        let selected = support::handle_line_with_diagnostics(
             &registry,
             &store.devices(),
             &status,
+            diagnostics.clone(),
             "status multi",
             1_700_000_000,
         )
@@ -616,10 +738,11 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(!selected.contains("one (name one)"), "{selected}");
         assert!(selected.contains("Gateway: connected (hub)."), "{selected}");
         assert!(selected.contains("Routing: fallback-first"), "{selected}");
-        let all = handle_line(
+        let all = support::handle_line_with_diagnostics(
             &registry,
             &store.devices(),
             &status,
+            diagnostics.clone(),
             "status",
             1_700_000_000,
         )
@@ -628,17 +751,31 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         .unwrap();
         assert!(all.contains("one routing:"));
         assert!(all.contains("multi routing:"));
-        let list = handle_line(&registry, &store.devices(), &status, "list", 1_700_000_000)
-            .await
-            .unwrap()
-            .unwrap();
+        let list = support::handle_line_with_diagnostics(
+            &registry,
+            &store.devices(),
+            &status,
+            diagnostics.clone(),
+            "list",
+            1_700_000_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(list.contains("one (name one)"));
         assert!(!list.contains("routing:"));
         assert!(!list.contains("Selected control:"));
-        let help = handle_line(&registry, &store.devices(), &status, "help", 1_700_000_000)
-            .await
-            .unwrap()
-            .unwrap();
+        let help = support::handle_line_with_diagnostics(
+            &registry,
+            &store.devices(),
+            &status,
+            diagnostics.clone(),
+            "help",
+            1_700_000_000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(help.contains("Available commands:"));
         assert!(help.contains("Routing: fallback-first"));
         assert!(!help.contains("one routing:"));

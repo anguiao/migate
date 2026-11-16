@@ -1127,11 +1127,15 @@ fn v13_offline_cold_start_keeps_identity_functions_and_reads_a_new_baseline() {
 
 fn status_text(c: &Control) -> String {
     let status = crate::terminal::AuthStatus::new(
-        c.context.auth_report().clone(),
+        crate::xiaomi::auth::AuthReport::for_test(
+            crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+            None,
+            crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+            0,
+        ),
         "/bin/migate".into(),
         "/data".into(),
     );
-    status.update_adapter(c.context.diagnostics());
     let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
     block_on(terminal.handle_line(&format!("status {DID}"), 0))
         .unwrap()
@@ -1161,6 +1165,35 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
 
         // Remove both eligible group paths without yielding to a background
         // re-authentication: the current availability must still be visible.
+        let direct = c.context
+            .directory
+            .borrow_mut()
+            .devices
+            .get_mut(DID)
+            .unwrap()
+            .lan
+            .active
+            .take();
+        c.context.credentials.borrow_mut().pause_http();
+        work(&c).reconcile_state_reads(&c.context);
+        assert_eq!(
+            heater.snapshot().heater().unwrap().temperature_source,
+            TemperatureSourceState::Unavailable
+        );
+        let text = status_text(&c);
+        assert!(
+            text.contains(
+                "Legacy feedback group: candidates none; selected read none; last observed direct; settled; pending false."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Current temperature: unknown (built-in source unavailable)"),
+            "{text}"
+        );
+        assert!(text.contains("Last reading (diagnostic only): 26.50 °C"), "{text}");
+        assert!(text.contains("temperature: raw 26.5."), "{text}");
+
         c.context
             .directory
             .borrow_mut()
@@ -1168,31 +1201,17 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
             .get_mut(DID)
             .unwrap()
             .lan
-            .active = None;
-        c.context.credentials.borrow_mut().pause_http();
+            .active = direct;
+        c.context.credentials.borrow_mut().resume_http();
         work(&c).reconcile_state_reads(&c.context);
-        assert_eq!(
-            heater.snapshot().heater().unwrap().temperature_source,
-            TemperatureSourceState::Unavailable
+        let text = status_text(&c);
+        assert!(
+            text.contains(
+                "Legacy feedback group: candidates direct; selected read direct; last observed direct; settled; pending false."
+            ),
+            "{text}"
         );
-        let status = c
-            .context
-            .diagnostics()
-            .devices
-            .into_iter()
-            .find(|device| device.did == DID)
-            .unwrap();
-        let shared = status.shared_feedback.unwrap();
-        assert_eq!(shared.selected_read, None);
-        assert_eq!(shared.source, Some(PathKind::Direct));
-        assert_eq!(
-            shared
-                .temperature
-                .as_ref()
-                .and_then(|temperature| temperature.value.as_f64()),
-            Some(26.5),
-            "the last valid raw value remains diagnostic-only"
-        );
+        assert!(text.contains("temperature: raw 26.5."), "{text}");
     }));
 }
 

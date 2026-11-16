@@ -81,7 +81,6 @@ fn status_text(c: &Control) -> String {
         "/bin/migate".into(),
         "/data".into(),
     );
-    status.update_adapter(c.context.diagnostics());
     let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
     block_on(terminal.handle_line(&format!("status {DID}"), 0))
         .unwrap()

@@ -368,6 +368,36 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
                     .cloned()
                     .is_none()
             );
+            let status = crate::terminal::AuthStatus::new(
+                crate::xiaomi::auth::AuthReport::for_test(
+                    crate::xiaomi::auth::AuthenticationState::NotSignedIn,
+                    None,
+                    crate::xiaomi::auth::CertificateUpdate::NotNeeded,
+                    0,
+                ),
+                "/bin/migate".into(),
+                "/data".into(),
+            );
+            let terminal =
+                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
+            let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+            let pending = list
+                .lines()
+                .find(|line| line.starts_with("multi (") && line.contains(": pending ("))
+                .unwrap_or_else(|| panic!("missing pending device: {list}"));
+            assert!(pending.contains("exhausted"), "{pending}");
+            let detail = terminal
+                .handle_line("status multi", 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(detail, pending);
+            let unknown = terminal
+                .handle_line("status unknown", 0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(unknown.starts_with("Unknown device DID.\n"), "{unknown}");
             function(&control.context.registry, "one", "outlet:2")
                 .execute(Command::On)
                 .await

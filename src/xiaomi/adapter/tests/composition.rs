@@ -49,7 +49,6 @@ fn terminal_describes_optional_recognition_failure_separately_from_connectivity(
                     "/bin/migate".into(),
                     "/data".into(),
                 );
-                status.update_adapter(control.context.diagnostics());
                 let text = crate::terminal::bridge::Context::committed(
                     control.publication.clone(),
                     &status,
