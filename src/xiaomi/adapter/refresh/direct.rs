@@ -10,8 +10,9 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
     loop {
         let listener = context.refresh_changed.listen();
         let changed = context.changed.listen();
-        retire(&context);
         let mut candidates = works(&context);
+        let routes = read_routes(&context, &candidates);
+        retire(&candidates, &routes);
         if let Some(last) = &last_did {
             let next = candidates
                 .iter()
@@ -39,6 +40,9 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                 if in_flight == DIRECT_READ_LIMIT {
                     break;
                 }
+                let Some(routes) = routes.get(&work.key.id) else {
+                    continue;
+                };
                 let refresh = work.refresh.borrow();
                 if refresh
                     .inflight
@@ -49,7 +53,7 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                 }
                 let due = refresh.next_due(kind, |id, input| {
                     matches!(
-                        context.read_path_for_input(&work.key.id, id, input),
+                        routes.read_path_for_input(id, input),
                         Some(ControlPath::Direct(_))
                     )
                 });
@@ -65,7 +69,7 @@ pub(in crate::xiaomi::adapter) async fn direct(context: Rc<Context>) -> Result<(
                     due_at = Some(due_at.map_or(due, |previous: Duration| previous.min(due)));
                     continue;
                 }
-                if let Some((read, flight)) = reserve(&work, &context, ReadQueue::Direct, kind) {
+                if let Some((read, flight)) = reserve(&work, routes, now, ReadQueue::Direct, kind) {
                     *next = now + ROUND_DELAY;
                     in_flight += 1;
                     last_did = Some(work.key.id.clone());

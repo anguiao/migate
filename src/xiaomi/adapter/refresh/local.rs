@@ -13,35 +13,40 @@ pub(in crate::xiaomi::adapter) async fn local(
     let mut last_did: Option<String> = None;
     loop {
         let listener = context.refresh_changed.listen();
-        retire(&context);
-        let candidates = works(&context);
-        let ready = candidates
-            .iter()
-            .filter_map(|work| {
-                work.refresh.borrow().next_due(ReadKind::Any, |id, _input| {
-                    context.local_function_reads_allowed(&work.key.id, id, &handle)
+        let ready = {
+            let candidates = works(&context);
+            let routes = read_routes(&context, &candidates);
+            retire(&candidates, &routes);
+            candidates
+                .iter()
+                .filter_map(|work| {
+                    let routes = routes.get(&work.key.id)?;
+                    work.refresh.borrow().next_due(ReadKind::Any, |id, input| {
+                        matches!(routes.read_path_for_input(id, input), Some(ControlPath::Local(selected)) if selected.same_connection(&handle))
+                    })
                 })
-            })
-            .min();
+                .min()
+        };
         let Some(ready) = ready else {
             next_round = None;
             listener.await;
             continue;
         };
+        let next = context.clock.now() + ROUND_DELAY;
         let deadline = next_round
-            .map_or(context.clock.now() + ROUND_DELAY, |scheduled: Duration| {
-                scheduled.min(context.clock.now() + ROUND_DELAY)
-            })
+            .map_or(next, |scheduled: Duration| scheduled.min(next))
             .max(ready);
         next_round = Some(deadline);
         future::or(context.clock.wait_until(deadline), async {
             listener.await;
         })
         .await;
-        if context.clock.now() < deadline {
+        let now = context.clock.now();
+        if now < deadline {
             continue;
         }
         let mut candidates = works(&context);
+        let routes = read_routes(&context, &candidates);
         if let Some(last) = &last_did {
             let next = candidates
                 .iter()
@@ -52,15 +57,19 @@ pub(in crate::xiaomi::adapter) async fn local(
         let mut last = None;
         let mut selected = BTreeSet::new();
         let mut round = Vec::new();
+        let current_local = context.current_local(&handle);
         for kind in [ReadKind::Foreground, ReadKind::Periodic] {
             for work in &candidates {
-                if round.len() == LOCAL_READ_LIMIT || !context.current_local(&handle) {
+                if round.len() == LOCAL_READ_LIMIT || !current_local {
                     break;
                 }
                 if selected.contains(&work.key.id) {
                     continue;
                 }
-                if let Some((read, flight)) = reserve(work, &context, ReadQueue::Local, kind) {
+                let Some(routes) = routes.get(&work.key.id) else {
+                    continue;
+                };
+                if let Some((read, flight)) = reserve(work, routes, now, ReadQueue::Local, kind) {
                     last = Some(work.key.id.clone());
                     selected.insert(work.key.id.clone());
                     round.push(read_one(work.clone(), read, flight, context.clone()));

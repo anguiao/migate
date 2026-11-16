@@ -17,7 +17,9 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
         let listener = context.refresh_changed.listen();
         let changed = context.changed.listen();
         let credentials = context.credentials_changed.listen();
-        retire(&context);
+        let mut candidates = works(&context);
+        let routes = read_routes(&context, &candidates);
+        retire(&candidates, &routes);
         let identity = context.mijia_path().map(|path| (path.uid, path.generation));
         {
             let mut poll = poll.borrow_mut();
@@ -29,7 +31,6 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
             }
         }
 
-        let mut candidates = works(&context);
         if let Some(last) = &last_did {
             let next = candidates
                 .iter()
@@ -55,7 +56,10 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
                 if device_flights >= CLOUD_DEVICE_READ_LIMIT {
                     continue;
                 }
-                let Some(due) = cloud_due(work, &context, kind, &blocked) else {
+                let Some(routes) = routes.get(&work.key.id) else {
+                    continue;
+                };
+                let Some(due) = cloud_due(work, routes, kind, &blocked) else {
                     continue;
                 };
                 let mut due = due.max(*next_round.get(&work.key.id).unwrap_or(&Duration::ZERO));
@@ -65,7 +69,7 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
                 if due > now {
                     continue;
                 }
-                let Some((reads, flight)) = reserve_cloud_batch(work, &context, kind, &blocked)
+                let Some((reads, flight)) = reserve_cloud_batch(work, routes, now, kind, &blocked)
                 else {
                     continue;
                 };
@@ -98,15 +102,16 @@ pub(in crate::xiaomi::adapter) async fn cloud(context: Rc<Context>) -> Result<()
             candidates
                 .iter()
                 .filter_map(|work| {
+                    let routes = routes.get(&work.key.id)?;
                     let (device_flights, blocked) = cloud_flights(work);
                     if device_flights >= CLOUD_DEVICE_READ_LIMIT {
                         return None;
                     }
                     let gate = *next_round.get(&work.key.id).unwrap_or(&Duration::ZERO);
-                    let foreground = cloud_due(work, &context, ReadKind::Foreground, &blocked)
+                    let foreground = cloud_due(work, routes, ReadKind::Foreground, &blocked)
                         .map(|due| due.max(gate));
                     let poll = poll.borrow();
-                    let periodic = cloud_due(work, &context, ReadKind::Periodic, &blocked)
+                    let periodic = cloud_due(work, routes, ReadKind::Periodic, &blocked)
                         .map(|due| due.max(gate).max(poll.next));
                     foreground.into_iter().chain(periodic).min()
                 })
@@ -151,14 +156,14 @@ fn cloud_flights(work: &DeviceWork) -> (usize, BTreeSet<String>) {
 
 fn cloud_due(
     work: &DeviceWork,
-    context: &Context,
+    routes: &DeviceRoutes,
     kind: ReadKind,
     blocked: &BTreeSet<String>,
 ) -> Option<Duration> {
     work.refresh.borrow().next_due(kind, |id, input| {
         !blocked.contains(id)
             && matches!(
-                context.read_path_for_input(&work.key.id, id, input),
+                routes.read_path_for_input(id, input),
                 Some(ControlPath::Cloud(_))
             )
     })
@@ -166,20 +171,20 @@ fn cloud_due(
 
 fn reserve_cloud_batch(
     work: &Rc<DeviceWork>,
-    context: &Context,
+    routes: &DeviceRoutes,
+    now: Duration,
     kind: ReadKind,
     blocked: &BTreeSet<String>,
 ) -> Option<(Vec<Refresh>, Rc<ReadFlight>)> {
     if work.life.is_closed() {
         return None;
     }
-    let now = context.clock.now();
     let mut state = work.refresh.borrow_mut();
     let (read, flight) = state.reserve(
         now,
         |id, input| {
             (!blocked.contains(id))
-                .then(|| context.read_path_for_input(&work.key.id, id, input))
+                .then(|| routes.read_path_for_input(id, input).cloned())
                 .flatten()
         },
         ReadQueue::Cloud,

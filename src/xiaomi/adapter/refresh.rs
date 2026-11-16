@@ -1,7 +1,7 @@
 use super::{
     model::AdapterError,
     observations::{PropertyKey, input_key, key},
-    routing::ControlPath,
+    routing::{ControlPath, DeviceRoutes},
     state::{Context, Lifetime},
     work::DeviceWork,
 };
@@ -401,10 +401,11 @@ impl Refresh {
     }
 }
 impl ReadFlight {
+    fn matches_path(&self, path: Option<&ControlPath>) -> bool {
+        path.is_some_and(|path| self.path.same(path))
+    }
     fn current(&self, context: &Context, did: &str, id: &str, input: ReadInput) -> bool {
-        context
-            .read_path_for_input(did, id, input)
-            .is_some_and(|path| self.path.same(&path))
+        self.matches_path(context.read_path_for_input(did, id, input).as_ref())
     }
 }
 fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
@@ -431,43 +432,41 @@ pub(super) fn cancel_function(work: &DeviceWork, id: &str) {
     work.refresh_changed.notify(usize::MAX);
 }
 /// A route change retires only reads whose captured route actually ended.
-pub(super) fn reconcile_state_read(
-    work: &DeviceWork,
-    context: &Context,
-    id: &str,
-    binding: PropertyBinding,
-    available: bool,
-) {
-    reconcile_input(work, context, id, ReadInput::Property(binding), available);
-}
-
-pub(super) fn reconcile_input(
-    work: &DeviceWork,
-    context: &Context,
-    id: &str,
-    input: ReadInput,
-    available: bool,
-) {
+fn reconcile_input(work: &DeviceWork, id: &str, input: ReadInput, path: Option<&ControlPath>) {
     let current = {
         let refresh = work.refresh.borrow();
         let flight = refresh.inflight.get(&input_key(id, input));
-        if let Some(flight) = flight
-            && !flight.current(context, &work.key.id, id, input)
-        {
+        let current = flight.is_some_and(|flight| flight.matches_path(path));
+        if !current && let Some(flight) = flight {
             flight.life.close();
         }
-        flight.is_some_and(|flight| flight.current(context, &work.key.id, id, input))
+        current
     };
-    if available && !current {
+    if path.is_some() && !current {
         work.refresh_input(id, input);
     }
     work.refresh_changed.notify(usize::MAX);
 }
-fn retire(context: &Context) {
-    for work in works(context) {
-        let did = &work.key.id;
+/// Capture active read decisions for one synchronous scheduling pass.
+fn read_routes(
+    context: &Context,
+    candidates: &[Rc<DeviceWork>],
+) -> BTreeMap<String, Rc<DeviceRoutes>> {
+    candidates
+        .iter()
+        .filter(|work| {
+            let state = work.refresh.borrow();
+            !work.life.is_closed() && (!state.pending.is_empty() || !state.inflight.is_empty())
+        })
+        .map(|work| (work.key.id.clone(), context.device_routes(&work.key.id)))
+        .collect()
+}
+fn retire(candidates: &[Rc<DeviceWork>], routes: &BTreeMap<String, Rc<DeviceRoutes>>) {
+    for work in candidates {
         for ((id, input), flight) in &work.refresh.borrow().inflight {
-            if work.life.is_closed() || !flight.current(context, did, id, *input) {
+            if work.life.is_closed()
+                || !flight.matches_path(routes[&work.key.id].read_path_for_input(id, *input))
+            {
                 flight.life.close();
             }
         }
@@ -475,7 +474,8 @@ fn retire(context: &Context) {
 }
 fn reserve(
     work: &Rc<DeviceWork>,
-    context: &Context,
+    routes: &DeviceRoutes,
+    now: Duration,
     queue: ReadQueue,
     kind: ReadKind,
 ) -> Option<(Refresh, Rc<ReadFlight>)> {
@@ -483,17 +483,8 @@ fn reserve(
         return None;
     }
     work.refresh.borrow_mut().reserve(
-        context.clock.now(),
-        |id, input| {
-            let path = context.read_path_for_input(&work.key.id, id, input)?;
-            if let ControlPath::Local(handle) = &path
-                && !context.local_function_reads_allowed(&work.key.id, id, handle)
-            {
-                None
-            } else {
-                Some(path)
-            }
-        },
+        now,
+        |id, input| routes.read_path_for_input(id, input).cloned(),
         queue,
         kind,
     )

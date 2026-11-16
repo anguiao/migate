@@ -20,14 +20,16 @@ fn schedule_polls(
     now: Duration,
 ) -> Option<Duration> {
     let mut eligible = BTreeSet::new();
+    let routes = context.routing_evaluation_at(context.clock.unix_now());
     for work in candidates {
         let did = &work.key.id;
-        if work.life.is_closed() || context.is_virtual_group(did) {
+        let routes = &routes.devices[did];
+        if work.life.is_closed() || routes.virtual_group {
             continue;
         }
         let mut groups = BTreeMap::<(String, Duration), Vec<PropertyBinding>>::new();
         for function in work.native.device().functions() {
-            if context.read_path_for(did, function.id()).is_none() {
+            if routes.read_path_for(function.id()).is_none() {
                 continue;
             }
             for binding in function.observation_bindings().into_iter().chain(
@@ -58,9 +60,8 @@ fn schedule_polls(
             }
         }
         if work.native.plan().shared_feedback().is_some()
-            && context
+            && routes
                 .read_path_for_input(
-                    did,
                     crate::xiaomi::capability::SHARED_FEEDBACK_CHANNEL,
                     crate::xiaomi::capability::ReadInput::SharedFeedback,
                 )
@@ -93,7 +94,7 @@ fn schedule_polls(
             }
         }
         if let Some(battery) = work.native.device().battery()
-            && context.read_path_for(did, "battery").is_some()
+            && routes.read_path_for("battery").is_some()
         {
             groups
                 .entry(("battery".into(), POLL_INTERVAL))
@@ -126,14 +127,13 @@ fn schedule_polls(
     }
     polls.retain(|key, _| eligible.contains(key));
     for work in candidates {
+        let routes = &routes.devices[&work.key.id];
         work.refresh.borrow_mut().pending.retain(|read| {
             !read.periodic
                 || !work.life.is_closed()
-                    && !context.is_virtual_group(&work.key.id)
+                    && !routes.virtual_group
                     && work.contains_input(&read.id, read.input)
-                    && context
-                        .read_path_for_input(&work.key.id, &read.id, read.input)
-                        .is_some()
+                    && routes.read_path_for_input(&read.id, read.input).is_some()
         });
     }
     polls.values().map(|poll| poll.due).min()

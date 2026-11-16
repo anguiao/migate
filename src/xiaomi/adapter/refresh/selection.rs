@@ -36,6 +36,7 @@ impl RefreshState {
 
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn reconcile_state_reads(&self, context: &Context) {
+        let routes = context.device_routes(&self.key.id);
         for function in self.native.device().functions().iter().filter(|function| {
             function.state().is_some()
                 || function.curtain().is_some()
@@ -45,11 +46,11 @@ impl DeviceWork {
                 || function.relay_mode().is_some()
         }) {
             let id = function.id();
-            let path = context.read_path_for(&self.key.id, id);
+            let path = routes.read_path_for(id);
             let changed = self
                 .refresh
                 .borrow_mut()
-                .select_function_path(id, path.clone());
+                .select_function_path(id, path.cloned());
             if changed {
                 self.current_sink().require_fan_power_read(id);
                 if function
@@ -68,29 +69,28 @@ impl DeviceWork {
                         .heater_source_changed();
                 }
                 for binding in function.observation_bindings() {
-                    super::reconcile_state_read(self, context, id, binding, path.is_some());
+                    super::reconcile_input(self, id, ReadInput::Property(binding), path);
                 }
             }
         }
-        self.reconcile_shared_feedback(context);
+        self.reconcile_shared_feedback(&routes);
     }
 
-    pub(in crate::xiaomi::adapter) fn reconcile_shared_feedback(&self, context: &Context) {
+    fn reconcile_shared_feedback(&self, routes: &DeviceRoutes) {
         if !self.shared_feedback_plan() {
             return;
         }
-        let path = context.shared_feedback_read_path(&self.key.id);
+        let path = routes.read_path_for_input(SHARED_FEEDBACK_CHANNEL, ReadInput::SharedFeedback);
         let available = path.is_some();
-        if !self.refresh.borrow_mut().select_shared_path(path) {
+        if !self.refresh.borrow_mut().select_shared_path(path.cloned()) {
             return;
         }
         self.set_shared_temperature_source_available(available);
         super::reconcile_input(
             self,
-            context,
             SHARED_FEEDBACK_CHANNEL,
             ReadInput::SharedFeedback,
-            available,
+            path,
         );
     }
 }

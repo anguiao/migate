@@ -1,5 +1,5 @@
 use super::{state::Context, work::DeviceWork};
-use crate::xiaomi::{central::SessionHandle, lan::Client};
+use crate::xiaomi::{capability::ReadInput, central::SessionHandle, lan::Client};
 use std::rc::Rc;
 
 mod availability;
@@ -59,6 +59,17 @@ pub enum PathPriority {
     LocalFirst,
     CloudFirst,
 }
+impl DeviceRoutes {
+    pub(super) fn read_path_for(&self, id: &str) -> Option<&ControlPath> {
+        self.functions.get(id)?.read.selected.as_ref()
+    }
+    pub(super) fn read_path_for_input(&self, id: &str, input: ReadInput) -> Option<&ControlPath> {
+        match input {
+            ReadInput::Property(_) => self.read_path_for(id),
+            ReadInput::SharedFeedback => self.shared_feedback.as_ref()?.selected.as_ref(),
+        }
+    }
+}
 impl Context {
     pub(super) fn routing_evaluation_at(&self, now: i64) -> RoutingEvaluation {
         evaluation::evaluate(self, now)
@@ -116,32 +127,17 @@ impl Context {
             .selected
             .clone()
     }
-    pub(super) fn shared_feedback_read_path(&self, did: &str) -> Option<ControlPath> {
-        self.device_routes(did)
-            .shared_feedback
-            .as_ref()?
-            .selected
-            .clone()
-    }
     pub(super) fn read_path_for_input(
         &self,
         did: &str,
         id: &str,
-        input: crate::xiaomi::capability::ReadInput,
+        input: ReadInput,
     ) -> Option<ControlPath> {
-        match input {
-            crate::xiaomi::capability::ReadInput::Property(_) => self.read_path_for(did, id),
-            crate::xiaomi::capability::ReadInput::SharedFeedback => {
-                self.shared_feedback_read_path(did)
-            }
-        }
+        self.device_routes(did)
+            .read_path_for_input(id, input)
+            .cloned()
     }
     pub(super) fn read_path_for(&self, did: &str, id: &str) -> Option<ControlPath> {
-        self.device_routes(did)
-            .functions
-            .get(id)?
-            .read
-            .selected
-            .clone()
+        self.device_routes(did).read_path_for(id).cloned()
     }
 }

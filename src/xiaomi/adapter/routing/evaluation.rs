@@ -388,7 +388,7 @@ impl<'a> Facts<'a> {
                     .find(|function| function.id() == id);
                 let sensor = function.is_some_and(|function| function.kind().is_read_only())
                     || id == "battery" && work.native.device().battery().is_some();
-                let direct = if profile.is_some_and(|profile| profile.target() != id) {
+                let function_direct = if profile.is_some_and(|profile| profile.target() != id) {
                     Err("committed direct protocol does not support this function".into())
                 } else {
                     direct.clone()
@@ -398,7 +398,7 @@ impl<'a> Facts<'a> {
                         Candidates::unavailable("function is read-only")
                     } else {
                         Candidates {
-                            direct: direct.clone(),
+                            direct: function_direct.clone(),
                             ..candidates(cloud_http.clone())
                         }
                     },
@@ -411,7 +411,7 @@ impl<'a> Facts<'a> {
                 );
                 let read = RouteChoice::new(
                     Candidates {
-                        direct,
+                        direct: function_direct,
                         ..candidates(if sensor {
                             cloud_sensor_http.clone()
                         } else {
@@ -432,7 +432,7 @@ impl<'a> Facts<'a> {
                         RouteChoice::new(
                             Candidates {
                                 hub: Err("low speed has no hub operation".into()),
-                                direct: candidates(cloud_http.clone()).direct,
+                                direct: direct.clone(),
                                 cloud: if speed.cloud_action.is_some() {
                                     cloud_http.clone()
                                 } else {
