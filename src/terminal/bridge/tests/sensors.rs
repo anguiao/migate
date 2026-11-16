@@ -65,7 +65,7 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
             .observe_measurement(45.0, None, 1_700_000_120)
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "status sensor", 0)
+        let list = handle_line(&registry, &store.devices(), &status, "status sensor")
             .await
             .unwrap()
             .unwrap();
@@ -83,7 +83,7 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
         let result = terminal_command(&physical, "on").await.unwrap();
         assert!(result.contains("does not support"), "{result}");
         for line in ["off sensor temperature", "off sensor humidity"] {
-            let result = handle_line(&registry, &store.devices(), &status, line, 0)
+            let result = handle_line(&registry, &store.devices(), &status, line)
                 .await
                 .unwrap()
                 .unwrap();
@@ -128,7 +128,7 @@ fn status_shows_shared_battery_value_and_separate_times() {
             .observe_measurement(21.5, Some(1_700_000_100), 1_700_000_110)
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "status sensor", 0)
+        let list = handle_line(&registry, &store.devices(), &status, "status sensor")
             .await
             .unwrap()
             .unwrap();
@@ -194,7 +194,6 @@ fn measurement_status_shows_native_ppm_and_lux_with_independent_times() {
                 &store.devices(),
                 &status,
                 &format!("status {id}"),
-                0,
             )
             .await
             .unwrap()

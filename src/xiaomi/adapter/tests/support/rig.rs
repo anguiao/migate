@@ -107,6 +107,7 @@ pub(in super::super) struct Rig {
 pub(in super::super) struct Control {
     pub(in super::super) uid: String,
     pub(in super::super) publication: Rc<crate::app::App>,
+    terminal_status: crate::terminal::AuthStatus,
     pub(in super::super) ready: Option<TopologyReady>,
     pub(in super::super) store: Store,
     pub(in super::super) context: Rc<crate::xiaomi::adapter::state::Context>,
@@ -832,10 +833,16 @@ impl Rig {
             self.driver.run().await?;
             future::pending::<Result<(), AdapterError>>().await
         };
+        let terminal_status = crate::terminal::AuthStatus::new(
+            context.credentials.borrow().report(clock.wall()),
+            "/bin/migate".into(),
+            "/data".into(),
+        );
         let testing = test(Control {
             uid: self.uid.clone(),
             ready: Some(self.ready),
             publication: publication.clone(),
+            terminal_status,
             cloud_client: self.source.cloud.clone(),
             store: self.store,
             context,
@@ -878,6 +885,10 @@ impl Rig {
     }
 }
 impl Control {
+    pub(in super::super) fn terminal(&self) -> crate::terminal::bridge::Context<'_> {
+        crate::terminal::bridge::Context::committed(self.publication.clone(), &self.terminal_status)
+    }
+
     pub(in super::super) fn reopen_adapter(&self) -> (XiaomiAdapter, TopologyReady) {
         TestNetwork::new(None)
             .build(

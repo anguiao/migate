@@ -10,15 +10,10 @@ fn terminal_controls_hidden_member_without_publishing_or_redirecting_it() {
         assert!(!current.derived.published.contains(&member));
         assert!(current.derived.visible_functions(&member).is_empty());
         let before = current.configuration.clone();
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
+        let terminal = c.terminal();
         let light = function(&c.context.registry, "member-a", "light:2");
         for command in ["list", "status member-a"] {
-            let report = terminal.handle_line(command, 0).await.unwrap().unwrap();
+            let report = terminal.handle_line(command).await.unwrap().unwrap();
             assert!(report.contains("Matter: hidden or reserved;"), "{report}");
             assert!(
                 report.contains(&format!("light:2 ({}): on", light.description().label)),
@@ -29,7 +24,7 @@ fn terminal_controls_hidden_member_without_publishing_or_redirecting_it() {
         c.cloud.lock().unwrap().numeric_writes.clear();
         for command in ["off member-a light:2", "on member-a light:2"] {
             assert_eq!(
-                terminal.handle_line(command, 0).await.unwrap().unwrap(),
+                terminal.handle_line(command).await.unwrap().unwrap(),
                 "member-a: command accepted"
             );
         }

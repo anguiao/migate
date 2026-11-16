@@ -70,16 +70,7 @@ fn cloud_rig() -> (Rig, Async<TcpListener>, Rc<CloudPeer>) {
 }
 
 async fn terminal(c: &Control, command: &str) -> String {
-    let status = crate::terminal::AuthStatus::new(
-        c.context.diagnostics().auth.clone(),
-        "/bin/migate".into(),
-        "/data".into(),
-    );
-    crate::terminal::bridge::Context::committed(c.publication.clone(), &status)
-        .handle_line(command, 0)
-        .await
-        .unwrap()
-        .unwrap()
+    c.terminal().handle_line(command).await.unwrap().unwrap()
 }
 
 mod cloud_batch;

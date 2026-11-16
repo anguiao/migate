@@ -383,15 +383,9 @@ fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
             let last = device.commands[0].last.as_ref().unwrap();
             assert_eq!(last.actual_path, Some(PathKind::Direct));
             assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
-            let auth = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &auth);
+            let terminal = control.terminal();
             let text = terminal
-                .handle_line(&format!("status {did}"), 0)
+                .handle_line(&format!("status {did}"))
                 .await
                 .unwrap()
                 .unwrap();

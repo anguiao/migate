@@ -189,6 +189,18 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                     .unwrap();
                 let before = control.context.diagnostics();
                 assert_eq!(before.devices[0].selected_control, Some(PathKind::Local));
+                let auth = crate::terminal::AuthStatus::new(
+                    before.auth.clone(),
+                    "/bin/migate".into(),
+                    "/data".into(),
+                );
+                let terminal =
+                    crate::terminal::bridge::Context::committed(control.publication.clone(), &auth);
+                let report = terminal.handle_line("status").await.unwrap().unwrap();
+                assert!(
+                    report.contains("Gateway certificate: valid until"),
+                    "{report}"
+                );
                 let previous_reason = control.context.directory.borrow().devices["one"]
                     .last_switch_reason
                     .clone();
@@ -234,18 +246,7 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                 assert!(poll_once(refresh_changed).await.is_none());
                 assert!(poll_once(credentials_changed).await.is_none());
 
-                let auth = crate::terminal::AuthStatus::new(
-                    before.auth.clone(),
-                    "/bin/migate".into(),
-                    "/data".into(),
-                );
-                let terminal =
-                    crate::terminal::bridge::Context::committed(control.publication.clone(), &auth);
-                let report = terminal
-                    .handle_line("status", expiry - 1)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let report = terminal.handle_line("status").await.unwrap().unwrap();
                 assert!(
                     report.contains("Gateway certificate: expired at"),
                     "{report}"

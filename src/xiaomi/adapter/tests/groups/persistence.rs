@@ -381,8 +381,8 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             "/data".into(),
         );
         let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
-        let help = terminal.handle_line("help", 0).await.unwrap().unwrap();
+        let list = terminal.handle_line("list").await.unwrap().unwrap();
+        let help = terminal.handle_line("help").await.unwrap().unwrap();
         assert!(help.contains(&format!(
             "Configuration: root version {}.",
             c.publication.current().configuration.root_version
@@ -395,11 +395,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             list.contains("Group group-1 (virtual): published."),
             "{list}"
         );
-        let detail = terminal
-            .handle_line("status one", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let detail = terminal.handle_line("status one").await.unwrap().unwrap();
         assert!(
             detail.contains("Group group-1 (virtual): published."),
             "{detail}"
@@ -435,7 +431,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             group_before.configuration_version + 1
         );
         until(|| c.publication.current().published.get(&one).is_some()).await;
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+        let list = terminal.handle_line("list").await.unwrap().unwrap();
         assert!(
             list.contains("group-1 (native group): not published (confirmed empty relation)."),
             "{list}"
@@ -508,7 +504,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             "/data".into(),
         );
         let terminal = crate::terminal::bridge::Context::committed(Rc::new(opened), &status);
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+        let list = terminal.handle_line("list").await.unwrap().unwrap();
         assert!(
             list.contains("group-1 (native group): not published (native group withdrawn)."),
             "{list}"

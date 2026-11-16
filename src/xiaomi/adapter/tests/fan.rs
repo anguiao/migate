@@ -309,17 +309,12 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
             .await;
             assert_eq!(fan(control).speed.value, None);
             assert_eq!(fan(control).swing.value, None);
-            let status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let result =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &status)
-                    .handle_line("status one", 0)
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let result = control
+                .terminal()
+                .handle_line("status one")
+                .await
+                .unwrap()
+                .unwrap();
             for expected in [
                 "Power: on",
                 "Native mode: 1",
@@ -444,7 +439,7 @@ fn fan_first_failed_read_is_reported_until_automatic_retry_succeeds() {
                     control.publication.clone(),
                     &status,
                 )
-                .handle_line(command, 0)
+                .handle_line(command)
                 .await
                 .unwrap()
                 .unwrap();

@@ -151,14 +151,8 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         c.context.request_sync();
         until(|| c.context.directory.borrow().confirmed_groups().iter().any(|group| group.membership.members.iter().any(|member| member == "member-new"))).await;
         until(|| c.publication.failure().is_some()).await;
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let terminal =
-            crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-        let report = terminal.handle_line("status", 0).await.unwrap().unwrap();
+        let terminal = c.terminal();
+        let report = terminal.handle_line("status").await.unwrap().unwrap();
         assert!(report.contains("pending application"));
         assert!(report.contains("Configuration apply failed:"));
         assert_eq!(

@@ -4,7 +4,7 @@ pub(crate) use context::Context;
 use context::View;
 use render::{configuration_lines, render};
 
-use super::{AuthStatus, current_time};
+use super::AuthStatus;
 use crate::{
     RuntimeError,
     device::{Command, DeviceKey, FunctionKey, FunctionKind, HeaterCommand, HeaterMode},
@@ -12,82 +12,69 @@ use crate::{
     xiaomi::adapter::AdapterStatus,
 };
 pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, map-type DID FUNCTION switch|light, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
-fn invalid(view: &View, status: &AuthStatus, diagnostics: &AdapterStatus, reason: &str) -> String {
-    format!(
-        "{reason}\n{COMMAND_HELP}\n{}",
-        view.render_status(status, diagnostics)
-    )
-}
 impl View {
     async fn handle_words(
         &self,
         words: &[&str],
-        _now: i64,
         status: &AuthStatus,
         diagnostics: impl FnOnce() -> AdapterStatus,
     ) -> Result<Option<String>, StorageError> {
         let diagnostics = std::cell::LazyCell::new(diagnostics);
-        let view = self;
-        let registry = self;
+        let invalid = |reason: &str| {
+            format!(
+                "{reason}\n{COMMAND_HELP}\n{}",
+                self.render_status(status, &diagnostics)
+            )
+        };
         let text = match words {
             [] => return Ok(None),
             ["help"] => format!(
                 "{COMMAND_HELP}\n{}",
-                view.render_status(status, &diagnostics)
+                self.render_status(status, &diagnostics)
             ),
             ["list"] => {
-                let mut text = render(registry, None, &diagnostics, true);
+                let mut text = render(self, None, &diagnostics, true);
                 for pending in &diagnostics.pending {
                     text.push('\n');
-                    text.push_str(&view.pending_line(pending));
+                    text.push_str(&self.pending_line(pending));
                 }
                 text
             }
             ["status"] => format!(
                 "{}\n{}",
-                render(registry, None, &diagnostics, false),
-                view.render_devices(status, &diagnostics, None)
+                render(self, None, &diagnostics, false),
+                self.render_devices(status, &diagnostics, None)
             ),
             ["status", did] => {
-                if registry.get(&DeviceKey::new("xiaomi", *did)).is_none() {
-                    if view.contains_did(did) {
+                if self.get(&DeviceKey::new("xiaomi", *did)).is_none() {
+                    if self.contains_did(did) {
                         let mut lines = vec![format!("{did}: not published")];
-                        lines.extend(configuration_lines(registry, did));
-                        lines.push(view.render_devices(status, &diagnostics, Some(did)));
+                        lines.extend(configuration_lines(self, did));
+                        lines.push(self.render_devices(status, &diagnostics, Some(did)));
                         lines.join("\n")
                     } else if let Some(pending) = diagnostics
                         .pending
                         .iter()
                         .find(|pending| pending.did == *did)
                     {
-                        view.pending_line(pending)
+                        self.pending_line(pending)
                     } else {
-                        invalid(registry, status, &diagnostics, "Unknown device DID.")
+                        invalid("Unknown device DID.")
                     }
                 } else {
                     format!(
                         "{}\n{}",
-                        render(registry, Some(did), &diagnostics, false),
-                        view.render_devices(status, &diagnostics, Some(did))
+                        render(self, Some(did), &diagnostics, false),
+                        self.render_devices(status, &diagnostics, Some(did))
                     )
                 }
             }
             [verb @ ("on" | "off"), did, id] => {
-                let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Unknown device DID.",
-                    )));
+                let Some(physical) = self.get(&DeviceKey::new("xiaomi", *did)) else {
+                    return Ok(Some(invalid("Unknown device DID.")));
                 };
                 let Some(function) = physical.function(id) else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Unknown function.",
-                    )));
+                    return Ok(Some(invalid("Unknown function.")));
                 };
                 let target = if physical.functions().len() == 1 {
                     did.to_string()
@@ -109,113 +96,57 @@ impl View {
                     Err(error) => format!("{target}: {error}"),
                 }
             }
-            ["mode", did, id, mode @ ("off" | "heat")] => {
-                let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Unknown device DID.",
-                    )));
+            [verb @ "mode", did, id, value @ ("off" | "heat")]
+            | [verb @ "temperature", did, id, value] => {
+                let Some(physical) = self.get(&DeviceKey::new("xiaomi", *did)) else {
+                    return Ok(Some(invalid("Unknown device DID.")));
                 };
                 let Some(function) = physical.function(id) else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Unknown function.",
-                    )));
+                    return Ok(Some(invalid("Unknown function.")));
                 };
                 if !matches!(function.description().kind, FunctionKind::Heater { .. }) {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Function does not support heating mode control.",
-                    )));
+                    return Ok(Some(invalid(&format!(
+                        "Function does not support heating {verb} control."
+                    ))));
                 }
-                let target = if physical.functions().len() == 1 {
-                    did.to_string()
+                let (command, value) = if *verb == "mode" {
+                    let mode = if *value == "off" {
+                        HeaterMode::Off
+                    } else {
+                        HeaterMode::Heat
+                    };
+                    (HeaterCommand::Mode(mode), value.to_string())
                 } else {
-                    format!("{did}/{id}")
-                };
-                let command = match *mode {
-                    "off" => HeaterCommand::Mode(HeaterMode::Off),
-                    "heat" => HeaterCommand::Mode(HeaterMode::Heat),
-                    _ => unreachable!(),
-                };
-                match function.begin_heater(command) {
-                    Ok(action) => match action.accepted().await {
-                        Ok(_) => {
-                            log::info!("terminal {target} mode {mode}: accepted");
-                            format!("{target}: command accepted")
-                        }
-                        Err(error) => format!("{target}: {error}"),
-                    },
-                    Err(error) => format!("{target}: {error}"),
-                }
-            }
-            ["temperature", did, id, value] => {
-                let Some(physical) = registry.get(&DeviceKey::new("xiaomi", *did)) else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Unknown device DID.",
-                    )));
-                };
-                let Some(function) = physical.function(id) else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Unknown function.",
-                    )));
-                };
-                if !matches!(function.description().kind, FunctionKind::Heater { .. }) {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Function does not support heating temperature control.",
-                    )));
-                }
-                let Ok(value) = value.parse::<i16>() else {
-                    return Ok(Some(invalid(
-                        registry,
-                        status,
-                        &diagnostics,
-                        "Temperature must be a whole number.",
-                    )));
+                    let Ok(value) = value.parse::<i16>() else {
+                        return Ok(Some(invalid("Temperature must be a whole number.")));
+                    };
+                    (HeaterCommand::Temperature(value), value.to_string())
                 };
                 let target = if physical.functions().len() == 1 {
                     did.to_string()
                 } else {
                     format!("{did}/{id}")
                 };
-                match function.begin_heater(HeaterCommand::Temperature(value)) {
-                    Ok(action) => match action.accepted().await {
-                        Ok(_) => {
-                            log::info!("terminal {target} temperature {value}: accepted");
-                            format!("{target}: command accepted")
-                        }
-                        Err(error) => format!("{target}: {error}"),
-                    },
+                let result = match function.begin_heater(command) {
+                    Ok(action) => action.accepted().await,
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(_) => {
+                        log::info!("terminal {target} {verb} {value}: accepted");
+                        format!("{target}: command accepted")
+                    }
                     Err(error) => format!("{target}: {error}"),
                 }
             }
-            _ => invalid(registry, status, &diagnostics, "Invalid command usage."),
+            _ => invalid("Invalid command usage."),
         };
         Ok(Some(text))
     }
 }
 
 impl Context<'_> {
-    pub(crate) async fn handle_line(
-        &self,
-        line: &str,
-        now: i64,
-    ) -> Result<Option<String>, StorageError> {
+    pub(crate) async fn handle_line(&self, line: &str) -> Result<Option<String>, StorageError> {
         let words = line.split_whitespace().collect::<Vec<_>>();
         match words.as_slice() {
             ["map-type", did, id, kind] => {
@@ -256,7 +187,7 @@ impl Context<'_> {
             }
             _ => {
                 self.view()
-                    .handle_words(&words, now, self.status, || self.app.diagnostics())
+                    .handle_words(&words, self.status, || self.app.diagnostics())
                     .await
             }
         }
@@ -269,10 +200,7 @@ impl Context<'_> {
         input: impl futures_lite::io::AsyncBufRead + Unpin,
         output: impl futures_lite::io::AsyncWrite + Unpin,
     ) -> Result<(), RuntimeError> {
-        read_commands(input, output, async |line| {
-            self.handle_line(line, current_time()).await
-        })
-        .await
+        read_commands(input, output, async |line| self.handle_line(line).await).await
     }
 }
 

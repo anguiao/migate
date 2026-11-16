@@ -24,7 +24,7 @@ fn list_and_status_show_the_derived_mcn02_direct_patch() {
         registry.insert(physical);
 
         for command in ["list", "status ac"] {
-            let output = handle_line(&registry, &store.devices(), &status, command, 0)
+            let output = handle_line(&registry, &store.devices(), &status, command)
                 .await
                 .unwrap()
                 .unwrap();

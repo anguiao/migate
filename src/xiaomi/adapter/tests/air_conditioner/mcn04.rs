@@ -106,18 +106,8 @@ fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range()
             assert_eq!(function.air_conditioner_constraints().unwrap(), constraints);
             assert!(function.air_conditioner_constraints_ready());
             assert!(work(control).mcn04_range(ID).unwrap().contains("directs"));
-            let status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
-            let output = terminal
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let terminal = control.terminal();
+            let output = terminal.handle_line("status one").await.unwrap().unwrap();
             assert!(output.contains("property 8.7"), "{output}");
             assert!(
                 output.contains("Control range source: property 8.6"),

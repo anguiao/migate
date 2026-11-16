@@ -191,18 +191,8 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
             .await;
             assert_eq!(snapshot(control).mode.source_time, Some(700));
             assert_eq!(snapshot(control).speed.source_time, Some(701));
-            let status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
-            let text = terminal
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let terminal = control.terminal();
+            let text = terminal.handle_line("status one").await.unwrap().unwrap();
             assert!(
                 text.contains("Mode")
                     && text.contains("Auto")
@@ -218,11 +208,7 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
                     && snapshot(control).speed.value == Some(Speed::Auto)
             })
             .await;
-            let text = terminal
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let text = terminal.handle_line("status one").await.unwrap().unwrap();
             assert!(
                 text.contains("Current fan level: unknown (automatic speed)"),
                 "{text}"
@@ -230,7 +216,7 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
             peer.state.borrow_mut().hold_writes = false;
             assert_eq!(
                 terminal
-                    .handle_line("off one air-conditioner:3", 0)
+                    .handle_line("off one air-conditioner:3")
                     .await
                     .unwrap()
                     .unwrap(),
@@ -238,7 +224,7 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
             );
             assert_eq!(
                 terminal
-                    .handle_line("on one air-conditioner:3", 0)
+                    .handle_line("on one air-conditioner:3")
                     .await
                     .unwrap()
                     .unwrap(),

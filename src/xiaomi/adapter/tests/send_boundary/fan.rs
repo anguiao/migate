@@ -222,18 +222,8 @@ fn transport_failure_after_fan_bytes_is_reported_as_uncertain() {
                 let last = status.devices[0].commands[0].last.as_ref().unwrap();
                 assert_eq!(last.actual_path, Some(PathKind::Local));
                 assert!(matches!(last.steps[0].receipt, StepReceipt::Uncertain(_)));
-                let auth = crate::terminal::AuthStatus::new(
-                    c.context.diagnostics().auth.clone(),
-                    "/bin/migate".into(),
-                    "/data".into(),
-                );
-                let terminal =
-                    crate::terminal::bridge::Context::committed(c.publication.clone(), &auth);
-                let text = terminal
-                    .handle_line("status one", 0)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let terminal = c.terminal();
+                let text = terminal.handle_line("status one").await.unwrap().unwrap();
                 assert!(text.contains("result uncertain"), "{text}");
                 assert_eq!(wire.written.borrow().len(), 1);
             },

@@ -38,15 +38,9 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             })
             .await;
             let mut changes = two.subscribe();
-            let status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
+            let terminal = control.terminal();
             let result = terminal
-                .handle_line("on one relay:3", 0)
+                .handle_line("on one relay:3")
                 .await
                 .unwrap()
                 .unwrap();
@@ -71,7 +65,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             assert_eq!(one.snapshot().power(), Some(Power::Off));
             assert_eq!(three.snapshot().power(), Some(Power::Off));
             let result = terminal
-                .handle_line("off one relay:3", 0)
+                .handle_line("off one relay:3")
                 .await
                 .unwrap()
                 .unwrap();

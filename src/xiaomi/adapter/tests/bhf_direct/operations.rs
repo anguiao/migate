@@ -9,13 +9,8 @@ const TARGET: PropertyBinding = PropertyBinding { siid: 3, piid: 8 };
 const MODE: PropertyBinding = PropertyBinding { siid: 3, piid: 1 };
 
 fn status_text(c: &Control) -> String {
-    let status = crate::terminal::AuthStatus::new(
-        c.context.diagnostics().auth.clone(),
-        "/bin/migate".into(),
-        "/data".into(),
-    );
-    let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-    block_on(terminal.handle_line(&format!("status {DID}"), 0))
+    let terminal = c.terminal();
+    block_on(terminal.handle_line(&format!("status {DID}")))
         .unwrap()
         .unwrap()
 }

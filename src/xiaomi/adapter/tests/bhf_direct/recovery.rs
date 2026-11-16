@@ -12,7 +12,7 @@ fn status_text(c: &Control) -> String {
         "/data".into(),
     );
     let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-    block_on(terminal.handle_line(&format!("status {DID}"), 0))
+    block_on(terminal.handle_line(&format!("status {DID}")))
         .unwrap()
         .unwrap()
 }

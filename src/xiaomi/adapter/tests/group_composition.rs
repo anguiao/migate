@@ -350,13 +350,9 @@ fn ambiguous_member_stays_visible_and_cannot_supply_group_feedback() {
         let group = function(&c.context.registry, "group-1", "light:2");
         assert!(!group.description().supports_rgb());
         assert_eq!(group.snapshot().power(), Some(Power::Unknown));
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let text = crate::terminal::bridge::Context::committed(c.publication.clone(), &status)
-            .handle_line("status group-1", 0)
+        let text = c
+            .terminal()
+            .handle_line("status group-1")
             .await
             .unwrap()
             .unwrap();

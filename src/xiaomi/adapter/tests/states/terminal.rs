@@ -10,18 +10,8 @@ fn native_state_terminal_distinguishes_event_subscriptions_and_observation_metad
             ready(control, "motion:2:1024").await;
             event(&peer, false, Some(201));
             until(|| state(control, "motion:2:1024").source_time == Some(201)).await;
-            let status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
-            let text = terminal
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let terminal = control.terminal();
+            let text = terminal.handle_line("status one").await.unwrap().unwrap();
             for expected in [
                 "motion detected",
                 "native event 2.1008",

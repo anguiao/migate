@@ -18,7 +18,7 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
     let status = status(&store);
     let terminal = Context::committed(app.clone(), &status);
     assert!(
-        block_on(terminal.handle_line("list", 0))
+        block_on(terminal.handle_line("list"))
             .unwrap()
             .unwrap()
             .contains("Test Outlet")
@@ -29,7 +29,7 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
     assert_eq!(app.current().derived.served[&key].description.label(), "");
     assert_eq!(app.frozen()[0].device.description().label(), "");
     assert!(
-        !block_on(terminal.handle_line("list", 0))
+        !block_on(terminal.handle_line("list"))
             .unwrap()
             .unwrap()
             .contains("Test Outlet")
@@ -100,7 +100,7 @@ fn failed_name_commit_keeps_the_saved_and_served_name() {
     let status = status(&store);
     let terminal = Context::committed(app, &status);
     assert!(
-        block_on(terminal.handle_line("list", 0))
+        block_on(terminal.handle_line("list"))
             .unwrap()
             .unwrap()
             .contains("Test Outlet")

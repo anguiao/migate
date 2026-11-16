@@ -122,9 +122,8 @@ pub(crate) async fn handle_line(
     store: &DeviceStore,
     status: &AuthStatus,
     line: &str,
-    now: i64,
 ) -> Result<Option<String>, StorageError> {
-    handle_line_with_diagnostics(registry, store, status, diagnostics(), line, now).await
+    handle_line_with_diagnostics(registry, store, status, diagnostics(), line).await
 }
 
 /// Exercise formatting with an explicit diagnostic input, without a live source.
@@ -134,11 +133,10 @@ pub(crate) async fn handle_line_with_diagnostics(
     status: &AuthStatus,
     diagnostics: AdapterStatus,
     line: &str,
-    now: i64,
 ) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
     view(registry, store)?
-        .handle_words(&words, now, status, || diagnostics)
+        .handle_words(&words, status, || diagnostics)
         .await
 }
 
@@ -150,7 +148,7 @@ pub(super) async fn run_input(
     output: impl futures_lite::io::AsyncWrite + Unpin,
 ) -> Result<(), RuntimeError> {
     read_commands(input, output, async |line| {
-        handle_line(registry, store, status, line, 0).await
+        handle_line(registry, store, status, line).await
     })
     .await
 }
@@ -181,7 +179,7 @@ pub(crate) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     } else {
         line.into()
     };
-    handle_line(&registry, &store.devices(), &status, &line, 0)
+    handle_line(&registry, &store.devices(), &status, &line)
         .await
         .unwrap()
 }

@@ -43,22 +43,13 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         let catalogs = c.cloud.lock().unwrap().catalogs;
         until(|| c.cloud.lock().unwrap().catalogs > catalogs).await;
         assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], reads);
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-        let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+        let terminal = c.terminal();
+        let list = terminal.handle_line("list").await.unwrap().unwrap();
         assert!(
             list.contains("one") && list.contains("no supported MIoT functions"),
             "{list}"
         );
-        let detail = terminal
-            .handle_line("status one", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let detail = terminal.handle_line("status one").await.unwrap().unwrap();
         assert!(detail.contains("recognition issue"), "{detail}");
         c.cloud.lock().unwrap().members.clear();
         c.context.request_sync();
@@ -380,20 +371,16 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
             );
             let terminal =
                 crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
-            let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+            let list = terminal.handle_line("list").await.unwrap().unwrap();
             let pending = list
                 .lines()
                 .find(|line| line.starts_with("multi (") && line.contains(": pending ("))
                 .unwrap_or_else(|| panic!("missing pending device: {list}"));
             assert!(pending.contains("exhausted"), "{pending}");
-            let detail = terminal
-                .handle_line("status multi", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let detail = terminal.handle_line("status multi").await.unwrap().unwrap();
             assert_eq!(detail, pending);
             let unknown = terminal
-                .handle_line("status unknown", 0)
+                .handle_line("status unknown")
                 .await
                 .unwrap()
                 .unwrap();

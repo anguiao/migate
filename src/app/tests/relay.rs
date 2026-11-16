@@ -109,9 +109,8 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
         let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
         let status = super::status(&store);
         let terminal = crate::terminal::bridge::Context::committed(app.clone(), &status);
-        let query = |command: &'static str| async {
-            terminal.handle_line(command, 0).await.unwrap().unwrap()
-        };
+        let query =
+            |command: &'static str| async { terminal.handle_line(command).await.unwrap().unwrap() };
         let database = rusqlite::Connection::open(store.path()).unwrap();
         database.execute_batch("CREATE TRIGGER fail_mapping BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
         assert!(

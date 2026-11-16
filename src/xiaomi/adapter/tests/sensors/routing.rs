@@ -29,19 +29,11 @@ fn degraded_hub_remains_a_candidate_without_sending_automatic_sensor_reads() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let auth_status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth,
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal = crate::terminal::bridge::Context::committed(
-                control.publication.clone(),
-                &auth_status,
-            );
+            let terminal = control.terminal();
             control.context.hub.borrow_mut().degrade();
             control.context.update_device_availability("sensor");
             let details = terminal
-                .handle_line("status sensor", 0)
+                .handle_line("status sensor")
                 .await
                 .unwrap()
                 .unwrap();

@@ -44,19 +44,12 @@ fn terminal_describes_optional_recognition_failure_separately_from_connectivity(
             let control = &c;
             c.peer(peer, |_peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-                let status = crate::terminal::AuthStatus::new(
-                    control.context.diagnostics().auth.clone(),
-                    "/bin/migate".into(),
-                    "/data".into(),
-                );
-                let text = crate::terminal::bridge::Context::committed(
-                    control.publication.clone(),
-                    &status,
-                )
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+                let text = control
+                    .terminal()
+                    .handle_line("status one")
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert!(
                     text.contains("fan:3: additional; capabilities on/off, fan"),
                     "{text}"
@@ -100,19 +93,11 @@ fn composite_controls_route_commands_and_feedback_to_their_own_bindings() {
                         && second.snapshot().power().is_some()
                 })
                 .await;
-                let status = crate::terminal::AuthStatus::new(
-                    control.context.diagnostics().auth.clone(),
-                    "/bin/migate".into(),
-                    "/data".into(),
-                );
-                let terminal = crate::terminal::bridge::Context::committed(
-                    control.publication.clone(),
-                    &status,
-                );
+                let terminal = control.terminal();
                 for command in ["on one light:2", "off one fan:3", "on one light:4"] {
                     assert!(
                         terminal
-                            .handle_line(command, 0)
+                            .handle_line(command)
                             .await
                             .unwrap()
                             .unwrap()

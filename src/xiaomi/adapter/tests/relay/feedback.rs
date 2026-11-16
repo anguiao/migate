@@ -164,18 +164,8 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
                     && relay.snapshot().power() == Some(Power::Off)
             })
             .await;
-            let status = crate::terminal::AuthStatus::new(
-                control.context.diagnostics().auth.clone(),
-                "/bin/migate".into(),
-                "/data".into(),
-            );
-            let terminal =
-                crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
-            let details = terminal
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let terminal = control.terminal();
+            let details = terminal.handle_line("status one").await.unwrap().unwrap();
             let mode = details
                 .lines()
                 .find(|line| line.contains("Mode: property 3.2"))
@@ -410,11 +400,7 @@ fn relay_power_read_reports_its_real_source_in_terminal_status() {
                     control.publication.clone(),
                     &status,
                 );
-                let details = terminal
-                    .handle_line("status one", 0)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let details = terminal.handle_line("status one").await.unwrap().unwrap();
                 let relay = details
                     .split("  relay:3 (")
                     .nth(1)
@@ -517,11 +503,7 @@ fn relay_power_live_notification_records_source_without_accepting_retained_or_in
                     control.publication.clone(),
                     &status,
                 );
-                let details = terminal
-                    .handle_line("status one", 0)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let details = terminal.handle_line("status one").await.unwrap().unwrap();
                 let section = details
                     .split("  relay:2 (")
                     .nth(1)

@@ -62,14 +62,7 @@ fn fixture() -> (
 fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
     block_on(async {
         let (_dir, store, status, registry, mut receivers) = fixture();
-        let omitted = poll_once(handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "on one",
-            0,
-        ))
-        .await;
+        let omitted = poll_once(handle_line(&registry, &store.devices(), &status, "on one")).await;
         let reply = omitted
             .expect("omitting the function must return immediately")
             .unwrap()
@@ -91,7 +84,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             "toggle one",
             "ON one",
         ] {
-            let result = handle_line(&registry, &store.devices(), &status, invalid, 0)
+            let result = handle_line(&registry, &store.devices(), &status, invalid)
                 .await
                 .unwrap()
                 .unwrap();
@@ -104,7 +97,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             }
         }
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on one outlet:2", 0),
+            handle_line(&registry, &store.devices(), &status, "on one outlet:2"),
             async {
                 let request = next_power(&mut receivers[0]).await.unwrap();
                 registry
@@ -118,13 +111,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         .await;
         assert_eq!(result.unwrap().unwrap(), "one: command accepted");
         let (result, ()) = future::zip(
-            handle_line(
-                &registry,
-                &store.devices(),
-                &status,
-                "off multi outlet:9",
-                0,
-            ),
+            handle_line(&registry, &store.devices(), &status, "off multi outlet:9"),
             async {
                 let request = next_power(&mut receivers[4]).await.unwrap();
                 assert!(!request.target);
@@ -183,7 +170,7 @@ fn explicit_target_does_not_redirect_a_mixed_device_command() {
             ("on mixed missing", "Unknown function"),
             ("on mixed temperature:3:1001", "does not support"),
         ] {
-            let result = handle_line(&registry, &store.devices(), &status, line, 0)
+            let result = handle_line(&registry, &store.devices(), &status, line)
                 .await
                 .unwrap()
                 .unwrap();
@@ -194,7 +181,7 @@ fn explicit_target_does_not_redirect_a_mixed_device_command() {
             }
         }
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on mixed outlet:2", 0),
+            handle_line(&registry, &store.devices(), &status, "on mixed outlet:2"),
             async {
                 let request = next_power(&mut receivers[0]).await.unwrap();
                 assert!(request.target);
@@ -216,7 +203,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         registry.remove(&key);
         registry.insert(physical.clone());
         physical.function("outlet:9").unwrap().observe(true);
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
+        let list = handle_line(&registry, &store.devices(), &status, "list")
             .await
             .unwrap()
             .unwrap();
@@ -224,7 +211,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(list.contains("outlet:9 (主电源): on"));
         assert!(list.contains("one (name one)"));
         physical.set_label("Live Home name".into());
-        let selected = handle_line(&registry, &store.devices(), &status, "status multi", 0)
+        let selected = handle_line(&registry, &store.devices(), &status, "status multi")
             .await
             .unwrap()
             .unwrap();
@@ -234,7 +221,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(selected.contains("Xiaomi account: not signed in"));
         registry.remove(physical.key());
         assert!(
-            handle_line(&registry, &store.devices(), &status, "on multi outlet:9", 0)
+            handle_line(&registry, &store.devices(), &status, "on multi outlet:9")
                 .await
                 .unwrap()
                 .unwrap()
@@ -254,7 +241,7 @@ fn command_diagnostics_are_sampled_only_for_reports() {
             support::diagnostics()
         };
         assert!(
-            view.handle_words(&[], 0, &status, diagnostics)
+            view.handle_words(&[], &status, diagnostics)
                 .await
                 .unwrap()
                 .is_none()
@@ -262,7 +249,7 @@ fn command_diagnostics_are_sampled_only_for_reports() {
         assert_eq!(samples.get(), 0, "empty input must not sample diagnostics");
         for verb in ["on", "off"] {
             let (result, ()) = future::zip(
-                view.handle_words(&[verb, "one", "outlet:2"], 0, &status, diagnostics),
+                view.handle_words(&[verb, "one", "outlet:2"], &status, diagnostics),
                 async {
                     next_power(&mut receivers[0])
                         .await
@@ -288,7 +275,7 @@ fn command_diagnostics_are_sampled_only_for_reports() {
             vec!["on", "one", "missing"],
         ] {
             let before = samples.get();
-            view.handle_words(&words, 0, &status, diagnostics)
+            view.handle_words(&words, &status, diagnostics)
                 .await
                 .unwrap()
                 .unwrap();
@@ -332,7 +319,7 @@ fn committed_raw_description_stays_known_without_visible_details() {
                     });
             }
             let text = view
-                .handle_words(&["status", "one"], 0, &status, || diagnostics.clone())
+                .handle_words(&["status", "one"], &status, || diagnostics.clone())
                 .await
                 .unwrap()
                 .unwrap();
@@ -342,7 +329,7 @@ fn committed_raw_description_stays_known_without_visible_details() {
             assert!(!text.contains(": pending ("), "{text}");
         }
         let unknown = view
-            .handle_words(&["status", "missing"], 0, &status, || diagnostics.clone())
+            .handle_words(&["status", "missing"], &status, || diagnostics.clone())
             .await
             .unwrap()
             .unwrap();
@@ -395,7 +382,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             registry.insert(physical.clone());
             lights.push((physical, receivers));
         }
-        let list = handle_line(&registry, &store.devices(), &status, "list", 0)
+        let list = handle_line(&registry, &store.devices(), &status, "list")
             .await
             .unwrap()
             .unwrap();
@@ -425,7 +412,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 ..Default::default()
             })
             .unwrap();
-        let partial = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+        let partial = handle_line(&registry, &store.devices(), &status, "status rgb")
             .await
             .unwrap()
             .unwrap();
@@ -454,7 +441,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 ..Default::default()
             })
             .unwrap();
-        let rgb = handle_line(&registry, &store.devices(), &status, "status rgb", 0)
+        let rgb = handle_line(&registry, &store.devices(), &status, "status rgb")
             .await
             .unwrap()
             .unwrap();
@@ -466,7 +453,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
         );
         assert!(!rgb.contains("Saved ct 名称"));
         assert!(!rgb.contains("name one"));
-        let ct = handle_line(&registry, &store.devices(), &status, "status ct", 0)
+        let ct = handle_line(&registry, &store.devices(), &status, "status ct")
             .await
             .unwrap()
             .unwrap();
@@ -515,7 +502,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
         registry.insert(physical.clone());
         for (line, target) in [("on light light:2", true), ("off light light:2", false)] {
             let (result, ()) = future::zip(
-                handle_line(&registry, &store.devices(), &status, line, 0),
+                handle_line(&registry, &store.devices(), &status, line),
                 async {
                     let DeviceRequest::Power(request) =
                         receivers[0].next_operation().await.unwrap()
@@ -533,16 +520,10 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
             assert_eq!(snapshot.temperature_kelvin, Some(4000));
             assert_eq!(snapshot.mode, Some(LightMode::Temperature));
         }
-        let invalid = handle_line(
-            &registry,
-            &store.devices(),
-            &status,
-            "brightness light 50",
-            0,
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        let invalid = handle_line(&registry, &store.devices(), &status, "brightness light 50")
+            .await
+            .unwrap()
+            .unwrap();
         assert!(invalid.contains("Invalid command usage."));
         assert!(poll_once(receivers[0].next_operation()).await.is_none());
     });
@@ -654,7 +635,6 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             &status,
             diagnostics.clone(),
             "list",
-            0,
         )
         .await
         .unwrap()
@@ -668,7 +648,6 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             &status,
             diagnostics.clone(),
             "help",
-            0,
         )
         .await
         .unwrap()
@@ -729,7 +708,6 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             &status,
             diagnostics.clone(),
             "status multi",
-            1_700_000_000,
         )
         .await
         .unwrap()
@@ -746,7 +724,6 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             &status,
             diagnostics.clone(),
             "status",
-            1_700_000_000,
         )
         .await
         .unwrap()
@@ -759,7 +736,6 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             &status,
             diagnostics.clone(),
             "list",
-            1_700_000_000,
         )
         .await
         .unwrap()
@@ -773,7 +749,6 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
             &status,
             diagnostics.clone(),
             "help",
-            1_700_000_000,
         )
         .await
         .unwrap()

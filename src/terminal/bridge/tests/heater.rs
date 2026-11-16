@@ -66,7 +66,7 @@ fn status_shows_heating_feedback_and_built_in_temperature() {
             .observe_heater_temperature(22.5, Some(2), 3)
             .unwrap();
 
-        let output = handle_line(&registry, &store.devices(), &status, "status bath", 0)
+        let output = handle_line(&registry, &store.devices(), &status, "status bath")
             .await
             .unwrap()
             .unwrap();
@@ -80,7 +80,7 @@ fn status_shows_heating_feedback_and_built_in_temperature() {
         function
             .observe_heater_temperature(23.0, Some(4), 4)
             .unwrap();
-        let output = handle_line(&registry, &store.devices(), &status, "status bath", 0)
+        let output = handle_line(&registry, &store.devices(), &status, "status bath")
             .await
             .unwrap()
             .unwrap();
@@ -100,12 +100,9 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
         function.observe_heater(HeaterValue::Temperature(25), Some(1), 1);
 
         let (result, ()) = zip(
-            view.handle_words(
-                &["temperature", "bath", "heater:3", "30"],
-                0,
-                &status,
-                || panic!("accepted temperature control must not sample diagnostics"),
-            ),
+            view.handle_words(&["temperature", "bath", "heater:3", "30"], &status, || {
+                panic!("accepted temperature control must not sample diagnostics")
+            }),
             async {
                 let request = next_heater(&mut receiver).await;
                 assert_eq!(request.command, HeaterCommand::Temperature(30));
@@ -121,7 +118,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
         );
 
         let (result, ()) = zip(
-            view.handle_words(&["mode", "bath", "heater:3", "heat"], 0, &status, || {
+            view.handle_words(&["mode", "bath", "heater:3", "heat"], &status, || {
                 panic!("accepted mode control must not sample diagnostics")
             }),
             async {
@@ -139,7 +136,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
         );
 
         let (result, ()) = zip(
-            view.handle_words(&["mode", "bath", "heater:3", "off"], 0, &status, || {
+            view.handle_words(&["mode", "bath", "heater:3", "off"], &status, || {
                 panic!("accepted mode control must not sample diagnostics")
             }),
             async {
@@ -154,7 +151,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
 
         for (line, power) in [("on bath heater:3", true), ("off bath heater:3", false)] {
             let (result, ()) = zip(
-                handle_line(&registry, &store.devices(), &status, line, 0),
+                handle_line(&registry, &store.devices(), &status, line),
                 async {
                     let request = next_heater(&mut receiver).await;
                     assert_eq!(request.command, HeaterCommand::Power(power));
@@ -181,7 +178,6 @@ fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
             &store.devices(),
             &status,
             "temperature bath heater:3 warm",
-            0,
         )
         .await
         .unwrap()
@@ -194,7 +190,6 @@ fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
             &store.devices(),
             &status,
             "temperature bath heater:3 24",
-            0,
         )
         .await
         .unwrap()
@@ -224,7 +219,6 @@ fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
             &store.devices(),
             &status,
             "mode outlet outlet:2 heat",
-            0,
         )
         .await
         .unwrap()

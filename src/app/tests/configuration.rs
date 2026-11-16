@@ -54,15 +54,13 @@ fn startup_revocation_overlay_keeps_committed_versions_for_the_removal_plan() {
     );
     let status = status(&store);
     let terminal = Context::committed(app, &status);
-    let output = block_on(terminal.handle_line("status", 0))
-        .unwrap()
-        .unwrap();
+    let output = block_on(terminal.handle_line("status")).unwrap().unwrap();
     assert!(
         output.contains(&format!("root version {}", saved.root_version)),
         "{output}"
     );
     assert!(
-        !block_on(terminal.handle_line("list", 0))
+        !block_on(terminal.handle_line("list"))
             .unwrap()
             .unwrap()
             .contains("Test Outlet")

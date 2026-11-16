@@ -153,9 +153,8 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             control.publication.apply(control.publication.prepare(plan)).unwrap();
             assert_eq!(control.publication.frozen().len(), 2);
             assert!(model.invoke(ep3, 0).await.is_err());
-            let status = crate::terminal::AuthStatus::new(control.context.diagnostics().auth.clone(), "/bin/migate".into(), "/data".into());
-            let terminal = crate::terminal::bridge::Context::committed(control.publication.clone(), &status);
-            assert!(terminal.handle_line("off one relay:3", 0).await.unwrap().unwrap().contains("command accepted"));
+            let terminal = control.terminal();
+            assert!(terminal.handle_line("off one relay:3").await.unwrap().unwrap().contains("command accepted"));
             assert_eq!(peer.count("rpcReq", "one", 3), 3);
 
             for siid in [2, 4] { peer.notify_value("one", binding(siid, 2), json!(1), false); }
@@ -210,17 +209,9 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                         .apply(control.publication.prepare(plan))
                         .unwrap();
                     let before = control.publication.current().configuration.clone();
-                    let status = crate::terminal::AuthStatus::new(
-                        control.context.diagnostics().auth.clone(),
-                        "/bin/migate".into(),
-                        "/data".into(),
-                    );
-                    let terminal = crate::terminal::bridge::Context::committed(
-                        control.publication.clone(),
-                        &status,
-                    );
+                    let terminal = control.terminal();
                     let result = terminal
-                        .handle_line("map-type one relay:3 light", 0)
+                        .handle_line("map-type one relay:3 light")
                         .await
                         .unwrap()
                         .unwrap();
@@ -247,13 +238,9 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                     assert_eq!(after.root_version, before.root_version + 1);
                     assert_eq!(control.store.devices().load_configuration().unwrap(), after);
                     assert!(control.publication.plan().unwrap().unwrap().rebuild);
-                    let list = terminal.handle_line("list", 0).await.unwrap().unwrap();
+                    let list = terminal.handle_line("list").await.unwrap().unwrap();
                     assert!(list.contains("mode wired; mapping light"), "{list}");
-                    let details = terminal
-                        .handle_line("status one", 0)
-                        .await
-                        .unwrap()
-                        .unwrap();
+                    let details = terminal.handle_line("status one").await.unwrap().unwrap();
                     assert!(details.contains("on 3.1 (read/write/notify)"), "{details}");
                     assert!(details.contains("mode 3.2 (read/notify)"), "{details}");
                     assert!(
@@ -316,7 +303,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                     );
                     assert!(
                         terminal
-                            .handle_line("map-type one relay:3 switch", 0)
+                            .handle_line("map-type one relay:3 switch")
                             .await
                             .unwrap()
                             .unwrap()

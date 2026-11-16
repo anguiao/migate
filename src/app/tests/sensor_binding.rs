@@ -98,10 +98,7 @@ fn terminal_binding_persists_without_changing_published_endpoints() {
         assert!(help.contains("bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION"));
         assert!(help.contains("unbind-sensor TARGET_DID TARGET_FUNCTION"));
         let output = terminal
-            .handle_line(
-                "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
-                0,
-            )
+            .handle_line("bind-sensor ac air-conditioner:3 sensor temperature:3:1001")
             .await
             .unwrap()
             .unwrap();
@@ -134,10 +131,7 @@ fn terminal_binding_persists_without_changing_published_endpoints() {
             app.current().configuration
         );
         let repeated = terminal
-            .handle_line(
-                "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
-                0,
-            )
+            .handle_line("bind-sensor ac air-conditioner:3 sensor temperature:3:1001")
             .await
             .unwrap()
             .unwrap();
@@ -211,7 +205,7 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
             "bind-sensor ac air-conditioner:3 sensor temperature:3:1001",
         )
         .await;
-        let output = terminal.handle_line("status ac", 0).await.unwrap().unwrap();
+        let output = terminal.handle_line("status ac").await.unwrap().unwrap();
         assert!(output.contains("Target temperature"), "{output}");
         assert!(output.contains("Ambient temperature: 21.50 °C"), "{output}");
         assert!(output.contains("sensor/temperature:3:1001"), "{output}");
@@ -226,7 +220,6 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
             &status,
             diagnostics,
             "status ac",
-            0,
         )
         .await
         .unwrap()
@@ -269,7 +262,7 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
             .unwrap();
         assert_eq!(measurement.read_value(&serde_json::json!(400.0)), Ok(400.0));
         sensor.observe_measurement(400.0, Some(101), 201).unwrap();
-        let output = terminal.handle_line("status ac", 0).await.unwrap().unwrap();
+        let output = terminal.handle_line("status ac").await.unwrap().unwrap();
         assert!(
             output.contains("Ambient temperature: 400.00 °C"),
             "{output}"
@@ -294,7 +287,7 @@ fn function(app: &App, did: &str, id: &str) -> crate::device::Function {
 }
 
 async fn run(terminal: &Context<'_>, line: &str) -> String {
-    terminal.handle_line(line, 0).await.unwrap().unwrap()
+    terminal.handle_line(line).await.unwrap().unwrap()
 }
 
 #[test]

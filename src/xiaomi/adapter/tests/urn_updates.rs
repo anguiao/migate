@@ -175,17 +175,8 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
         let physical = c.context.registry.get(&key).unwrap();
         let matter = PublishedLightModel::new(&c.publication, &c.store);
         let attributes = matter.read(committed.endpoint).await;
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-        let before = terminal
-            .handle_line("status one", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let terminal = c.terminal();
+        let before = terminal.handle_line("status one").await.unwrap().unwrap();
         let old_capabilities = before
             .lines()
             .find(|line| line.trim_start().starts_with("Capabilities:"))
@@ -228,11 +219,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
                     .is_some_and(|reason| reason.contains(diagnostic))
             })
             .await;
-            let after = terminal
-                .handle_line("status one", 0)
-                .await
-                .unwrap()
-                .unwrap();
+            let after = terminal.handle_line("status one").await.unwrap().unwrap();
             assert!(
                 after.contains(&format!(
                     "Configuration: root version {}.",
@@ -260,7 +247,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
             let writes = c.cloud.lock().unwrap().numeric_writes.len();
             assert_eq!(
                 terminal
-                    .handle_line("off one light:2", 0)
+                    .handle_line("off one light:2")
                     .await
                     .unwrap()
                     .unwrap(),
@@ -466,21 +453,12 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
             c.store.devices().load_configuration().unwrap().device(&key),
             Some(&committed)
         );
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-        let status_line = terminal
-            .handle_line("status one", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let terminal = c.terminal();
+        let status_line = terminal.handle_line("status one").await.unwrap().unwrap();
         assert!(!status_line.contains("temperature 2700–6500 K"));
         assert_eq!(
             terminal
-                .handle_line("off one light:2", 0)
+                .handle_line("off one light:2")
                 .await
                 .unwrap()
                 .unwrap(),
@@ -518,17 +496,8 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         })
         .await;
 
-        let status = crate::terminal::AuthStatus::new(
-            c.context.diagnostics().auth.clone(),
-            "/bin/migate".into(),
-            "/data".into(),
-        );
-        let terminal = crate::terminal::bridge::Context::committed(c.publication.clone(), &status);
-        let report = terminal
-            .handle_line("status one", 0)
-            .await
-            .unwrap()
-            .unwrap();
+        let terminal = c.terminal();
+        let report = terminal.handle_line("status one").await.unwrap().unwrap();
         assert!(
             report.contains("temperature 2700–6500 K"),
             "terminal status does not show the widened range:\n{report}"
