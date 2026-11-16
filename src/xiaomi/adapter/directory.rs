@@ -24,6 +24,8 @@ pub(super) struct Directory {
     pub(super) devices: BTreeMap<String, DeviceSlot>,
     relations: Relations,
     split_devices: Vec<SplitDevice>,
+    /// Reserved identities can fail planning after their source slots are withdrawn.
+    planning_problems: BTreeMap<String, PlanningProblem>,
     scope_valid: bool,
     problem: Option<String>,
     sync_not_before: Option<Duration>,
@@ -33,6 +35,12 @@ pub(super) struct Directory {
 pub(super) struct HomeUpdate {
     pub(super) removed: Vec<String>,
     pub(super) membership_changed: bool,
+}
+
+pub(super) struct PlanningProblem {
+    /// A committed label is retained only for the current home.
+    pub(super) committed_name: Option<String>,
+    pub(super) reason: String,
 }
 
 impl Directory {
@@ -46,6 +54,7 @@ impl Directory {
             devices: BTreeMap::new(),
             relations,
             split_devices,
+            planning_problems: BTreeMap::new(),
             scope_valid: false,
             problem: None,
             sync_not_before: None,
@@ -73,6 +82,9 @@ impl Directory {
             .filter(|(did, slot)| scope_changed || (!slot.group && !members.contains(*did)))
             .map(|(did, _)| did.clone())
             .collect();
+        if self.scope.as_ref() != Some(&scope) {
+            self.planning_problems.clear();
+        }
         self.scope = Some(scope);
         self.split_devices = split_devices;
         HomeUpdate {
@@ -85,6 +97,7 @@ impl Directory {
         &mut self,
         members: &BTreeSet<String>,
         mut infos: BTreeMap<String, CloudDeviceInfo>,
+        catalog: Option<&CloudDeviceCatalog>,
     ) {
         for did in members {
             self.devices.entry(did.clone()).or_default();
@@ -96,7 +109,47 @@ impl Directory {
                 slot.cloud_forbidden = false;
             }
         }
+        if let Some(catalog) = catalog {
+            for record in &catalog.devices {
+                if members.contains(&record.did) {
+                    self.devices.get_mut(&record.did).unwrap().catalog_name = record.name.clone();
+                }
+            }
+        }
         self.confirm_scope();
+    }
+
+    pub(super) fn remove_source(&mut self, did: &str) -> Option<DeviceSlot> {
+        let slot = self.devices.remove(did);
+        if slot.is_some() {
+            self.planning_problems.remove(did);
+        }
+        slot
+    }
+
+    pub(super) fn planning_problems(&self) -> &BTreeMap<String, PlanningProblem> {
+        &self.planning_problems
+    }
+
+    pub(super) fn planning_failed(
+        &mut self,
+        did: &str,
+        committed_name: Option<String>,
+        reason: String,
+    ) {
+        self.planning_problems.insert(
+            did.to_owned(),
+            PlanningProblem {
+                committed_name,
+                reason,
+            },
+        );
+    }
+
+    pub(super) fn planned(&mut self) -> bool {
+        let changed = !self.planning_problems.is_empty();
+        self.planning_problems.clear();
+        changed
     }
 
     pub(super) fn invalidate_scope(&mut self) {
@@ -151,6 +204,7 @@ impl Directory {
             slot.cloud_forbidden = false;
         }
         slot.group = true;
+        slot.catalog_name = group.name.clone();
         slot.description_target_missing = group.instance_type.is_none();
         slot.cloud_access = group
             .instance_type
@@ -244,6 +298,8 @@ pub(super) struct DeviceSlot {
     /// A confirmed group record lacked the target instance type.
     pub(super) description_target_missing: bool,
     pub(super) confirmed: bool,
+    /// A name from the account catalog, retained only after home membership is confirmed.
+    pub(super) catalog_name: Option<String>,
     /// The installed native runtime; native control and subscriptions live here.
     pub(super) admitted: Option<Rc<DeviceWork>>,
     pub(super) cloud_access: Option<CloudDeviceInfo>,

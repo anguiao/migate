@@ -18,6 +18,7 @@ mod model;
 mod network;
 mod notifications;
 mod observations;
+mod pending;
 pub(crate) mod publication;
 mod refresh;
 mod relations;

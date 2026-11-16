@@ -75,11 +75,6 @@ impl Prepare {
         self.exhausted = !self.problems.is_empty();
         battery.and_then(|binding| self.problems.get(&binding.into()).cloned())
     }
-    pub(super) fn problem(&self, bindings: &[SubscriptionBinding]) -> Option<String> {
-        bindings
-            .iter()
-            .find_map(|binding| self.problems.get(binding).cloned())
-    }
     pub(super) fn ready(&self, bindings: &[SubscriptionBinding]) -> bool {
         bindings
             .iter()

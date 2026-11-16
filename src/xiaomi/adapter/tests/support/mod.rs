@@ -101,7 +101,6 @@ pub(super) fn force_unavailable(context: &super::super::state::Context, did: &st
     context.retire_work(did);
     context.changed.notify(usize::MAX);
     context.refresh_group_states(did);
-    context.problem(did, Some(reason));
 }
 
 pub(super) fn sensor_native(did: &str) -> SourceFixture {

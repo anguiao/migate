@@ -287,10 +287,11 @@ pub(super) async fn run(
         for did in update.removed {
             context.remove(&did)?;
         }
-        context
-            .directory
-            .borrow_mut()
-            .confirm_members(&members, infos);
+        context.directory.borrow_mut().confirm_members(
+            &members,
+            infos,
+            catalog.as_ref().map(|(catalog, _)| catalog),
+        );
         context.mijia_authentication(AuthenticationState::Authenticated);
         context.credentials.borrow_mut().resume_http();
         if catalog.is_some() {

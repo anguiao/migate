@@ -89,9 +89,9 @@ impl Context {
                 }
             }
             let Some(instance_type) = group.instance_type.clone() else {
-                self.problem(
+                self.pending_description(
                     did,
-                    Some("native group description has no instance type".into()),
+                    "native group description has no instance type".into(),
                 );
                 continue;
             };

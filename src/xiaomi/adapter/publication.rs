@@ -371,6 +371,7 @@ impl SourceHandle {
     /// recomputation. The caller guarantees that no await happens between
     /// prepare, commit and install.
     pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
+        self.planned();
         let changed = !prepared.installed.is_empty()
             || !prepared.removed.is_empty()
             || self.0.graph.borrow().rules != plan.derived.rules;
@@ -458,7 +459,7 @@ impl SourceHandle {
                 self.0.install_work(did);
             }
             self.0.update_device_availability(did);
-            source.work.report(&self.0, did);
+            source.work.report(&self.0);
         }
         if changed {
             for did in plan.derived.rules.keys() {
@@ -484,8 +485,27 @@ impl SourceHandle {
         }
     }
 
-    pub(crate) fn pending(&self, key: &DeviceKey, reason: String) {
-        self.0.problem(&key.id, Some(reason));
+    pub(crate) fn pending(
+        &self,
+        key: &DeviceKey,
+        committed: &CommittedConfiguration,
+        reason: String,
+    ) {
+        {
+            let mut directory = self.0.directory.borrow_mut();
+            let committed_name = (directory.scope == committed.scope)
+                .then(|| committed.device(key).map(|device| device.label.clone()))
+                .flatten();
+            directory.planning_failed(&key.id, committed_name, reason);
+        }
+        self.0.status_changed.notify(usize::MAX);
+    }
+
+    pub(crate) fn planned(&self) {
+        let changed = self.0.directory.borrow_mut().planned();
+        if changed {
+            self.0.status_changed.notify(usize::MAX);
+        }
     }
 }
 

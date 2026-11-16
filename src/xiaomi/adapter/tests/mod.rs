@@ -28,6 +28,7 @@ mod mijia_recovery;
 mod notifications;
 mod observation_lifetimes;
 mod panel_catalog;
+mod pending;
 mod property_refresh;
 mod refresh_scheduling;
 mod relations;

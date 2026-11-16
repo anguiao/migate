@@ -418,17 +418,26 @@ impl DeviceWork {
             }
         }
     }
-    pub(in crate::xiaomi::adapter) fn diagnostic(&self) -> Option<String> {
-        let required = self.required_subscriptions();
-        let local = self.attachments.local.borrow();
-        let values = local
-            .prepare
-            .problem(&required)
+    fn subscription_problems(&self) -> Vec<String> {
+        let required = self
+            .required_subscriptions()
             .into_iter()
-            .chain(self.attachments.cloud.borrow().prepare.problem(&required))
-            .chain(self.refresh.borrow().problems_except(BATTERY_CHANNEL))
-            .collect::<Vec<_>>();
-        (!values.is_empty()).then(|| values.join("; "))
+            .collect::<BTreeSet<_>>();
+        let local = self.attachments.local.borrow();
+        let cloud = self.attachments.cloud.borrow();
+        [&local.prepare, &cloud.prepare]
+            .into_iter()
+            .flat_map(|prepare| {
+                required
+                    .iter()
+                    .filter_map(|binding| prepare.problems.get(binding).cloned())
+            })
+            .collect()
+    }
+    pub(in crate::xiaomi::adapter) fn pending_problems(&self) -> Vec<String> {
+        let mut values = self.subscription_problems();
+        values.extend(self.refresh.borrow().problems_except(BATTERY_CHANNEL));
+        values
     }
     pub(in crate::xiaomi::adapter) fn battery_problem(&self) -> Option<String> {
         let mut values = Vec::new();
@@ -456,21 +465,14 @@ impl DeviceWork {
         *self.battery_read_problem.borrow_mut() = problem;
     }
     pub(in crate::xiaomi::adapter) fn subscription_problem(&self) -> Option<String> {
-        let required = self.required_subscriptions();
-        self.attachments
-            .local
-            .borrow()
-            .prepare
-            .problem(&required)
-            .or_else(|| self.attachments.cloud.borrow().prepare.problem(&required))
+        let values = self.subscription_problems();
+        (!values.is_empty()).then(|| values.join("; "))
     }
-    pub(in crate::xiaomi::adapter) fn report(&self, context: &Context, did: &str) {
+    pub(in crate::xiaomi::adapter) fn report(&self, context: &Context) {
         if self.life.is_closed() {
             return;
         }
-        let blocked = context.directory.borrow().devices[did].blocked.clone();
-        let problem = blocked.or_else(|| self.diagnostic());
-        context.problem(did, problem);
+        context.status_changed.notify(usize::MAX);
     }
     pub(in crate::xiaomi::adapter) fn problem(
         &self,
@@ -555,7 +557,7 @@ pub(super) async fn subscriptions(
             }
             if failed.is_empty() || attempt == 3 {
                 work.local_finished(handle, preparation);
-                work.report(context, &did);
+                work.report(context);
                 break;
             }
             pending = failed;

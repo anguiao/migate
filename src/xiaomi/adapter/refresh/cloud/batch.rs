@@ -155,7 +155,7 @@ pub(super) fn read_cloud_batch(
                 cleanup.retry = false;
             }
             context.refresh_group_states(did);
-            work.report(&context, did);
+            work.report(&context);
             work.refresh_changed.notify(usize::MAX);
             return Ok(());
         }
@@ -273,7 +273,7 @@ pub(super) fn read_cloud_batch(
             cleanups[index].retry = false;
         }
         if !work.life.is_closed() {
-            work.report(&context, did);
+            work.report(&context);
         }
         Ok(())
     }

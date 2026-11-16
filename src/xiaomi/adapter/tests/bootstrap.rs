@@ -66,7 +66,7 @@ fn failed_recognition(context: &super::super::state::Context, did: &str) {
         slot.recompute_failed = true;
         slot.blocked = Some(RECOGNITION_FAILURE.into());
     }
-    context.problem(did, Some(RECOGNITION_FAILURE.into()));
+    context.status_changed.notify(usize::MAX);
 }
 
 #[test]

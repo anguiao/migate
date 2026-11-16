@@ -100,24 +100,19 @@ impl Context {
     /// runtime keeps serving and the latest pending fact is retained.
     pub(super) fn pending_description(&self, did: &str, reason: String) {
         if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
-            slot.blocked = Some(reason.clone());
+            slot.blocked = Some(reason);
         }
-        self.problem(did, Some(reason));
+        self.status_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }
 
     pub(super) fn clear_description_problem(&self, did: &str) {
-        let work = self
-            .directory
-            .borrow()
-            .devices
-            .get(did)
-            .and_then(|slot| slot.admitted.clone());
-        if let Some(work) = work {
-            work.report(self, did);
-        } else {
-            self.problem(did, None);
+        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did)
+            && !slot.recompute_failed
+        {
+            slot.blocked = None;
         }
+        self.status_changed.notify(usize::MAX);
     }
 
     pub(super) fn resolved_description_target(&self, did: &str) {
@@ -152,14 +147,13 @@ impl Context {
     pub(super) fn remove_source_slot(&self, did: &str) {
         self.registry.remove(&DeviceKey::new("xiaomi", did));
         self.retire_work(did);
-        let slot = self.directory.borrow_mut().devices.remove(did);
+        let slot = self.directory.borrow_mut().remove_source(did);
         if let Some(slot) = slot
             && let Some(loading) = slot.loading
         {
             loading.life.close();
         }
         self.hub.borrow_mut().forget_device(did);
-        self.problem(did, None);
         self.commands.remove(did);
         self.changed.notify(usize::MAX);
     }

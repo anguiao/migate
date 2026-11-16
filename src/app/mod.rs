@@ -283,7 +283,8 @@ impl App {
                 if let configuration::PlanError::EndpointExhausted { key }
                 | configuration::PlanError::VersionExhausted { key } = &error
                 {
-                    self.source.pending(key, error.to_string());
+                    self.source
+                        .pending(key, &current.configuration, error.to_string());
                 }
                 return Err(StorageError::new(
                     self.store.path(),
@@ -292,6 +293,7 @@ impl App {
                 ));
             }
         };
+        self.source.planned();
         plan.rebuild |= self.rebuild_pending.get();
         if !plan.changed && !plan.rebuild {
             self.pending.set(false);

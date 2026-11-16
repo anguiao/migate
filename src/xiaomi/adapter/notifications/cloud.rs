@@ -263,7 +263,7 @@ pub(super) async fn prepare_properties(
         }
         if failed.is_empty() || attempt == 3 {
             work.cloud_finished(&handle, preparation);
-            work.report(&context, &did);
+            work.report(&context);
             break;
         }
         pending = failed;

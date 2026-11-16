@@ -216,7 +216,7 @@ fn read_shared(
                 .complete(read, outcome, context.clock.now());
         }
         if !work.life.is_closed() {
-            work.report(&context, did);
+            work.report(&context);
         }
         work.refresh_changed.notify(usize::MAX);
         Ok(())
@@ -345,7 +345,7 @@ fn read_legacy(
             }
         }
         if !work.life.is_closed() {
-            work.report(&context, did);
+            work.report(&context);
         }
         work.refresh_changed.notify(usize::MAX);
         Ok(())

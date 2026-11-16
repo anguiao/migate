@@ -1,6 +1,6 @@
 use super::{
     bootstrap::Clock,
-    model::{DeviceStatus, PendingDevice, Ready, RoutingStatus},
+    model::{DeviceStatus, Ready, RoutingStatus},
     tasks::TaskSet,
 };
 use crate::{
@@ -41,7 +41,6 @@ pub(super) use super::work::LogicalSink;
 #[derive(Default)]
 pub(super) struct DiagnosticCache {
     pub(super) routing: RoutingStatus,
-    pub(super) pending: Vec<PendingDevice>,
     pub(super) devices: Vec<DeviceStatus>,
 }
 pub(super) struct Context {

@@ -76,8 +76,8 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
                     .admitted
                     .as_ref()
                     .unwrap()
-                    .diagnostic()
-                    .is_none()
+                    .pending_problems()
+                    .is_empty()
                     && function(registry, "multi", "outlet:3").snapshot().power() == Some(Power::On)
             })
             .await;

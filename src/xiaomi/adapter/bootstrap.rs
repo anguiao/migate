@@ -243,8 +243,8 @@ impl XiaomiAdapter {
                 slot.recompute_failed = failure.is_some();
                 slot.blocked = failure.clone();
             }
-            if let Some(failure) = failure {
-                context.problem(&did, Some(failure));
+            if failure.is_some() {
+                context.status_changed.notify(usize::MAX);
             }
         }
         Ok((

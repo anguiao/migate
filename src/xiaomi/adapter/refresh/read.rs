@@ -234,7 +234,7 @@ pub(super) fn read_one(
                     .borrow_mut()
                     .complete(read, result, context.clock.now());
             }
-            work.report(&context, &did);
+            work.report(&context);
         }
         work.refresh_changed.notify(usize::MAX);
         Ok(())
