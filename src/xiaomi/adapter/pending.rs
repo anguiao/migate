@@ -27,7 +27,7 @@ impl Context {
                         }))
                         .chain(planning.map(|problem| problem.reason.clone()))
                         .collect::<Vec<_>>();
-                if let Some(work) = slot.and_then(|slot| slot.admitted.as_ref())
+                if let Some(work) = slot.and_then(|slot| slot.work.as_ref())
                     && !work.life.is_closed()
                 {
                     problems.extend(work.pending_problems());

@@ -86,14 +86,22 @@ fn retry_new_credentials_after_temporary_failure(
                         }
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.problem.is_some())
                         })
                         .await;
                         let status = context.directory.borrow().devices[&record.did]
+                            .work
+                            .as_ref()
+                            .unwrap()
                             .lan
+                            .borrow()
                             .status
                             .clone()
                             .unwrap();
@@ -113,7 +121,11 @@ fn retry_new_credentials_after_temporary_failure(
                         if reject_after_timeout {
                             until(|| {
                                 context.directory.borrow().devices[&record.did]
+                                    .work
+                                    .as_ref()
+                                    .unwrap()
                                     .lan
+                                    .borrow()
                                     .status
                                     .as_ref()
                                     .is_some_and(|status| {
@@ -317,7 +329,11 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
                         context.changed.notify(usize::MAX);
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Ineligible)
@@ -401,7 +417,11 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                     async {
                         until(|| {
                             context.directory.borrow().devices["656878122"]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Failed)
@@ -430,7 +450,11 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         context.changed.notify(usize::MAX);
                         until(|| {
                             context.directory.borrow().devices["656878122"]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Ready)
@@ -449,7 +473,11 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                         async_io::Timer::after(Duration::from_millis(30)).await;
                         assert!(
                             context.directory.borrow().devices["656878122"]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Ready)
@@ -464,7 +492,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
                                 .borrow()
                                 .devices
                                 .get("656878122")
-                                .is_none_or(|slot| slot.admitted.is_none())
+                                .is_none_or(|slot| slot.work.is_none())
                         );
                     },
                 )
@@ -525,7 +553,11 @@ fn discovered_new_address_is_saved_only_after_authenticated_read() {
                     async {
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Ready)
@@ -604,14 +636,22 @@ fn discovered_address_error_controls_recovery(rejected: bool) {
                     async {
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Failed)
                         })
                         .await;
                         let status = context.directory.borrow().devices[&record.did]
+                            .work
+                            .as_ref()
+                            .unwrap()
                             .lan
+                            .borrow()
                             .status
                             .clone()
                             .unwrap();
@@ -733,7 +773,11 @@ fn occupied_address_recovers(old: &FakeDevice, expected_old_business: usize, tok
                         target.hold_read.store(false, Ordering::Relaxed);
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Ready)
@@ -825,7 +869,11 @@ fn identity_mismatch_without_discovery_stops_without_retries() {
                     async {
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| {

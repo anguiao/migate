@@ -42,7 +42,7 @@ fn unavailable_first_admission_has_a_baseline_and_readmission_drops_the_old_hist
                 .borrow()
                 .devices
                 .get("one")
-                .is_some_and(|slot| slot.admitted.is_some())
+                .is_some_and(|slot| slot.work.is_some())
                 && c.context.cloud_candidate("one", true).is_ok()
         })
         .await;
@@ -191,7 +191,7 @@ fn activating_another_function_records_a_handover_even_when_the_device_summary_i
             })
             .await;
             let work = c.context.directory.borrow().devices["sensor"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             assert!(work.function_observer("humidity:3:1008").is_none());
@@ -297,7 +297,7 @@ fn non_member_function_handover_preserves_the_light_groups_reason() {
             })
             .await;
             let member = c.context.directory.borrow().devices["member-a"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             assert!(member.function_observer("humidity:30:1008").is_none());
@@ -391,7 +391,7 @@ fn actual_member_light_handover_records_the_group_even_when_its_summary_stays_cl
                 cloud.release(held);
                 until(|| {
                     control.context.directory.borrow().devices["member-a"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                         .function_observer("light:2")
@@ -416,4 +416,33 @@ fn actual_member_light_handover_records_the_group_even_when_its_summary_stays_cl
         })
         .await;
     }));
+}
+
+#[test]
+fn revocation_clears_the_serving_history_before_any_replacement_commit() {
+    let rig = Rig::new(true, &["one"]);
+    let context = &rig.source.context;
+    assert!(
+        context.directory.borrow().devices["one"]
+            .routing_history
+            .as_ref()
+            .map(|history| history.selection)
+            .is_some()
+    );
+    context.revoke("one", "confirmed removal").unwrap();
+    assert!(
+        context.directory.borrow().devices["one"]
+            .routing_history
+            .as_ref()
+            .map(|history| history.selection)
+            .is_none()
+    );
+    context.update_device_routing("one", "late source event");
+    assert!(
+        context.directory.borrow().devices["one"]
+            .routing_history
+            .as_ref()
+            .map(|history| history.selection)
+            .is_none()
+    );
 }

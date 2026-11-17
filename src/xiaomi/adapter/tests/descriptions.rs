@@ -112,7 +112,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
 
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

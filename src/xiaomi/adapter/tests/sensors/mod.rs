@@ -30,7 +30,7 @@ fn measurement(context: &super::super::state::Context, did: &str, id: &str) -> M
 
 fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::work::DeviceWork> {
     context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

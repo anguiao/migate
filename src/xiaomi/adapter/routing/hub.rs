@@ -53,7 +53,7 @@ impl Context {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.admitted.clone())
+                    .filter_map(|slot| slot.work.clone())
                     .collect::<Vec<_>>();
                 for work in works {
                     work.retry_subscriptions();
@@ -71,7 +71,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.admitted.clone());
+            .and_then(|slot| slot.work.clone());
         let Some(work) = work else {
             return;
         };
@@ -105,7 +105,7 @@ impl Context {
                 .borrow()
                 .devices
                 .values()
-                .filter_map(|slot| slot.admitted.clone())
+                .filter_map(|slot| slot.work.clone())
                 .collect::<Vec<_>>();
             for work in works {
                 work.detach_local(&session.handle);
@@ -117,7 +117,7 @@ impl Context {
         };
         for slot in self.directory.borrow().devices.values() {
             if (disconnected || priority_changed)
-                && let Some(work) = &slot.admitted
+                && let Some(work) = &slot.work
             {
                 work.retry_subscriptions();
             }
@@ -128,24 +128,25 @@ impl Context {
         self.changed.notify(usize::MAX);
     }
     pub(in crate::xiaomi::adapter) fn stop(&self) {
-        if let Some(session) = self.notifications.borrow_mut().take() {
+        let notifications = self.notifications.borrow_mut().take();
+        if let Some(session) = notifications {
             session.handle.close();
         }
         self.disconnect("Xiaomi adapter stopped".into());
-        let dids = self
+        let works = self
             .directory
-            .borrow()
+            .borrow_mut()
             .devices
-            .keys()
-            .cloned()
+            .values_mut()
+            .filter_map(|slot| {
+                slot.routing_history = None;
+                slot.work.clone()
+            })
             .collect::<Vec<_>>();
-        for did in dids {
-            self.stop_lan(&did);
-            if let Some(work) = &self.directory.borrow().devices[&did].admitted {
-                work.physical()
-                    .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
-                work.retire();
-            }
+        for work in works {
+            work.physical()
+                .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
+            work.retire();
         }
         self.changed.notify(usize::MAX);
     }

@@ -176,7 +176,7 @@ fn background_property_http_failure_keeps_both_cloud_controls_available() {
         cloud_ready(&c, &["one", "two"]).await;
         let token = c.context.mijia_path().unwrap();
         let work = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let mut errors = Vec::new();
@@ -228,7 +228,7 @@ fn background_property_device_errors_revoke_only_current_device_access() {
             let mut stale = token.clone();
             stale.generation = token.generation.wrapping_add(1);
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let error = background_property_error(200, code).await;
@@ -253,7 +253,7 @@ fn retired_background_read_keeps_device_access_but_current_token_rejection_is_pr
         let mut stale = token.clone();
         stale.generation = token.generation.wrapping_add(1);
         let work = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let offline = background_property_error(200, -704_042_011).await;
@@ -296,7 +296,7 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
         assert!(poll_once(command.as_mut()).await.is_none());
         until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
         let record = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         record.current_sink().close();
@@ -801,7 +801,7 @@ fn old_cloud_write_rejections_do_not_revoke_a_replacement_native_instance() {
                 .get(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
             let mut changed = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
                 .native

@@ -5,9 +5,11 @@ use std::rc::Rc;
 mod availability;
 mod cloud;
 mod evaluation;
+mod history;
 mod hub;
 
 pub(super) use evaluation::{DeviceRoutes, Selection, Summaries};
+pub(super) use history::{DeviceHistory, PriorityHistory};
 
 /// Official Xiaomi source omits state subscriptions for BLE and proxy-child
 /// identities; their cloud online flag is not a sensor eligibility signal.

@@ -300,10 +300,9 @@ impl Directory {
     }
 }
 
-/// One entry owns all preparation and admission state for a current home member.
+/// Directory facts and the optional serving native runtime for one home member.
 #[derive(Default)]
 pub(super) struct DeviceSlot {
-    pub(super) lan: super::lan::LanSlot,
     /// Latest complete source fact and its recognition result, retained while
     /// a replacement description or its configuration commit is pending.
     pub(super) latest_description: Option<SourceDescription>,
@@ -312,14 +311,13 @@ pub(super) struct DeviceSlot {
     /// A name from the account catalog, retained only after home membership is confirmed.
     pub(super) catalog_name: Option<String>,
     /// The installed native runtime; native control and subscriptions live here.
-    pub(super) admitted: Option<Rc<DeviceWork>>,
+    pub(super) work: Option<Rc<DeviceWork>>,
     pub(super) cloud_access: Option<CloudDeviceInfo>,
     pub(super) cloud_forbidden: bool,
     /// The one in-flight directory load and the model/URN target it may
     /// apply. `None` target is a genuine first read without metadata facts.
     pub(super) loading: Option<Loading>,
-    pub(super) last_switch_reason: Option<String>,
-    pub(super) routing_selection: Option<super::routing::Selection>,
+    pub(super) routing_history: Option<super::routing::DeviceHistory>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DescriptionOperation {

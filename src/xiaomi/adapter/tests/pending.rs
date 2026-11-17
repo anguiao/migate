@@ -74,7 +74,7 @@ fn pending_description_subscriptions_and_reads_recover_independently() {
                 })
                 .await;
                 let work = control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 until(|| {
@@ -220,7 +220,7 @@ fn pending_description_subscriptions_and_reads_recover_independently() {
                 assert!(Rc::ptr_eq(
                     &work,
                     control.context.directory.borrow().devices["one"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                 ));
@@ -305,11 +305,7 @@ fn pending_first_plan_keeps_the_description_name_without_an_installed_instance()
                 .device(&DeviceKey::new("xiaomi", "multi"))
                 .is_none()
         );
-        assert!(
-            c.context.directory.borrow().devices["multi"]
-                .admitted
-                .is_none()
-        );
+        assert!(c.context.directory.borrow().devices["multi"].work.is_none());
     }));
 }
 
@@ -393,7 +389,7 @@ fn pending_removed_device_version_overflow_survives_without_a_slot_until_readmis
                 .devices
                 .get("one")
                 .is_some_and(|slot| {
-                    slot.confirmed && slot.latest_description.is_some() && slot.admitted.is_none()
+                    slot.confirmed && slot.latest_description.is_some() && slot.work.is_none()
                 })
         })
         .await;

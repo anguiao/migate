@@ -23,8 +23,15 @@ impl Core<'_> {
                 Err(error) => error.to_string(),
                 Ok(_) => unreachable!("captured hub access failure"),
             },
-            Unavailable::DirectNotReady => {
-                self.directory.devices[did].lan.status.as_ref().map_or_else(
+            Unavailable::DirectNotReady => self.directory.devices[did]
+                .work
+                .as_ref()
+                .unwrap()
+                .lan
+                .borrow()
+                .status
+                .as_ref()
+                .map_or_else(
                     || "not yet initialized".into(),
                     |status| {
                         status.problem.clone().unwrap_or_else(|| {
@@ -39,8 +46,7 @@ impl Core<'_> {
                             .into()
                         })
                     },
-                )
-            }
+                ),
         }
     }
 }

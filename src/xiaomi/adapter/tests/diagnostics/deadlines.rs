@@ -171,7 +171,7 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                 until(|| {
                     control.context.directory.borrow().scope_valid()
                         && control.context.directory.borrow().devices["one"]
-                            .admitted
+                            .work
                             .as_ref()
                             .unwrap()
                             .observer()
@@ -184,7 +184,7 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 let current = control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 let before = control.context.diagnostics();
@@ -202,7 +202,9 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                     "{report}"
                 );
                 let previous_reason = control.context.directory.borrow().devices["one"]
-                    .last_switch_reason
+                    .routing_history
+                    .as_ref()
+                    .and_then(|history| history.reason.clone())
                     .clone();
                 let observer = current.observer().unwrap();
                 let subscriptions = current.subscription_status("outlet:2");
@@ -229,7 +231,10 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                 );
                 assert_eq!(control.context.diagnostics(), instant);
                 assert_eq!(
-                    control.context.directory.borrow().devices["one"].last_switch_reason,
+                    control.context.directory.borrow().devices["one"]
+                        .routing_history
+                        .as_ref()
+                        .and_then(|history| history.reason.clone()),
                     previous_reason
                 );
                 assert!(current.observer().unwrap().same(&observer));
@@ -254,7 +259,9 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
 
                 until(|| {
                     control.context.directory.borrow().devices["one"]
-                        .last_switch_reason
+                        .routing_history
+                        .as_ref()
+                        .and_then(|history| history.reason.clone())
                         .as_deref()
                         == Some("hub certificate expired")
                 })
@@ -323,7 +330,9 @@ fn simultaneous_expiry_attributes_only_the_paths_that_actually_change() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let previous = control.context.directory.borrow().devices["two"]
-                .last_switch_reason
+                .routing_history
+                .as_ref()
+                .and_then(|history| history.reason.clone())
                 .clone();
             control
                 .clock
@@ -371,7 +380,9 @@ fn mqtt_expiry_records_notification_loss_while_mijia_http_remains_usable() {
             c.clock.advance(Duration::from_secs(3));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
             let previous = c.context.directory.borrow().devices["one"]
-                .last_switch_reason
+                .routing_history
+                .as_ref()
+                .and_then(|history| history.reason.clone())
                 .clone();
             c.clock.advance(Duration::from_secs(2));
             let changed = c.context.status_changed.listen();
@@ -383,13 +394,18 @@ fn mqtt_expiry_records_notification_loss_while_mijia_http_remains_usable() {
                 Some("access token expired")
             );
             assert_eq!(
-                c.context.directory.borrow().devices["one"].last_switch_reason,
+                c.context.directory.borrow().devices["one"]
+                    .routing_history
+                    .as_ref()
+                    .and_then(|history| history.reason.clone()),
                 previous
             );
             assert!(poll_once(changed).await.is_none());
             until(|| {
                 c.context.directory.borrow().devices["one"]
-                    .last_switch_reason
+                    .routing_history
+                    .as_ref()
+                    .and_then(|history| history.reason.clone())
                     .as_deref()
                     == Some("access token expired")
             })
@@ -460,7 +476,9 @@ fn virtual_group_reports_the_expired_member_path_in_a_mixed_notification_summary
                 );
                 until(|| {
                     control.context.directory.borrow().devices["group-1"]
-                        .last_switch_reason
+                        .routing_history
+                        .as_ref()
+                        .and_then(|history| history.reason.clone())
                         .as_deref()
                         == Some("hub certificate expired")
                 })

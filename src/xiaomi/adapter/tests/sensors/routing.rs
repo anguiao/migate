@@ -106,7 +106,9 @@ fn routing_evaluation_uses_the_supplied_deadline_and_keeps_owned_decisions_read_
                 .not_after;
             let observer = current.function_observer(ID).unwrap();
             let previous_reason = control.context.directory.borrow().devices["sensor"]
-                .last_switch_reason
+                .routing_history
+                .as_ref()
+                .and_then(|history| history.reason.clone())
                 .clone();
             let pending = current.refresh.borrow().contains(ID, TEMPERATURE);
             let notified = control.context.status_changed.listen();
@@ -146,7 +148,10 @@ fn routing_evaluation_uses_the_supplied_deadline_and_keeps_owned_decisions_read_
             assert!(current.function_observer(ID).unwrap().same(&observer));
             assert_eq!(current.refresh.borrow().contains(ID, TEMPERATURE), pending);
             assert_eq!(
-                control.context.directory.borrow().devices["sensor"].last_switch_reason,
+                control.context.directory.borrow().devices["sensor"]
+                    .routing_history
+                    .as_ref()
+                    .and_then(|history| history.reason.clone()),
                 previous_reason
             );
             assert!(poll_once(notified).await.is_none());

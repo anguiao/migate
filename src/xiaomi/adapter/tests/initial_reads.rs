@@ -6,7 +6,7 @@ const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
 fn work(context: &super::super::state::Context, did: &str) -> Rc<super::super::work::DeviceWork> {
     context.directory.borrow().devices[did]
-        .admitted
+        .work
         .clone()
         .unwrap()
 }
@@ -261,7 +261,7 @@ fn native_and_logical_replacements_need_their_own_initial_observations() {
         .devices
         .get_mut("one")
         .unwrap()
-        .admitted = Some(replacement.clone());
+        .work = Some(replacement.clone());
     assert!(!handle.initial_reads_ready(&configuration));
     old.notify_value_at(POWER, &json!(false), None, false, false, 2);
     assert!(!handle.initial_reads_ready(&configuration));

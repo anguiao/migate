@@ -9,7 +9,7 @@ fn retained_light_snapshot_cannot_replace_or_invalidate_a_fresh_read() {
         c.peer(peer, |_| async move {
             let light = ready_light(control).await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let stamp = work.observations.read_stamp_input(
@@ -58,7 +58,7 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
             until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(60.0)).await;
             assert!(light.light_action_current(action.token()));
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             work.notify_value_at(BRIGHTNESS, &json!(65), None, true, true, 0);
@@ -151,7 +151,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             assert!(poll_once(next.accepted()).await.is_none());
             assert_eq!(peer.count("rpcReq", "one", 0), 1);
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             work.notify_value_at(BRIGHTNESS, &json!(55), None, true, true, 0);
@@ -234,7 +234,7 @@ fn local_late_echo_after_two_accepted_frames_does_not_cancel_action() {
                 // Fresh reads update snapshots without discarding the history
                 // that identifies later echoes of either accepted frame.
                 let work = control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 for value in [20, 40] {
@@ -324,7 +324,7 @@ fn cloud_late_echo_after_two_accepted_frames_does_not_cancel_action() {
             // HTTP receipts and notification delivery share the device's
             // feedback ownership; inject at the notification dispatch boundary.
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             // Cached reports must preserve both the observed value and the
@@ -378,7 +378,7 @@ fn accepted_numeric_echoes_expire_three_seconds_after_ack_without_renewal() {
             let action = light.begin_light_action(brightness(20.0), false).unwrap();
             action.accepted().await.unwrap();
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             light
@@ -630,7 +630,7 @@ fn in_flight_feedback_survives_valid_source_epoch_change() {
             let action = light.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             work.test_source_changed();

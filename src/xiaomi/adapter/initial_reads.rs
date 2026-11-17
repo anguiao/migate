@@ -69,7 +69,7 @@ pub(super) fn ready(context: &Context, configuration: &CommittedConfiguration) -
 fn current_work<'a>(live: &'a Directory, key: &DeviceKey) -> Option<&'a DeviceWork> {
     live.devices
         .get(&key.id)
-        .and_then(|slot| slot.admitted.as_deref())
+        .and_then(|slot| slot.work.as_deref())
         .filter(|work| !work.life.is_closed() && work.key == *key)
 }
 

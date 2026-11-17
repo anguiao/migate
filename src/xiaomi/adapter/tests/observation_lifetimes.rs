@@ -11,7 +11,7 @@ fn observation_rig(members: &[&str]) -> Rig {
 
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

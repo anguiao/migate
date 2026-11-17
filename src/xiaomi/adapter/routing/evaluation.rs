@@ -82,7 +82,7 @@ impl DeviceRoutes {
 impl Core<'_> {
     fn device(&self, did: &str) -> DeviceRoutes {
         let slot = self.directory.devices.get(did);
-        let work = slot.and_then(|slot| slot.admitted.as_ref());
+        let work = slot.and_then(|slot| slot.work.as_ref());
         let access = self.access(did, Deadlines::default());
         let read_only = access.read_only;
         let has_sensors = access.has_sensors;

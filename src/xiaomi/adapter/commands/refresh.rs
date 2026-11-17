@@ -44,7 +44,7 @@ impl CommandOperation {
                 .borrow()
                 .devices
                 .get(&work.key.id)
-                .and_then(|slot| slot.admitted.as_ref())
+                .and_then(|slot| slot.work.as_ref())
                 .is_some_and(|current| Rc::ptr_eq(current, work));
         if !current {
             return;

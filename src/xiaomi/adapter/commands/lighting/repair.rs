@@ -97,7 +97,7 @@ fn snapshot_members(context: &Context, plan: &RepairPlan) -> Vec<SourceRef> {
     plan.members
         .iter()
         .filter_map(|key| {
-            let work = live.devices.get(&key.device.id)?.admitted.clone()?;
+            let work = live.devices.get(&key.device.id)?.work.clone()?;
             let sink = work.current_sink();
             Some(SourceRef {
                 id: key.id.clone(),

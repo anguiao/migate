@@ -30,7 +30,7 @@ fn directory_uses_mijia_session_and_signed_form() {
 
 fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

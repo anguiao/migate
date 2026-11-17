@@ -31,7 +31,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 .await;
                 until(|| {
                     !control.context.directory.borrow().devices["one"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                         .refresh
@@ -90,7 +90,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 peer.list_changed(&["multi"]);
                 until(|| {
                     control.context.directory.borrow().devices["multi"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                         .test_local_subscribed_contains(

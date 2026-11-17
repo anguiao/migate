@@ -33,7 +33,7 @@ async fn subscriptions_ready(c: &Control, dids: &[&str]) {
         dids.iter().all(|did| {
             live.devices
                 .get(*did)
-                .and_then(|slot| slot.admitted.as_ref())
+                .and_then(|slot| slot.work.as_ref())
                 .is_some_and(|work| {
                     let cached = &work.native;
                     work.test_local_subscribed_len()
@@ -87,7 +87,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
                             .power()
                             == Some(Power::Off)
                         && control.context.directory.borrow().devices[*did]
-                            .admitted
+                            .work
                             .as_ref()
                             .is_some_and(|work| {
                                 let refresh = work.refresh.borrow().snapshot();
@@ -117,7 +117,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
             let feedback_did = &first[0];
             assert!(
                 control.context.directory.borrow().devices[feedback_did]
-                    .admitted
+                    .work
                     .as_ref()
                     .unwrap()
                     .function_observer("outlet:2")
@@ -321,7 +321,7 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
         c.peer(peer, |peer| async move {
             subscriptions_ready(control, &["one"]).await;
             let one = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -348,7 +348,7 @@ fn a_late_did_waits_its_own_round_without_inheriting_another_dids_backoff() {
             // Hold time until the late device has a real read route and its own round.
             until(|| control.context.local_candidate("multi", false).is_ok()).await;
             let work = control.context.directory.borrow().devices["multi"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             // A global 710 ms deadline may belong to another device's preparation.

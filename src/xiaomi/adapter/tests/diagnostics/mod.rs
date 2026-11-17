@@ -9,7 +9,9 @@ mod subscriptions;
 
 fn recorded(c: &Control, did: &str) -> Option<String> {
     c.context.directory.borrow().devices[did]
-        .last_switch_reason
+        .routing_history
+        .as_ref()
+        .and_then(|history| history.reason.clone())
         .clone()
 }
 
@@ -56,7 +58,7 @@ fn diagnostics_keep_current_control_and_valid_notification_conditions_separate()
             until(|| {
                 control.context.directory.borrow().scope_valid()
                     && control.context.directory.borrow().devices["one"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                         .observer()

@@ -57,7 +57,7 @@ fn rejected_read_returns_to_existing_queue_after_recovery() {
         let before = c.cloud.lock().unwrap().property_reads.len();
         c.cloud.lock().unwrap().read_status = 401;
         let work = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         work.refresh_property(

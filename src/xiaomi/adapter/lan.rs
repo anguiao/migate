@@ -1,6 +1,7 @@
 use super::{
     model::{AdapterError, LanProtocol, LanState, LanStatus, RecoveryStatus},
     state::{Backoff, Context, Lifetime},
+    work::DeviceWork,
 };
 use crate::{
     configuration::Scope,
@@ -29,11 +30,21 @@ struct LanProfile {
 }
 
 #[derive(Default)]
-pub(super) struct LanSlot {
+pub(super) struct DirectLan {
     pub(super) status: Option<LanStatus>,
     pub(super) active: Option<(LanRecord, Client)>,
     desired: Option<LanRecord>,
     task: Option<Rc<Lifetime>>,
+}
+
+impl DirectLan {
+    pub(super) fn stop(self) -> bool {
+        let was_active = self.active.is_some();
+        if let Some(task) = self.task {
+            task.close();
+        }
+        was_active
+    }
 }
 
 pub(super) async fn watch_network(
@@ -69,7 +80,7 @@ impl Context {
         let live = self.directory.borrow();
         live.devices
             .get(did)?
-            .admitted
+            .work
             .as_ref()?
             .native
             .legacy_profile()
@@ -98,15 +109,13 @@ impl Context {
         Ok(())
     }
     pub(super) fn stop_lan(&self, did: &str) -> bool {
-        let mut was_active = false;
-        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
-            if let Some(task) = slot.lan.task.take() {
-                task.close();
-            }
-            was_active = slot.lan.active.take().is_some();
-            slot.lan.desired = None;
-            slot.lan.status = None;
-        }
+        let work = self
+            .directory
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.work.clone());
+        let was_active = work.is_some_and(|work| work.lan.take().stop());
         if was_active {
             self.refresh_changed.notify(usize::MAX);
         }
@@ -123,15 +132,19 @@ impl Context {
         did: &str,
         failure: Option<RequestError>,
     ) -> Result<(), AdapterError> {
+        let work = self
+            .directory
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.work.clone());
+        let Some(work) = work else {
+            return Ok(());
+        };
         let eligible = {
             let live = self.directory.borrow();
-            let Some(slot) = live.devices.get(did) else {
-                return Ok(());
-            };
+            let slot = &live.devices[did];
             let Some(scope) = live.scope.clone() else {
-                return Ok(());
-            };
-            let Some(work) = &slot.admitted else {
                 return Ok(());
             };
             let native = &work.native;
@@ -183,8 +196,9 @@ impl Context {
             return Ok(());
         };
         if matches!(cloud, Some(LanCredentials::NotIp)) {
-            if self.directory.borrow().devices[did]
+            if work
                 .lan
+                .borrow()
                 .status
                 .as_ref()
                 .is_some_and(|status| status.state == LanState::Ineligible)
@@ -193,13 +207,7 @@ impl Context {
             }
             self.stop_lan(did);
             self.store.lan().remove(did)?;
-            self.directory
-                .borrow_mut()
-                .devices
-                .get_mut(did)
-                .unwrap()
-                .lan
-                .status = Some(LanStatus {
+            work.lan.borrow_mut().status = Some(LanStatus {
                 protocol: profile.protocol,
                 state: LanState::Ineligible,
                 address: None,
@@ -233,22 +241,17 @@ impl Context {
             } else {
                 LanState::MissingCredentials
             };
-            let mut live = self.directory.borrow_mut();
-            let lan = &mut live.devices.get_mut(did).unwrap().lan;
-            let was_active = lan.active.is_some();
-            if let Some(task) = lan.task.take() {
-                task.close();
-            }
-            lan.active = None;
-            lan.desired = None;
-            lan.status = Some(LanStatus {
-                protocol: profile.protocol,
-                state,
-                address: None,
-                problem: None,
-                recovery: RecoveryStatus::None,
+            let previous = work.lan.replace(DirectLan {
+                status: Some(LanStatus {
+                    protocol: profile.protocol,
+                    state,
+                    address: None,
+                    problem: None,
+                    recovery: RecoveryStatus::None,
+                }),
+                ..DirectLan::default()
             });
-            drop(live);
+            let was_active = previous.stop();
             if was_active {
                 self.update_availability(did);
                 self.update_device_routing(did, "direct LAN credentials unavailable");
@@ -267,17 +270,13 @@ impl Context {
             self.stop_lan(did);
             return Ok(());
         }
-        let (life, active) = {
-            let mut live = self.directory.borrow_mut();
-            let lan = &mut live.devices.get_mut(did).unwrap().lan;
+        let (life, active, old_task) = {
+            let mut lan = work.lan.borrow_mut();
             if lan.desired.as_ref() == Some(&candidate) {
                 return Ok(());
             }
-            if let Some(task) = lan.task.take() {
-                task.close();
-            }
             let life = Rc::new(Lifetime::default());
-            lan.task = Some(life.clone());
+            let old_task = lan.task.replace(life.clone());
             lan.desired = Some(candidate.clone());
             let active = lan.active.is_some();
             if !active {
@@ -289,10 +288,12 @@ impl Context {
                     recovery: RecoveryStatus::Running,
                 });
             }
-            (life, active)
+            (life, active, old_task)
         };
+        if let Some(task) = old_task {
+            task.close();
+        }
         let context = self.clone();
-        let did = did.to_owned();
         self.tasks.spawn(async move {
             future::or(
                 async {
@@ -302,7 +303,7 @@ impl Context {
                 async {
                     context
                         .run_lan(
-                            did,
+                            work,
                             candidate,
                             stored,
                             profile,
@@ -320,13 +321,14 @@ impl Context {
 
     async fn run_lan(
         self: Rc<Self>,
-        did: String,
+        work: Rc<DeviceWork>,
         mut candidate: LanRecord,
         stored: Option<LanRecord>,
         profile: LanProfile,
         life: Rc<Lifetime>,
         start: (bool, Option<RequestError>),
     ) -> Result<(), AdapterError> {
+        let did = &work.key.id;
         let (had_active, initial_failure) = start;
         let mut backoff = Backoff::new(1, 30);
         let mut fallback = stored.filter(|record| record != &candidate);
@@ -338,7 +340,7 @@ impl Context {
         if let Some(error) = initial_failure {
             let delay = backoff.failed();
             self.lan_failed(
-                &did,
+                &work,
                 candidate.address,
                 &error,
                 RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64),
@@ -348,18 +350,10 @@ impl Context {
                 network_changed.await;
             })
             .await;
-            if !self.lan_current(&did, &candidate.scope, &life) {
+            if !self.lan_current(&work, &candidate.scope, &life) {
                 return Ok(());
             }
-            if let Some(status) = &mut self
-                .directory
-                .borrow_mut()
-                .devices
-                .get_mut(&did)
-                .unwrap()
-                .lan
-                .status
-            {
+            if let Some(status) = &mut work.lan.borrow_mut().status {
                 status.recovery = RecoveryStatus::Running;
             }
             self.status_changed.notify(usize::MAX);
@@ -374,11 +368,11 @@ impl Context {
             .await;
             match result {
                 Ok(client) => {
-                    if !self.lan_current(&did, &candidate.scope, &life) {
+                    if !self.lan_current(&work, &candidate.scope, &life) {
                         return Ok(());
                     }
                     self.activate_lan(
-                        &did,
+                        &work,
                         candidate,
                         client,
                         profile.protocol,
@@ -388,18 +382,17 @@ impl Context {
                     return Ok(());
                 }
                 Err(mut error) => {
-                    if !self.lan_current(&did, &candidate.scope, &life) {
+                    if !self.lan_current(&work, &candidate.scope, &life) {
                         return Ok(());
                     }
                     if had_active && terminal(&error) {
-                        let mut live = self.directory.borrow_mut();
-                        let lan = &mut live.devices.get_mut(&did).unwrap().lan;
+                        let mut lan = work.lan.borrow_mut();
                         lan.task = None;
                         if let Some(status) = &mut lan.status {
                             status.problem = Some(format!("candidate validation failed: {error}"));
                             status.recovery = RecoveryStatus::None;
                         }
-                        drop(live);
+                        drop(lan);
                         self.status_changed.notify(usize::MAX);
                         return Ok(());
                     }
@@ -432,11 +425,11 @@ impl Context {
                         .await
                         {
                             Ok(client) => {
-                                if !self.lan_current(&did, &candidate.scope, &life) {
+                                if !self.lan_current(&work, &candidate.scope, &life) {
                                     return Ok(());
                                 }
                                 self.activate_lan(
-                                    &did,
+                                    &work,
                                     moved,
                                     client,
                                     profile.protocol,
@@ -451,7 +444,7 @@ impl Context {
                             }
                         }
                     }
-                    if !self.lan_current(&did, &candidate.scope, &life) {
+                    if !self.lan_current(&work, &candidate.scope, &life) {
                         return Ok(());
                     }
                     if let Some((next, previous_error)) = retry_candidate.take() {
@@ -462,14 +455,8 @@ impl Context {
                         error = previous_error;
                     }
                     if terminal(&error) {
-                        self.lan_failed(&did, candidate.address, &error, RecoveryStatus::None);
-                        self.directory
-                            .borrow_mut()
-                            .devices
-                            .get_mut(&did)
-                            .unwrap()
-                            .lan
-                            .task = None;
+                        self.lan_failed(&work, candidate.address, &error, RecoveryStatus::None);
+                        work.lan.borrow_mut().task = None;
                         return Ok(());
                     }
                     let delay = backoff.failed();
@@ -477,39 +464,23 @@ impl Context {
                     let recovery =
                         RecoveryStatus::Scheduled(self.clock.unix_now() + delay.as_secs() as i64);
                     if had_active {
-                        if let Some(status) = &mut self
-                            .directory
-                            .borrow_mut()
-                            .devices
-                            .get_mut(&did)
-                            .unwrap()
-                            .lan
-                            .status
-                        {
+                        if let Some(status) = &mut work.lan.borrow_mut().status {
                             status.problem = Some(format!("candidate validation failed: {error}"));
                             status.recovery = recovery;
                         }
                         self.status_changed.notify(usize::MAX);
                     } else {
-                        self.lan_failed(&did, candidate.address, &error, recovery);
+                        self.lan_failed(&work, candidate.address, &error, recovery);
                     }
                     let network_changed = self.lan_network_changed.listen();
                     future::or(self.clock.wait_until(deadline), async {
                         network_changed.await;
                     })
                     .await;
-                    if !self.lan_current(&did, &candidate.scope, &life) {
+                    if !self.lan_current(&work, &candidate.scope, &life) {
                         return Ok(());
                     }
-                    if let Some(status) = &mut self
-                        .directory
-                        .borrow_mut()
-                        .devices
-                        .get_mut(&did)
-                        .unwrap()
-                        .lan
-                        .status
-                    {
+                    if let Some(status) = &mut work.lan.borrow_mut().status {
                         status.recovery = RecoveryStatus::Running;
                     }
                     self.status_changed.notify(usize::MAX);
@@ -520,13 +491,14 @@ impl Context {
 
     fn activate_lan(
         &self,
-        did: &str,
+        work: &DeviceWork,
         record: LanRecord,
         client: Client,
         protocol: LanProtocol,
         reason: &str,
         retry_desired: bool,
     ) -> Result<(), AdapterError> {
+        let did = &work.key.id;
         self.store.lan().save(&record)?;
         let status = LanStatus {
             protocol,
@@ -535,8 +507,7 @@ impl Context {
             problem: None,
             recovery: RecoveryStatus::None,
         };
-        let mut live = self.directory.borrow_mut();
-        let lan = &mut live.devices.get_mut(did).unwrap().lan;
+        let mut lan = work.lan.borrow_mut();
         if retry_desired {
             // Reconciliation will retry the preferred candidate while this client stays active.
             lan.desired = Some(record.clone());
@@ -544,7 +515,7 @@ impl Context {
         lan.active = Some((record, client));
         lan.task = None;
         lan.status = Some(status);
-        drop(live);
+        drop(lan);
         self.update_availability(did);
         self.refresh_source(did);
         self.update_device_routing(did, reason);
@@ -554,19 +525,21 @@ impl Context {
         Ok(())
     }
 
-    fn lan_current(&self, did: &str, scope: &Scope, life: &Rc<Lifetime>) -> bool {
-        let live = self.directory.borrow();
-        live.scope.as_ref() == Some(scope)
-            && live.devices.get(did).is_some_and(|slot| {
-                slot.admitted
-                    .as_ref()
-                    .is_some_and(|work| !work.life.is_closed())
-                    && slot
-                        .lan
-                        .task
-                        .as_ref()
-                        .is_some_and(|task| Rc::ptr_eq(task, life))
-            })
+    fn lan_current(&self, work: &Rc<DeviceWork>, scope: &Scope, life: &Rc<Lifetime>) -> bool {
+        let directory = self.directory.borrow();
+        directory.scope.as_ref() == Some(scope)
+            && !work.life.is_closed()
+            && directory
+                .devices
+                .get(&work.key.id)
+                .and_then(|slot| slot.work.as_ref())
+                .is_some_and(|current| Rc::ptr_eq(current, work))
+            && work
+                .lan
+                .borrow()
+                .task
+                .as_ref()
+                .is_some_and(|task| Rc::ptr_eq(task, life))
     }
 
     pub(super) fn lan_business_failure(
@@ -581,29 +554,28 @@ impl Context {
         ) {
             return Ok(());
         }
-        {
-            let mut live = self.directory.borrow_mut();
-            let Some(slot) = live.devices.get_mut(did) else {
-                return Ok(());
-            };
-            if slot
-                .admitted
-                .as_ref()
-                .is_none_or(|work| work.life.is_closed())
-                || !slot
-                    .lan
+        let work = self
+            .directory
+            .borrow()
+            .devices
+            .get(did)
+            .and_then(|slot| slot.work.clone());
+        let Some(work) = work else {
+            return Ok(());
+        };
+        let previous = {
+            let mut lan = work.lan.borrow_mut();
+            if work.life.is_closed()
+                || !lan
                     .active
                     .as_ref()
                     .is_some_and(|(_, active)| active.same(client))
             {
                 return Ok(());
             }
-            if let Some(task) = slot.lan.task.take() {
-                task.close();
-            }
-            slot.lan.active = None;
-            slot.lan.desired = None;
-        }
+            std::mem::take(&mut *lan)
+        };
+        previous.stop();
         self.reconcile_lan_after(did, Some(error.clone()))?;
         self.update_availability(did);
         self.update_device_routing(did, "direct LAN business request failed");
@@ -614,20 +586,12 @@ impl Context {
 
     fn lan_failed(
         &self,
-        did: &str,
+        work: &DeviceWork,
         address: Ipv4Addr,
         error: &RequestError,
         recovery: RecoveryStatus,
     ) {
-        if let Some(status) = &mut self
-            .directory
-            .borrow_mut()
-            .devices
-            .get_mut(did)
-            .unwrap()
-            .lan
-            .status
-        {
+        if let Some(status) = &mut work.lan.borrow_mut().status {
             status.state = LanState::Failed;
             status.address = Some(address);
             status.problem = Some(format!(

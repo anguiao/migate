@@ -233,7 +233,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             // dropped for the next rebuild.
             let (id, _) = {
                 let live = c.context.directory.borrow();
-                let record = live.devices["group-1"].admitted.as_ref().unwrap();
+                let record = live.devices["group-1"].work.as_ref().unwrap();
                 let cached = record.native.clone();
                 let light = cached
                     .device()

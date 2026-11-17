@@ -1,6 +1,6 @@
 use super::*;
 
-fn retired_queued_lan_task_does_not_probe(recovery: bool) {
+fn retired_queued_lan_task_does_not_probe(recovery: bool, retire_work: bool) {
     use crate::xiaomi::lan::{Client, Failure, RequestError, SendStage};
     use std::sync::atomic::Ordering;
 
@@ -37,7 +37,15 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool) {
         );
         {
             let mut live = context.directory.borrow_mut();
-            let lan = &mut live.devices.get_mut(did).unwrap().lan;
+            let mut lan = live
+                .devices
+                .get_mut(did)
+                .unwrap()
+                .work
+                .as_ref()
+                .unwrap()
+                .lan
+                .borrow_mut();
             lan.active = Some((record, client.clone()));
             lan.status = Some(LanStatus {
                 protocol: super::super::super::model::LanProtocol::Miot,
@@ -62,13 +70,25 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool) {
     }
     assert!(
         context.directory.borrow().devices[did]
+            .work
+            .as_ref()
+            .unwrap()
             .lan
+            .borrow()
             .status
             .as_ref()
             .is_some_and(|status| status.state == LanState::Authenticating)
     );
-    context.remove_source_slot(did);
-    assert!(!context.directory.borrow().devices.contains_key(did));
+    if retire_work {
+        context.directory.borrow().devices[did]
+            .work
+            .as_ref()
+            .unwrap()
+            .retire();
+    } else {
+        context.remove_source_slot(did);
+        assert!(!context.directory.borrow().devices.contains_key(did));
+    }
     block_on(future::or(
         async {
             context.tasks.run().await.unwrap();
@@ -83,12 +103,12 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool) {
 
 #[test]
 fn removed_device_cancels_queued_recovery_before_first_poll() {
-    retired_queued_lan_task_does_not_probe(true);
+    retired_queued_lan_task_does_not_probe(true, false);
 }
 
 #[test]
 fn removed_device_cancels_queued_authentication_before_first_poll() {
-    retired_queued_lan_task_does_not_probe(false);
+    retired_queued_lan_task_does_not_probe(false, false);
 }
 
 #[test]
@@ -185,7 +205,7 @@ fn cached_scope_restarts_with_ha_state(ha_stopped: bool) {
                 before
             );
             let work = control.context.directory.borrow().devices[did]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -343,7 +363,11 @@ fn sent_timeout_is_not_replayed_and_only_failed_device_recovers_with_new_baselin
             first.values.lock().unwrap().insert((2, 1), json!(false));
             until(|| {
                 control.context.directory.borrow().devices[dids[0]]
+                    .work
+                    .as_ref()
+                    .unwrap()
                     .lan
+                    .borrow()
                     .status
                     .as_ref()
                     .is_some_and(|status| matches!(status.recovery, RecoveryStatus::Scheduled(_)))
@@ -533,7 +557,11 @@ fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
                     async {
                         let scheduled = |delay| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| {
@@ -555,7 +583,11 @@ fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
                         rig.clock.advance(Duration::from_secs(2));
                         until(|| {
                             context.directory.borrow().devices[&record.did]
+                                .work
+                                .as_ref()
+                                .unwrap()
                                 .lan
+                                .borrow()
                                 .status
                                 .as_ref()
                                 .is_some_and(|status| status.state == LanState::Ready)
@@ -576,4 +608,119 @@ fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
         )
         .await;
     });
+}
+
+#[test]
+fn retiring_native_work_cancels_its_queued_authentication() {
+    retired_queued_lan_task_does_not_probe(false, true);
+}
+
+fn cached_native_lan() -> (Rig, FakeDevice) {
+    let did = "656878122";
+    let instance = serde_json::from_str(include_str!(
+        "../../../../../tests/fixtures/miot/dmaker-p5c.json"
+    ))
+    .unwrap();
+    let rig = Rig::custom_lights(&[(did, "dmaker.fan.p5c", instance)]);
+    let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
+    let peer = FakeDevice::new(token.clone(), token.clone());
+    rig.store
+        .lan()
+        .save(&LanRecord {
+            scope: rig
+                .store
+                .devices()
+                .load_configuration()
+                .unwrap()
+                .scope
+                .unwrap(),
+            did: did.into(),
+            model: "dmaker.fan.p5c".into(),
+            address: "127.0.0.1".parse().unwrap(),
+            token,
+        })
+        .unwrap();
+    rig.network.lan_port.set(peer.address.port());
+    (rig, peer)
+}
+
+#[test]
+fn native_work_keeps_its_authenticated_client_only_through_a_logical_replacement() {
+    let did = "656878122";
+    let (rig, _peer) = cached_native_lan();
+    let context = rig.source.context.clone();
+    let work = context.directory.borrow().devices[did]
+        .work
+        .clone()
+        .unwrap();
+    context.reconcile_lan(did).unwrap();
+    block_on(future::or(
+        async {
+            context.tasks.run().await.unwrap();
+            panic!("task runner stopped");
+        },
+        async {
+            until(|| context.direct_candidate(did).is_ok()).await;
+            let client = context.direct_candidate(did).unwrap();
+            let (physical, _) =
+                crate::device::PhysicalDevice::new(work.native.physical_description("Replacement"));
+            let previous = work.replace_sink(Rc::new(super::super::super::work::LogicalSink::new(
+                physical,
+            )));
+            previous.close();
+            assert!(context.direct_candidate(did).unwrap().same(&client));
+            work.retire();
+            assert!(
+                work.lan.borrow().active.is_none(),
+                "a retained retired runtime must release its authenticated client"
+            );
+        },
+    ));
+}
+
+#[test]
+fn failed_lan_credential_removal_still_retires_native_authority() {
+    let did = "656878122";
+    let (rig, _peer) = cached_native_lan();
+    let context = rig.source.context.clone();
+    let work = context.directory.borrow().devices[did]
+        .work
+        .clone()
+        .unwrap();
+    context.reconcile_lan(did).unwrap();
+    block_on(future::or(
+        async {
+            context.tasks.run().await.unwrap();
+            panic!("task runner stopped");
+        },
+        async {
+            until(|| context.direct_candidate(did).is_ok()).await;
+            let database = rusqlite::Connection::open(rig.store.path()).unwrap();
+            database
+                .execute_batch(
+                    "CREATE TRIGGER reject_lan_removal BEFORE DELETE ON xiaomi_lan
+                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )
+                .unwrap();
+            assert!(context.revoke(did, "confirmed removal").is_err());
+            assert!(
+                work.life.is_closed(),
+                "storage failure must not retain source authority"
+            );
+            assert!(work.current_sink().life.is_closed());
+            assert!(work.lan.borrow().active.is_none());
+            assert!(context.control_path(did).is_none());
+            assert!(
+                context.directory.borrow().devices[did]
+                    .routing_history
+                    .is_none()
+            );
+            context.update_device_routing(did, "late source event");
+            assert!(
+                context.directory.borrow().devices[did]
+                    .routing_history
+                    .is_none()
+            );
+        },
+    ));
 }

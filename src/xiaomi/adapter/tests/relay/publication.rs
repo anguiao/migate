@@ -81,7 +81,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| {
-                let work = control.context.directory.borrow().devices["one"].admitted.clone().unwrap();
+                let work = control.context.directory.borrow().devices["one"].work.clone().unwrap();
                 [2, 3, 4].iter().all(|siid| {
                     let id = format!("relay:{siid}");
                     let function = work.physical().function(&id).unwrap();

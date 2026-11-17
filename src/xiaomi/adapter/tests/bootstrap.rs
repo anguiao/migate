@@ -129,7 +129,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
         .clone()
         .unwrap();
     let work = context.directory.borrow().devices["one"]
-        .admitted
+        .work
         .clone()
         .unwrap();
     failed_recognition(context, "one");
@@ -178,7 +178,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     assert!(Rc::ptr_eq(
         &work,
         context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .as_ref()
             .unwrap()
     ));
@@ -369,7 +369,7 @@ fn startup_reparses_cached_source_before_committing_new_capabilities() {
             .is_none()
     );
     let old_work = restored.context.directory.borrow().devices["sensor"]
-        .admitted
+        .work
         .clone()
         .unwrap();
     let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
@@ -646,7 +646,7 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                 until(|| {
                     ["one", "multi", "two"].iter().all(|did| {
                         let live = control.context.directory.borrow();
-                        let work = live.devices[*did].admitted.as_ref().unwrap();
+                        let work = live.devices[*did].work.as_ref().unwrap();
                         work.observer().is_some()
                     })
                 })

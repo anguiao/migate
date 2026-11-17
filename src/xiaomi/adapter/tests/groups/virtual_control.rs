@@ -82,7 +82,7 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.admitted.as_ref())
+                    .filter_map(|slot| slot.work.as_ref())
                     .all(|work| {
                         work.refresh.borrow().snapshot().pending.is_empty()
                             && work.refresh.borrow().snapshot().inflight.is_empty()

@@ -659,7 +659,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
                     .borrow()
                     .devices
                     .get("group-1")
-                    .is_some_and(|slot| slot.admitted.is_some())
+                    .is_some_and(|slot| slot.work.is_some())
             })
             .await;
             until(|| {
@@ -672,7 +672,7 @@ fn new_physical_group_discovers_own_local_access_after_member_session() {
             assert!(peer.lists() > lists);
             let id = {
                 let live = control.context.directory.borrow();
-                let record = live.devices["group-1"].admitted.as_ref().unwrap();
+                let record = live.devices["group-1"].work.as_ref().unwrap();
                 let cached = record.native.clone();
                 cached
                     .device()
@@ -763,7 +763,7 @@ fn native_groups_use_own_routes_and_respect_virtual_type() {
                         .borrow()
                         .devices
                         .get(*did)
-                        .is_some_and(|slot| slot.admitted.is_some())
+                        .is_some_and(|slot| slot.work.is_some())
                 })
             })
             .await;

@@ -30,7 +30,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             let three = function(&control.context.registry, "one", "relay:4");
             until(|| {
                 control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .as_ref()
                     .unwrap()
                     .function_observer("relay:3")
@@ -96,7 +96,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
                 relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                     && relay.snapshot().power() == Some(Power::Off)
                     && c.context.directory.borrow().devices["one"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                         .function_observer("relay:4")
@@ -121,7 +121,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
                     .any(|(did, siid, piid)| did == "one" && *siid == 4 && *piid == 2)
             );
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             assert_eq!(work.observation_source("relay:4"), Some(PathKind::Cloud));

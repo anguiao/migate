@@ -108,7 +108,7 @@ impl Context {
                 && live
                     .devices
                     .get(&work.key.id)
-                    .and_then(|slot| slot.admitted.as_deref())
+                    .and_then(|slot| slot.work.as_deref())
                     .is_some_and(|current| std::ptr::eq(current, work))
         };
         if error.is_unauthorized() {

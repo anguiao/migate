@@ -9,7 +9,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -91,7 +91,7 @@ fn relay_power_subscriptions_are_independent_when_another_channel_is_rejected() 
             let relay = function(&control.context.registry, "one", "relay:3");
             let other = function(&control.context.registry, "one", "relay:4");
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -124,7 +124,7 @@ fn mode_notification_stays_live_when_every_power_subscription_is_rejected() {
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -155,7 +155,7 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:3");
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -196,7 +196,7 @@ fn retained_and_stale_modes_do_not_replace_confirmed_feedback() {
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -277,7 +277,7 @@ fn mode_without_notify_is_polled_but_never_treated_as_a_power_notification() {
         c.peer(peer, |peer| async move {
             let relay = function(&control.context.registry, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -334,7 +334,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
             c.peer(peer, |_| async move {
                 let relay = function(&control.context.registry, "one", "relay:2");
                 let work = control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 until(|| {
@@ -388,7 +388,7 @@ fn relay_power_read_reports_its_real_source_in_terminal_status() {
             c.peer(peer, |_| async move {
                 until(|| {
                     let live = control.context.directory.borrow();
-                    let work = live.devices["one"].admitted.as_ref().unwrap();
+                    let work = live.devices["one"].work.as_ref().unwrap();
                     let relay = work.physical().function("relay:3").unwrap();
                     relay.snapshot().power() == Some(Power::Off)
                         && work.function_observer("relay:3").is_some()
@@ -443,7 +443,7 @@ fn relay_power_live_notification_records_source_without_accepting_retained_or_in
             let control = &c;
             c.peer(peer, |peer| async move {
                 let work = control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 let relay = work.physical().function("relay:2").unwrap();

@@ -37,7 +37,7 @@ fn outlet_and_measurement_diagnostics_keep_both_source_results_without_duplicate
                     until(|| {
                         local.count("subscribe", did, binding.siid) >= 4
                             && control.context.directory.borrow().devices[did]
-                                .admitted
+                                .work
                                 .as_ref()
                                 .unwrap()
                                 .test_local_exhausted()

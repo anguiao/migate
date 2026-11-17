@@ -62,7 +62,7 @@ pub(super) struct Context {
     pub(super) tasks: TaskSet,
     pub(super) configuration_changed: Rc<Event>,
     pub(super) changed: Event,
-    pub(super) routing_history: RefCell<super::diagnostics::history::PriorityHistory>,
+    pub(super) routing_history: RefCell<super::routing::PriorityHistory>,
     pub(super) status_changed: Event,
     pub(super) ready: Rc<Ready>,
     pub(super) clock: Arc<dyn Clock>,

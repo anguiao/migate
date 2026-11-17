@@ -125,7 +125,7 @@ fn local_curtain_reads_and_subscribes_only_the_three_reported_properties() {
                     .borrow()
                     .devices
                     .get("one")
-                    .is_some_and(|slot| slot.admitted.is_some())
+                    .is_some_and(|slot| slot.work.is_some())
             })
             .await;
             assert_eq!(work(control).channels(), vec!["curtain:2"]);

@@ -104,7 +104,7 @@ fn resolve_initial_failure(
         .borrow()
         .devices
         .get(&work.key.id)
-        .and_then(|slot| slot.admitted.as_deref())
+        .and_then(|slot| slot.work.as_deref())
         .is_some_and(|current| std::ptr::eq(current, work));
     if current_work {
         work.resolve_initial(&read.id, read.input);
@@ -414,7 +414,7 @@ fn works(context: &Context) -> Vec<Rc<DeviceWork>> {
         .borrow()
         .devices
         .values()
-        .filter_map(|slot| slot.admitted.clone())
+        .filter_map(|slot| slot.work.clone())
         .collect()
 }
 pub(super) fn cancel(work: &DeviceWork) {

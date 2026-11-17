@@ -248,7 +248,7 @@ fn cloud_read_access_rejection_processes_dependent_virtual_groups_only() {
             pending_offline(&c, "member-b");
             let path = c.context.mijia_path().unwrap();
             let work = c.context.directory.borrow().devices["member-a"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             c.context.cloud_property_read_error(
@@ -347,7 +347,7 @@ fn logical_only_physical_group_replacement_preserves_pending_group_history() {
         let group = recorded(&c, "group-1");
         let other = recorded(&c, "member-b");
         let work = c.context.directory.borrow().devices["group-1"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let mut narrowed = ls2307_instance();
@@ -374,7 +374,7 @@ fn logical_only_physical_group_replacement_preserves_pending_group_history() {
         assert!(Rc::ptr_eq(
             &work,
             c.context.directory.borrow().devices["group-1"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
         ));
@@ -440,14 +440,20 @@ fn changed_group_membership_processes_the_group_without_consuming_old_or_new_mem
             );
             assert_eq!(recorded(&c, "member-b"), other);
 
-            let selection = c.context.directory.borrow().devices["group-1"].routing_selection;
+            let selection = c.context.directory.borrow().devices["group-1"]
+                .routing_history
+                .as_ref()
+                .map(|history| history.selection);
             pending_offline(&c, "member-b");
             confirm_group_members(&c, &["member-b"]);
             let plan = c.publication.plan().unwrap().unwrap();
             c.publication.apply(c.publication.prepare(plan)).unwrap();
             assert_eq!(c.context.active_notification("group-1"), None);
             assert_ne!(
-                c.context.directory.borrow().devices["group-1"].routing_selection,
+                c.context.directory.borrow().devices["group-1"]
+                    .routing_history
+                    .as_ref()
+                    .map(|history| history.selection),
                 selection
             );
             assert_eq!(recorded(&c, "member-b"), other);
@@ -492,7 +498,9 @@ fn removal_releases_the_baseline_without_processing_other_device_history() {
         c.publication.apply(c.publication.prepare(plan)).unwrap();
         assert!(
             c.context.directory.borrow().devices["one"]
-                .routing_selection
+                .routing_history
+                .as_ref()
+                .map(|history| history.selection)
                 .is_none()
         );
         assert_eq!(recorded(&c, "one"), None);
@@ -515,7 +523,9 @@ fn removal_releases_the_baseline_without_processing_other_device_history() {
         assert_eq!(recorded(&c, "one"), None);
         assert!(
             c.context.directory.borrow().devices["one"]
-                .routing_selection
+                .routing_history
+                .as_ref()
+                .map(|history| history.selection)
                 .is_some()
         );
         assert_pending_history(&c, "two", &other);

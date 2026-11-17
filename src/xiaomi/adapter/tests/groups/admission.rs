@@ -286,7 +286,7 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
         {
             let live = c.context.directory.borrow();
             let slot = &live.devices["group-1"];
-            let record = slot.admitted.as_ref().unwrap();
+            let record = slot.work.as_ref().unwrap();
             let cached = record.native.clone();
             assert_eq!(cached.model(), "mijia.light.group3");
             let light = cached
@@ -306,11 +306,11 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
                 matches!(capability, crate::device::Capability::ColorTemperature(_))
             }));
             // The member has no description and no source of its own.
-            assert!(live.devices["member-a"].admitted.is_none());
+            assert!(live.devices["member-a"].work.is_none());
             // Native group commands use cloud access; its state needs known members.
             assert!(
                 live.devices["group-1"]
-                    .admitted
+                    .work
                     .as_ref()
                     .is_none_or(|work| !work.test_local_attached())
             );
@@ -320,7 +320,7 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
             Some(super::super::routing::ControlPath::Cloud(_))
         ));
         let first = c.context.directory.borrow().devices["group-1"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         assert_eq!(first.physical().label(), "Native group");
@@ -357,7 +357,7 @@ fn repeated_and_failed_directories_keep_the_admitted_native_group() {
         })
         .await;
         let first = c.context.directory.borrow().devices["group-1"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         for (status, failed) in [(503, true), (200, false)] {
@@ -366,7 +366,7 @@ fn repeated_and_failed_directories_keep_the_admitted_native_group() {
             until(|| c.context.diagnostics().catalog_problem.is_some() == failed).await;
             let live = c.context.directory.borrow();
             let slot = &live.devices["group-1"];
-            assert!(Rc::ptr_eq(slot.admitted.as_ref().unwrap(), &first));
+            assert!(Rc::ptr_eq(slot.work.as_ref().unwrap(), &first));
             assert!(slot.cloud_access.is_some());
         }
     }));

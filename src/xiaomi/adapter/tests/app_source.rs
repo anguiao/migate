@@ -44,7 +44,7 @@ impl AppSource {
     ) {
         let physical = self.physical.as_ref().expect("test source has a device");
         let work = self.handle.0.directory.borrow().devices[&physical.key().id]
-            .admitted
+            .work
             .clone()
             .expect("test device has a source");
         let function = work
@@ -172,7 +172,7 @@ impl AppSource {
                     native: Some(work.native.clone()),
                 };
                 let slot = DeviceSlot {
-                    admitted: Some(work),
+                    work: Some(work),
                     latest_description: Some(candidate),
                     ..Default::default()
                 };
@@ -248,7 +248,7 @@ impl AppSource {
     pub(crate) fn directory_name(&self, key: &DeviceKey, name: &str) {
         let mut live = self.handle.0.directory.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();
-        let native = slot.admitted.as_ref().unwrap().native.clone();
+        let native = slot.work.as_ref().unwrap().native.clone();
         slot.latest_description.as_mut().unwrap().native = Some(native);
         slot.latest_description.as_mut().unwrap().raw.name = Some(name.to_owned());
     }

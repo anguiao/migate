@@ -18,7 +18,7 @@ fn rig() -> Rig {
 }
 fn work(c: &Control) -> Rc<super::work::DeviceWork> {
     c.context.directory.borrow().devices["one"]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

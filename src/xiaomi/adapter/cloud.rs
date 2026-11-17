@@ -235,7 +235,7 @@ pub(super) async fn run(
                 .iter()
                 .filter(|(did, slot)| {
                     members.contains(*did)
-                        && (slot.admitted.is_some() || slot.latest_description.is_some())
+                        && (slot.work.is_some() || slot.latest_description.is_some())
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -314,7 +314,7 @@ pub(super) async fn run(
             // A home member missing from a complete account catalog remains
             // visible to group membership, but cannot be described until its
             // directory record establishes whether it is a split alias.
-            let known = context.directory.borrow().devices[&did].admitted.is_some()
+            let known = context.directory.borrow().devices[&did].work.is_some()
                 || context.directory.borrow().devices[&did]
                     .latest_description
                     .is_some();

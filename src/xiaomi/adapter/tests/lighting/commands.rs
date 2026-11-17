@@ -68,7 +68,7 @@ fn light3_keeps_raw_precision_and_quantized_duplicate_frames_do_not_write() {
 
             freeze_light_clock(control);
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let old_read = work.observations.read_stamp_input(
@@ -214,7 +214,7 @@ fn retired_consumer_keeps_sent_http_startup_owned_until_original_receipt() {
         let action = light.begin_light_action(brightness(60.0), false).unwrap();
         until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
         let record = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         record.life.close();
@@ -459,7 +459,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
         let first = old.begin_light_action(brightness(60.0), false).unwrap();
         until(|| c.cloud.lock().unwrap().numeric_writes.len() == 1).await;
         let mut changed = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .as_ref()
             .unwrap()
             .native

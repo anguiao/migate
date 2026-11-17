@@ -57,7 +57,7 @@ pub(crate) struct PreparedSources {
 impl Directory {
     fn committed_work(&self, scope: &Scope, key: &DeviceKey) -> Option<(&DeviceSlot, &DeviceWork)> {
         let slot = self.devices.get(&key.id)?;
-        let work = slot.admitted.as_deref()?;
+        let work = slot.work.as_deref()?;
         (self.scope.as_ref() == Some(scope)
             && key.source == "xiaomi"
             && work.key == *key
@@ -120,7 +120,7 @@ impl SourceHandle {
     pub(crate) fn stop_actions(&self) {
         let live = self.0.directory.borrow();
         for slot in live.devices.values() {
-            if let Some(work) = &slot.admitted {
+            if let Some(work) = &slot.work {
                 work.physical().reset_actions();
                 work.light_frames.borrow_mut().cancel_all();
             }
@@ -139,11 +139,7 @@ impl SourceHandle {
         directory
             .devices
             .iter()
-            .filter(|(_, slot)| {
-                slot.admitted
-                    .as_ref()
-                    .is_none_or(|work| !work.life.is_closed())
-            })
+            .filter(|(_, slot)| slot.work.as_ref().is_none_or(|work| !work.life.is_closed()))
             .map(|(did, _)| DeviceKey::new("xiaomi", did))
             .chain(
                 directory
@@ -205,7 +201,7 @@ impl SourceHandle {
             && live
                 .devices
                 .get(&key.id)
-                .and_then(|slot| slot.admitted.as_ref())
+                .and_then(|slot| slot.work.as_ref())
                 .is_some_and(|work| work.key == *key && !work.life.is_closed())
     }
 
@@ -260,7 +256,7 @@ impl SourceHandle {
         for work in directory
             .devices
             .values()
-            .filter_map(|slot| slot.admitted.as_ref())
+            .filter_map(|slot| slot.work.as_ref())
         {
             for function in work.physical().functions() {
                 if let Some(mode) = function.snapshot().relay_mode() {
@@ -328,7 +324,7 @@ impl SourceHandle {
             .devices
             .values()
             .filter_map(|slot| {
-                let work = slot.admitted.as_ref()?;
+                let work = slot.work.as_ref()?;
                 let native = configuration
                     .device(&work.key)
                     .and_then(|device| device.native.clone())
@@ -357,7 +353,7 @@ impl SourceHandle {
                 OperationKind::Reused => {}
                 OperationKind::ReplacedLogical => {
                     let work = self.0.directory.borrow().devices[&key.id]
-                        .admitted
+                        .work
                         .clone()
                         .expect("a logical replacement keeps its native runtime");
                     let served = plan
@@ -459,10 +455,8 @@ impl SourceHandle {
         routing_affected.extend(rules_changed);
         for key in &prepared.removed {
             self.0.retire_work(&key.id);
-            let mut directory = self.0.directory.borrow_mut();
-            if let Some(slot) = directory.devices.get_mut(&key.id) {
-                slot.routing_selection = None;
-                slot.last_switch_reason = None;
+            if let Some(slot) = self.0.directory.borrow_mut().devices.get_mut(&key.id) {
+                slot.routing_history = None;
             }
         }
         let mut started = Vec::new();
@@ -500,7 +494,7 @@ impl SourceHandle {
                 .devices
                 .get_mut(&did)
                 .unwrap()
-                .admitted = Some(source.work.clone());
+                .work = Some(source.work.clone());
             started.push(source);
         }
         // Reused entries receive committed metadata without preparing resources
@@ -511,7 +505,7 @@ impl SourceHandle {
             }
             let device = configuration.device(&operation.key).unwrap();
             let work = self.0.directory.borrow().devices[&operation.key.id]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             work.physical().set_label(device.label.clone());
@@ -547,7 +541,7 @@ impl SourceHandle {
                 directory
                     .devices
                     .get(did)
-                    .is_some_and(|slot| slot.admitted.is_some())
+                    .is_some_and(|slot| slot.work.is_some())
             });
         }
         if !routing_affected.is_empty() {
@@ -569,7 +563,7 @@ impl SourceHandle {
             .borrow()
             .devices
             .get(&key.id)
-            .and_then(|slot| slot.admitted.as_ref())
+            .and_then(|slot| slot.work.as_ref())
         {
             work.physical().set_label(label.into());
         }
@@ -620,15 +614,16 @@ impl Context {
 
     /// Confirmed removal closes every retained authority before persistence.
     pub(super) fn revoke(&self, did: &str, reason: &str) -> Result<(), AdapterError> {
-        self.stop_lan(did);
-        self.store.lan().remove(did)?;
         let key = DeviceKey::new("xiaomi", did);
         let (admitted, cached) = self
             .directory
-            .borrow()
+            .borrow_mut()
             .devices
-            .get(did)
-            .map(|slot| (slot.admitted.clone(), slot.latest_description.is_some()))
+            .get_mut(did)
+            .map(|slot| {
+                slot.routing_history = None;
+                (slot.work.clone(), slot.latest_description.is_some())
+            })
             .unwrap_or_default();
         if let Some(work) = &admitted {
             let sink = work.current_sink();
@@ -636,6 +631,8 @@ impl Context {
                 .set_availability(Availability::Unavailable(reason.into()));
             work.retire();
         }
+        self.refresh_group_states(did);
+        self.store.lan().remove(did)?;
         if admitted.is_some() || cached {
             self.store
                 .devices()
@@ -644,7 +641,6 @@ impl Context {
                     reason: reason.into(),
                 }])?;
         }
-        self.refresh_group_states(did);
         Ok(())
     }
 }

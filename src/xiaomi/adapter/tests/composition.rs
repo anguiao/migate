@@ -386,12 +386,12 @@ fn another_functions_ready_notification_does_not_suppress_fan_feedback() {
         c.peer(peer, |peer| async move {
             until(|| {
                 control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .is_some()
             })
             .await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {

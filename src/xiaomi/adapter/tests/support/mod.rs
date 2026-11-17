@@ -67,7 +67,7 @@ pub(super) fn local_device_offline(
     use crate::xiaomi::central::{CentralError, RequestOutcome, RequestStage};
 
     let work = context.directory.borrow().devices[did]
-        .admitted
+        .work
         .clone()
         .unwrap();
     context.local_device_outcome(
@@ -97,7 +97,7 @@ pub(super) fn force_unavailable(context: &super::super::state::Context, did: &st
         .borrow()
         .devices
         .get(did)
-        .and_then(|slot| slot.admitted.clone())
+        .and_then(|slot| slot.work.clone())
     {
         work.physical()
             .set_availability(Availability::Unavailable(reason.clone()));
@@ -303,7 +303,7 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
                             .borrow()
                             .devices
                             .get(*did)
-                            .and_then(|slot| slot.admitted.as_ref())
+                            .and_then(|slot| slot.work.as_ref())
                             .is_some_and(|work| {
                                 // Every function owns one or more native
                                 // property bindings, not one per channel.

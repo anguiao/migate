@@ -151,6 +151,7 @@ impl CommandOperation {
         {
             entry.inflight = Some(status.clone());
         }
+        drop(status);
         self.commands.changed.notify(usize::MAX);
     }
 

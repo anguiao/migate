@@ -301,7 +301,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
             .await;
             until(|| {
                 let work = control.context.directory.borrow().devices[did]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 let fan = function(&control.context.registry, did, "fan:2");
@@ -326,7 +326,11 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
                 .devices
                 .get_mut(did)
                 .unwrap()
+                .work
+                .as_ref()
+                .unwrap()
                 .lan
+                .borrow_mut()
                 .active = Some((record, fresh));
             peer.hold_hello.store(true, Ordering::Relaxed);
             let packets = peer.packets.load(Ordering::Relaxed);
@@ -341,7 +345,11 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
                 .devices
                 .get_mut(did)
                 .unwrap()
+                .work
+                .as_ref()
+                .unwrap()
                 .lan
+                .borrow_mut()
                 .active = None;
             peer.hold_hello.store(false, Ordering::Relaxed);
             action.accepted().await.unwrap();
@@ -416,7 +424,7 @@ fn old_direct_read_cannot_override_a_new_cloud_read() {
             let fan = function(&control.context.registry, did, "fan:2");
             until(|| fan.snapshot().fan().unwrap().power.value == Some(true)).await;
             let work = control.context.directory.borrow().devices[did]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let power = PropertyBinding { siid: 2, piid: 1 };
@@ -433,7 +441,11 @@ fn old_direct_read_cannot_override_a_new_cloud_read() {
                 .devices
                 .get_mut(did)
                 .unwrap()
+                .work
+                .as_ref()
+                .unwrap()
                 .lan
+                .borrow_mut()
                 .active = None;
             control.context.refresh_changed.notify(usize::MAX);
             control.context.changed.notify(usize::MAX);
@@ -510,7 +522,7 @@ fn a_held_direct_read_does_not_block_the_next_read_for_another_device() {
             .await;
             let works = dids.map(|did| {
                 control.context.directory.borrow().devices[did]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap()
             });

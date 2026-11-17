@@ -2,7 +2,7 @@ use super::*;
 
 fn local_active(c: &Control, did: &str) -> bool {
     c.context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .is_some_and(|work| work.test_observer_is_local())
 }

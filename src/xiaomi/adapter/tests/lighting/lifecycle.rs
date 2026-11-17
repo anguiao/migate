@@ -57,7 +57,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .unwrap();
             let original_physical = control.context.registry.get(&key).unwrap();
             let original = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
                 .native
@@ -143,7 +143,7 @@ fn binding_change_retires_old_feedback_authority() {
             let action = old.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
             let mut changed = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
                 .native
@@ -231,7 +231,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
             drop(old);
 
             let old_work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let retired_work = Rc::downgrade(&old_work);

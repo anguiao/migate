@@ -73,7 +73,7 @@ fn total_control_refresh_reads_mixed_values_without_inference_and_coalesces() {
             peer.release("multi", 3, json!({"value":true})).await;
             until(|| {
                 control.context.directory.borrow().devices["multi"]
-                    .admitted
+                    .work
                     .as_ref()
                     .unwrap()
                     .pending_problems()

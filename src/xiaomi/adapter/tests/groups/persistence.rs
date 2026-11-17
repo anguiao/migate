@@ -50,7 +50,7 @@ fn failed_revocation_persistence_stops_the_source_after_closing_control() {
                 .borrow()
                 .devices
                 .get("group-1")
-                .and_then(|slot| slot.admitted.as_ref())
+                .and_then(|slot| slot.work.as_ref())
                 .is_none_or(|work| work.life.is_closed()),
         "native authority must remain closed after the failed revocation"
     );
@@ -190,7 +190,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         // member's first read as a failure so this test can exercise Matter
         // startup without waiting for the bounded offline deadline.
         let member_work = failing.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let member_function = &member_work.native.device().functions()[0];
@@ -244,13 +244,13 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
             assert!(
                 live.devices
                     .get("group-1")
-                    .is_none_or(|slot| slot.admitted.is_none()),
+                    .is_none_or(|slot| slot.work.is_none()),
                 "bootstrap overlay must not admit a revoked group"
             );
             assert!(
                 live.devices
                     .get("one")
-                    .is_some_and(|slot| slot.admitted.is_some()),
+                    .is_some_and(|slot| slot.work.is_some()),
                 "hidden member is restored"
             );
         }
@@ -445,13 +445,13 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             assert!(
                 live.devices
                     .get("group-1")
-                    .is_none_or(|slot| slot.admitted.is_none()),
+                    .is_none_or(|slot| slot.work.is_none()),
                 "a withdrawn group is not admitted"
             );
             assert!(
                 live.devices
                     .get("one")
-                    .is_some_and(|slot| slot.admitted.is_some()),
+                    .is_some_and(|slot| slot.work.is_some()),
                 "the former hidden member is restored"
             );
         }

@@ -100,7 +100,7 @@ pub(in super::super) async fn repair_ready(c: &Control) {
             .borrow()
             .devices
             .get("group-1")
-            .is_some_and(|slot| slot.admitted.is_some())
+            .is_some_and(|slot| slot.work.is_some())
     })
     .await;
     until(|| {
@@ -110,7 +110,7 @@ pub(in super::super) async fn repair_ready(c: &Control) {
                 .borrow()
                 .devices
                 .get(*did)
-                .is_some_and(|slot| slot.admitted.is_some())
+                .is_some_and(|slot| slot.work.is_some())
         })
     })
     .await;

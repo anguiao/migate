@@ -58,7 +58,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let old = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let two = function(&c.context.registry, "two", "light:2");
@@ -596,7 +596,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         let idle = || {
             c.context.directory.borrow().devices.values().all(|slot| {
-                slot.admitted.as_ref().is_some_and(|work| {
+                slot.work.as_ref().is_some_and(|work| {
                     let state = work.refresh.borrow().snapshot();
                     work.physical().availability() == Availability::Available
                         && state.pending.is_empty()
@@ -617,7 +617,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
         let configuration_version = committed.configuration_version;
         let physical = c.context.registry.get(&key).unwrap();
         let native_runtime = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let matter = PublishedLightModel::new(&c.publication, &c.store);
@@ -695,7 +695,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
         assert!(Rc::ptr_eq(
             &native_runtime,
             c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
         ));

@@ -17,7 +17,7 @@ impl Context {
             .filter_map(|member| {
                 live.devices
                     .get(&member.device.id)?
-                    .admitted
+                    .work
                     .as_ref()
                     .filter(|work| !work.life.is_closed())
                     .map(|work| (work.clone(), member.id.clone()))
@@ -35,7 +35,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.admitted.as_ref())
+            .and_then(|slot| slot.work.as_ref())
         {
             work.refresh();
         }
@@ -53,7 +53,7 @@ impl Context {
         let (work, blocked) = {
             let live = self.directory.borrow();
             let slot = &live.devices[did];
-            (slot.admitted.clone(), slot.description_problem())
+            (slot.work.clone(), slot.description_problem())
         };
         let Some(work) = work else {
             return;

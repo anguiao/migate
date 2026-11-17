@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 fn work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()
@@ -17,7 +17,7 @@ async fn settled(c: &Control, dids: &[&str]) {
         dids.iter().all(|did| {
             live.devices
                 .get(*did)
-                .and_then(|slot| slot.admitted.as_ref())
+                .and_then(|slot| slot.work.as_ref())
                 .is_some_and(|work| {
                     let refresh = work.refresh.borrow().snapshot();
                     refresh.inflight.is_empty()

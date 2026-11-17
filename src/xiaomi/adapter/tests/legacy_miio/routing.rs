@@ -17,7 +17,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
         .await;
         control.clock.automatic.store(false, Ordering::Relaxed);
         let old_work = control.context.directory.borrow().devices[did]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let old_physical = old_work.physical();
@@ -64,7 +64,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
         assert!(old_work.life.is_closed());
         assert!(control.context.legacy_mapping(did).is_none());
         let current = control.context.directory.borrow().devices[did]
-            .admitted
+            .work
             .clone()
             .unwrap();
         assert!(!Rc::ptr_eq(&old_work, &current));
@@ -350,7 +350,7 @@ fn mcn02_unknown_swing_does_not_block_offline_direct_and_recovers() {
         let swing = PropertyBinding { siid: 3, piid: 2 };
         let ac = function(&control.context.registry, did, id);
         let work = control.context.directory.borrow().devices[did]
-            .admitted
+            .work
             .clone()
             .unwrap();
         until(|| {
@@ -604,7 +604,7 @@ fn cloud_only_function_retries_at_deadline_while_air_conditioner_uses_direct() {
         .raw_values
         .insert(key.clone(), json!("invalid"));
     let work = context.directory.borrow().devices[did]
-        .admitted
+        .work
         .clone()
         .unwrap();
     let read_count = || {

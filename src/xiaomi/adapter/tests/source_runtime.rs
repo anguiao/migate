@@ -17,7 +17,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
             Some(TemperatureInterval::new(2700, 6500).unwrap())
         );
         let runtime_before = c.context.directory.borrow().devices["group-1"]
-            .admitted
+            .work
             .clone()
             .expect("the admitted group has an installed native runtime");
 
@@ -42,7 +42,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         .await;
 
         let runtime_after = c.context.directory.borrow().devices["group-1"]
-            .admitted
+            .work
             .clone()
             .expect("the group still has an installed native runtime");
         assert!(
@@ -102,7 +102,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
                     .borrow()
                     .devices
                     .get("group-1")
-                    .is_some_and(|slot| slot.admitted.is_some())
+                    .is_some_and(|slot| slot.work.is_some())
             })
             .await;
             until(|| {
@@ -113,7 +113,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             })
             .await;
             let runtime = control.context.directory.borrow().devices["group-1"]
-                .admitted
+                .work
                 .clone()
                 .expect("the physical group has a native runtime");
             until(|| {
@@ -154,7 +154,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             .await;
 
             let current = control.context.directory.borrow().devices["group-1"]
-                .admitted
+                .work
                 .clone()
                 .expect("the native runtime survives a logical replacement");
             assert!(
@@ -196,7 +196,7 @@ async fn revoke_and_readmit(c: &Control, id: &str) -> crate::device::Function {
         .get(&DeviceKey::new("xiaomi", "one"))
         .unwrap();
     let native = c.context.directory.borrow().devices["one"]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .native

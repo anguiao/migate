@@ -110,7 +110,7 @@ fn member_notifications_update_feedback_without_stopping_group_actions() {
             let group = function(&control.context.registry, "group-1", "light:2");
             // Local reads alone must refresh the representative, without a push.
             let work = control.context.directory.borrow().devices["member-a"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             for (piid, value) in [(1, json!(0xaabbcc)), (2, json!(1))] {

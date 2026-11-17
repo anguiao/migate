@@ -32,7 +32,7 @@ fn standard_miot_direct_poll_recovers_an_external_fan_change() {
     rig.network.lan_port.set(peer.address.port());
     block_on(rig.run(|control| async move {
         let work = control.context.directory.borrow().devices[did]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let bindings = work.native.device().functions()[0].observation_bindings();
@@ -106,7 +106,7 @@ fn p5c_direct_fan_command_reads_feedback_once_after_all_steps() {
             let fan = function(&control.context.registry, did, "fan:2");
             until(|| fan.snapshot().fan().unwrap().speed.value == Some(40)).await;
             let work = control.context.directory.borrow().devices[did]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let bindings = work.native.device().functions()[0].observation_bindings();

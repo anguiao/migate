@@ -132,7 +132,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 .get(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
             let mut changed = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
                 .native
@@ -283,7 +283,7 @@ fn rejected_write_keeps_a_prior_inflight_read_valid() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let binding = PropertyBinding { siid: 2, piid: 1 };
@@ -346,7 +346,7 @@ fn old_read_before_the_receipt_does_not_suppress_accepted_power() {
                 })
                 .await;
                 let work = control.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 let binding = PropertyBinding { siid: 2, piid: 1 };
@@ -398,7 +398,7 @@ fn outlet_without_notifications_uses_the_shared_post_write_feedback() {
             })
             .await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| {
@@ -445,7 +445,7 @@ fn outlet_post_write_read_before_receipt_remains_the_observed_state() {
             })
             .await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let binding = PropertyBinding { siid: 2, piid: 1 };
@@ -494,7 +494,7 @@ fn outlet_receipt_refreshes_again_after_a_post_write_inflight_read() {
             })
             .await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let binding = PropertyBinding { siid: 2, piid: 1 };
@@ -543,7 +543,7 @@ fn outlet_read_started_before_the_write_does_not_satisfy_feedback() {
             })
             .await;
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let binding = PropertyBinding { siid: 2, piid: 1 };

@@ -1,11 +1,15 @@
 //! Routing history stores selections, never diagnostic projections.
 
-use super::super::{
-    routing::{PathPriority, Summaries},
-    state::Context,
-};
+use super::{PathPriority, Selection, Summaries};
 use crate::device::{DeviceKey, FunctionKey};
+use crate::xiaomi::adapter::state::Context;
 use std::collections::BTreeSet;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(in crate::xiaomi::adapter) struct DeviceHistory {
+    pub(in crate::xiaomi::adapter) selection: Selection,
+    pub(in crate::xiaomi::adapter) reason: Option<String>,
+}
 
 pub(in crate::xiaomi::adapter) struct PriorityHistory {
     priority: PathPriority,
@@ -99,21 +103,33 @@ impl Context {
         let mut directory = self.directory.borrow_mut();
         for (did, summary) in &evaluated.devices {
             let slot = directory.devices.get_mut(did).unwrap();
-            if slot
-                .routing_selection
-                .is_some_and(|old| old != summary.selection)
-                || forced.contains(did)
-            {
-                slot.last_switch_reason = Some(
+            if slot.work.as_ref().unwrap().life.is_closed() {
+                slot.routing_history = None;
+                continue;
+            }
+            let switched = slot
+                .routing_history
+                .as_ref()
+                .is_some_and(|old| old.selection != summary.selection)
+                || forced.contains(did);
+            let reason = if switched {
+                Some(
                     summary
                         .deadline
                         .map(|deadline| deadline.reason())
                         .unwrap_or(reason)
                         .into(),
-                );
-            }
+                )
+            } else {
+                slot.routing_history
+                    .as_ref()
+                    .and_then(|history| history.reason.clone())
+            };
             // An entirely unavailable first admission also establishes a baseline.
-            slot.routing_selection = Some(summary.selection);
+            slot.routing_history = Some(DeviceHistory {
+                selection: summary.selection,
+                reason,
+            });
         }
     }
 }

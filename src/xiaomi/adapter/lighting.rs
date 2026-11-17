@@ -313,7 +313,7 @@ impl Context {
         let groups = groups
             .iter()
             .filter_map(|group_did| {
-                let work = live.devices.get(group_did)?.admitted.as_ref()?;
+                let work = live.devices.get(group_did)?.work.as_ref()?;
                 let id = work.native.device().unique_light()?.id();
                 Some((work.physical().function(id)?, work.clone()))
             })
@@ -393,7 +393,7 @@ impl Context {
         let Some(slot) = live.devices.get(group_did) else {
             return;
         };
-        let Some(work) = &slot.admitted else {
+        let Some(work) = &slot.work else {
             return;
         };
         let physical = work.physical();
@@ -427,7 +427,7 @@ impl Context {
             .iter()
             .filter_map(|member| {
                 let slot = live.devices.get(&member.device.id)?;
-                let work = slot.admitted.as_ref()?;
+                let work = slot.work.as_ref()?;
                 if work.life.is_closed() {
                     return None;
                 }

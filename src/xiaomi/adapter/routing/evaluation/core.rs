@@ -247,7 +247,7 @@ impl<'a> Core<'a> {
         {
             return Err(Unavailable::Fact("virtual group has no hub route"));
         }
-        slot.admitted.as_ref().ok_or(Unavailable::Fact(
+        slot.work.as_ref().ok_or(Unavailable::Fact(
             "device description or binding unavailable",
         ))?;
         if retired {
@@ -270,7 +270,7 @@ impl<'a> Core<'a> {
 
     fn direct(&self, slot: Option<&DeviceSlot>, retired: bool) -> Result<Client, Unavailable> {
         let slot = slot.ok_or(Unavailable::Fact("device description unavailable"))?;
-        let work = slot.admitted.as_ref().ok_or(Unavailable::Fact(
+        let work = slot.work.as_ref().ok_or(Unavailable::Fact(
             "device description or binding unavailable",
         ))?;
         if self.scope_invalid || retired {
@@ -279,7 +279,8 @@ impl<'a> Core<'a> {
         if work.native.direct_protocol().is_none() {
             return Err(Unavailable::Fact("device model not supported"));
         }
-        slot.lan
+        work.lan
+            .borrow()
             .active
             .as_ref()
             .map(|(_, client)| client.clone())
@@ -295,7 +296,7 @@ impl<'a> Core<'a> {
             return Err(Unavailable::Fact("account/home identity mismatch"));
         }
         let slot = slot.ok_or(Unavailable::Fact("device description unavailable"))?;
-        slot.admitted.as_ref().ok_or(Unavailable::Fact(
+        slot.work.as_ref().ok_or(Unavailable::Fact(
             "device description or binding unavailable",
         ))?;
         if retired {
@@ -313,7 +314,7 @@ impl<'a> Core<'a> {
             return access.clone();
         }
         let slot = self.directory.devices.get(did);
-        let work = slot.and_then(|slot| slot.admitted.as_ref());
+        let work = slot.and_then(|slot| slot.work.as_ref());
         let native = work.map(|work| &work.native).or_else(|| {
             slot.and_then(|slot| slot.latest_description.as_ref())
                 .and_then(|source| source.native.as_ref())
@@ -414,7 +415,7 @@ impl<'a> Core<'a> {
             .directory
             .devices
             .get(did)
-            .and_then(|slot| slot.admitted.as_ref());
+            .and_then(|slot| slot.work.as_ref());
         let sensor = work.is_some_and(|work| {
             work.native
                 .device()
@@ -444,7 +445,7 @@ impl<'a> Core<'a> {
     }
 
     fn active(&self, did: &str, id: &str, relaxed: Deadlines) -> Option<PathKind> {
-        self.directory.devices.get(did)?.admitted.as_ref()?;
+        self.directory.devices.get(did)?.work.as_ref()?;
         self.bindings(did, id, relaxed)
             .active
             .as_ref()
@@ -481,7 +482,7 @@ impl<'a> Core<'a> {
             self.directory
                 .devices
                 .get(did)
-                .and_then(|slot| slot.admitted.as_ref())
+                .and_then(|slot| slot.work.as_ref())
                 .and_then(|work| {
                     work.native
                         .device()
@@ -530,11 +531,12 @@ impl<'a> Core<'a> {
             .iter()
             .filter_map(|did| {
                 let slot = self.directory.devices.get(did)?;
-                slot.admitted.as_ref()?;
+                slot.work.as_ref()?;
                 let selection = self.selection(did, Deadlines::default());
                 let deadline = slot
-                    .routing_selection
-                    .and_then(|old| self.deadline(did, old, selection));
+                    .routing_history
+                    .as_ref()
+                    .and_then(|history| self.deadline(did, history.selection, selection));
                 Some((
                     did.clone(),
                     DeviceSummary {
@@ -554,7 +556,7 @@ impl<'a> Core<'a> {
         self.directory
             .devices
             .iter()
-            .filter(|(_, slot)| slot.admitted.is_some())
+            .filter(|(_, slot)| slot.work.is_some())
             .map(|(did, _)| did.clone())
             .collect()
     }

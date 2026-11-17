@@ -404,9 +404,15 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
                 .borrow()
                 .devices
                 .get(DID)
-                .and_then(|slot| slot.lan.active.as_ref())
-                .is_some_and(|(record, _)| {
-                    record.address == new_address && record.token == new_token
+                .and_then(|slot| slot.work.as_ref())
+                .is_some_and(|work| {
+                    work.lan
+                        .borrow()
+                        .active
+                        .as_ref()
+                        .is_some_and(|(record, _)| {
+                            record.address == new_address && record.token == new_token
+                        })
                 })
                 && blow
                     .snapshot()
@@ -438,8 +444,13 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
                 .borrow()
                 .devices
                 .get(DID)
-                .and_then(|slot| slot.lan.active.as_ref())
-                .map(|(record, _)| record.address),
+                .and_then(|slot| slot.work.as_ref())
+                .and_then(|work| work
+                    .lan
+                    .borrow()
+                    .active
+                    .as_ref()
+                    .map(|(record, _)| record.address)),
             Some(new_address),
             "the old client is replaced by the current credential/address"
         );
@@ -488,7 +499,7 @@ fn v13_offline_cold_start_keeps_identity_functions_and_reads_a_new_baseline() {
             .borrow()
             .devices
             .get(DID)
-            .and_then(|slot| slot.admitted.as_ref())
+            .and_then(|slot| slot.work.as_ref())
             .unwrap()
             .native
             .device()
@@ -545,8 +556,7 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
             .borrow_mut()
             .devices
             .get_mut(DID)
-            .unwrap()
-            .lan
+            .unwrap().work.as_ref().unwrap().lan.borrow_mut()
             .active
             .take();
         c.context.credentials.borrow_mut().pause_http();
@@ -574,8 +584,7 @@ fn diagnostics_show_shared_current_path_apart_from_the_last_observed_source() {
             .borrow_mut()
             .devices
             .get_mut(DID)
-            .unwrap()
-            .lan
+            .unwrap().work.as_ref().unwrap().lan.borrow_mut()
             .active = direct;
         c.context.credentials.borrow_mut().resume_http();
         work(&c).reconcile_state_reads(&c.context.device_routes(DID));
@@ -621,7 +630,7 @@ fn v13_scope_revocation_stops_direct_without_deleting_saved_identity_or_function
             .borrow()
             .devices
             .get(DID)
-            .and_then(|slot| slot.admitted.as_ref())
+            .and_then(|slot| slot.work.as_ref())
             .unwrap()
             .native
             .device()

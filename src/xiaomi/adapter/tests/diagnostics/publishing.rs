@@ -62,7 +62,7 @@ fn unchanged_relay_mode_feedback_publishes_its_new_property_source_without_queri
                         .store(false, std::sync::atomic::Ordering::Relaxed);
                     async_io::Timer::after(Duration::from_millis(30)).await;
                     let current = control.context.directory.borrow().devices["one"]
-                        .admitted
+                        .work
                         .clone()
                         .unwrap();
                     cloud.property_at("one", 2, 2, json!(0));
@@ -103,7 +103,7 @@ fn refresh_errors_and_successful_recovery_are_published_without_queries() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let current = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             c.cloud.lock().unwrap().read_status = 503;

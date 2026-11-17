@@ -56,7 +56,7 @@ pub(super) async fn selections(context: Rc<Context>) -> Result<(), AdapterError>
             .borrow()
             .devices
             .values()
-            .filter_map(|slot| slot.admitted.clone())
+            .filter_map(|slot| slot.work.clone())
             .collect::<Vec<_>>();
         let mut routes = context.device_routes_for(works.iter().map(|work| work.key.id.as_str()));
         for work in works {

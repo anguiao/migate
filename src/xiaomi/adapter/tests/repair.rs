@@ -160,7 +160,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
         repair_ready(&c).await;
         let light = function(&c.context.registry, "group-1", "light:2");
         let work = c.context.directory.borrow().devices["member-a"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         work.notify_value(MEMBER_COLOR, &json!(0x00ff00), false, false);
@@ -307,7 +307,7 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
                     Change::Rebuild => c.publication.stop_actions(),
                     Change::MemberOff => {
                         let work = c.context.directory.borrow().devices["member-b"]
-                            .admitted
+                            .work
                             .clone()
                             .unwrap();
                         work.notify_value(
@@ -471,7 +471,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
             .raw_values
             .insert(("group-1".into(), 2, 3), json!(6500));
         let work = c.context.directory.borrow().devices["group-1"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         work.request_dirty_read(
@@ -760,7 +760,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .raw_values
                     .insert((did.into(), 2, 1), json!(powers[index]));
                 let work = c.context.directory.borrow().devices[did]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 work.test_source_changed();
@@ -804,7 +804,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                 assert!(member_writes(&c, did, 2, 1).is_empty());
                 if powers[index] != Some(true) {
                     let work = c.context.directory.borrow().devices[did]
-                        .admitted
+                        .work
                         .clone()
                         .unwrap();
                     work.notify_value(
@@ -842,7 +842,7 @@ fn rgb_action_keeps_the_member_sources_captured_by_its_first_frame() {
             .devices
             .get_mut("member-b")
             .unwrap()
-            .admitted
+            .work
             .take()
             .unwrap();
         let action = group.begin_light_action(rgb(0x010203), false).unwrap();
@@ -853,7 +853,7 @@ fn rgb_action_keeps_the_member_sources_captured_by_its_first_frame() {
             .devices
             .get_mut("member-b")
             .unwrap()
-            .admitted = Some(delayed);
+            .work = Some(delayed);
         group
             .submit_light_frame(action.token(), rgb(0x040506), true)
             .unwrap();

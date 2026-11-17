@@ -20,7 +20,7 @@ fn fan(c: &Control) -> FanSnapshot {
 }
 fn work(c: &Control) -> Rc<super::work::DeviceWork> {
     c.context.directory.borrow().devices["one"]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

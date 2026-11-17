@@ -122,7 +122,7 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
         let before = c.store.devices().load_configuration().unwrap();
         let rules = c.context.graph.borrow().rules.clone();
         let old_member = c.context.directory.borrow().devices["member-a"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let urn = "urn:miot-spec-v2:device:light:0000A001:example-extension:2";
@@ -187,7 +187,7 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
         assert!(Rc::ptr_eq(
             &old_member,
             c.context.directory.borrow().devices["member-a"]
-                .admitted
+                .work
                 .as_ref()
                 .unwrap()
         ));
@@ -429,7 +429,7 @@ fn mixed_group_dispatches_each_adapted_policy_and_keeps_composite_fan_independen
             "the fan must not take over the group color action"
         );
         let work = c.context.directory.borrow().devices["member-a"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         work.notify_value(MEMBER_COLOR, &json!(0x00ff00), false, false);

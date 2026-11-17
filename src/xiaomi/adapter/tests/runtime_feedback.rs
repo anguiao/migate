@@ -21,7 +21,7 @@ fn logical_replacement_reestablishes_an_available_shared_temperature_source() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             until(|| work.shared_feedback().source.is_some()).await;

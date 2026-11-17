@@ -92,10 +92,10 @@ impl Context {
         if self.directory.borrow().group(did).is_some() {
             return self.reconcile_group(did);
         }
-        if self.directory.borrow().devices[did].admitted.is_some() {
+        if self.directory.borrow().devices[did].work.is_some() {
             self.install_work(did);
             self.update_availability(did);
-            if let Some(work) = self.directory.borrow().devices[did].admitted.as_ref() {
+            if let Some(work) = self.directory.borrow().devices[did].work.as_ref() {
                 work.retry_subscriptions();
             }
         }
@@ -149,13 +149,12 @@ impl Context {
     }
     /// Retire one native runtime and its current logical sink.
     pub(super) fn retire_work(&self, did: &str) {
-        self.stop_lan(did);
         let work = self
             .directory
             .borrow_mut()
             .devices
             .get_mut(did)
-            .and_then(|slot| slot.admitted.take());
+            .and_then(|slot| slot.work.take());
         if let Some(work) = work {
             let physical = work.physical();
             physical.set_availability(Availability::Unavailable("source retired".into()));

@@ -280,7 +280,7 @@ pub(in super::super) fn with_cloud_rig(rig: Rig) -> (Rig, Async<TcpListener>, Rc
 }
 pub(in super::super) fn cloud_active(c: &Control, did: &str) -> bool {
     c.context.directory.borrow().devices[did]
-        .admitted
+        .work
         .as_ref()
         .is_some_and(|work| work.test_observer_is_cloud())
 }

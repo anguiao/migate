@@ -210,7 +210,7 @@ impl XiaomiAdapter {
             ));
             context.registry.insert(sink.physical.clone());
             let slot = DeviceSlot {
-                admitted: Some(work.clone()),
+                work: Some(work.clone()),
                 ..Default::default()
             };
             let virtual_group = context

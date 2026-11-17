@@ -9,8 +9,6 @@ use super::{
 };
 use crate::xiaomi::capability::PropertyBinding;
 
-pub(super) mod history;
-
 impl Context {
     pub(super) fn diagnostics(&self) -> AdapterStatus {
         let now = self.clock.unix_now();
@@ -24,11 +22,15 @@ impl Context {
         let mut devices = Vec::with_capacity(evaluated.devices.len());
         for (did, routes) in evaluated.devices {
             let slot = &directory.devices[&did];
-            let work = slot.admitted.as_ref().unwrap();
+            let work = slot.work.as_ref().unwrap();
             let last_switch_reason = evaluated.summaries.devices[&did]
                 .deadline
                 .map(|deadline| deadline.reason().into())
-                .or_else(|| slot.last_switch_reason.clone());
+                .or_else(|| {
+                    slot.routing_history
+                        .as_ref()
+                        .and_then(|history| history.reason.clone())
+                });
             let functions = work
                 .native
                 .device()
@@ -221,7 +223,7 @@ impl Context {
             }
             devices.push(DeviceStatus {
                 did,
-                lan: slot.lan.status.clone(),
+                lan: work.lan.borrow().status.clone(),
                 read_only: routes.read_only,
                 usable_control_paths: routes.control.candidates.kinds(),
                 selected_control: routes.control.selected_kind(),

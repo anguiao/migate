@@ -85,7 +85,7 @@ fn online_work(context: &Context, did: &str) -> Option<Rc<DeviceWork>> {
     if context.is_virtual_group(did) {
         return None;
     }
-    let work = slot.admitted.as_ref()?;
+    let work = slot.work.as_ref()?;
     if work.life.is_closed()
         || slot.cloud_forbidden
         || context.lan_scope_invalid.get()
@@ -103,7 +103,7 @@ pub(super) fn reconcile_online(context: &Rc<Context>, session: Rc<CloudSession>)
         .borrow()
         .devices
         .values()
-        .filter_map(|slot| slot.admitted.clone())
+        .filter_map(|slot| slot.work.clone())
         .collect::<Vec<_>>();
     for work in works {
         let did = &work.key.id;
@@ -345,7 +345,7 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.admitted.clone())
+                    .filter_map(|slot| slot.work.clone())
                 {
                     work.attach_cloud(handle.clone());
                     work.retry_subscriptions();
@@ -430,7 +430,7 @@ pub(super) async fn connections(context: Rc<Context>) -> Result<(), AdapterError
                     .borrow()
                     .devices
                     .values()
-                    .filter_map(|slot| slot.admitted.clone())
+                    .filter_map(|slot| slot.work.clone())
                 {
                     work.detach_cloud(&handle);
                     work.retry_subscriptions();

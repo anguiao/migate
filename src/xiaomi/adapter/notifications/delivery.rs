@@ -15,7 +15,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.admitted.clone());
+            .and_then(|slot| slot.work.clone());
         let routes = self.device_routes(did);
         if let Some(work) = &work
             && let Some(function) = work.native.device().functions().iter().find(|function| {
@@ -378,7 +378,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .and_then(|slot| slot.admitted.clone());
+            .and_then(|slot| slot.work.clone());
         let routes = self.device_routes(did);
         if let Some(work) = work
             && let Some(function) = work.event_function(binding)
@@ -408,7 +408,7 @@ impl Context {
         if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
             if let Some(access) = &mut slot.cloud_access {
                 if online != access.online
-                    && let Some(work) = &slot.admitted
+                    && let Some(work) = &slot.work
                 {
                     work.retry_subscriptions();
                 }

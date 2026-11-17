@@ -134,7 +134,7 @@ fn background_property_timeout_keeps_the_hub_route_but_device_offline_still_revo
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             let (handle, _) = local(&c, Rc::new(Wire::default()));
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             c.context
@@ -173,7 +173,7 @@ fn stale_background_property_errors_do_not_revoke_a_new_hub_connection() {
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let (old, _) = local(&c, Rc::new(Wire::default()));
         let work = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let (current, _) = local(&c, Rc::new(Wire::default()));
@@ -206,7 +206,7 @@ fn stale_local_device_errors_cannot_revoke_current_access() {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             let (handle, _) = local(&c, Rc::new(Wire::default()));
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             match stale {
@@ -292,7 +292,7 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
             let (_, driver) = local(&c, wire.clone());
             let one = function(&c.context.registry, "one", "outlet:2");
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             future::or(
@@ -365,7 +365,7 @@ fn a_withdrawn_zero_byte_refresh_keeps_one_demand_until_device_recovery() {
         let (handle, driver) = local(&c, wire.clone());
         let one = function(&c.context.registry, "one", "outlet:2");
         let work = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let reads = crate::xiaomi::adapter::refresh::local(c.context.clone(), handle.clone());
@@ -439,7 +439,7 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
         let work = c.context.directory.borrow().devices["one"]
-            .admitted
+            .work
             .clone()
             .unwrap();
         let mut reads = Box::pin(crate::xiaomi::adapter::refresh::local(
@@ -512,7 +512,7 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
                 let work = c.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 work.notify_value(PropertyBinding { siid: 4, piid: 2 }, &json!(0), true, true);
@@ -691,7 +691,7 @@ fn an_unsent_light_target_is_not_own_feedback() {
                     .unwrap();
                 until(|| wire.polls.get() > 0).await;
                 let work = c.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .clone()
                     .unwrap();
                 work.notify_value(
@@ -780,7 +780,7 @@ fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_by
             let wire = Rc::new(Wire::default());
             let (handle, driver) = local(&c, wire.clone());
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let binding = PropertyBinding {

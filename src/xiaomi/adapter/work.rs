@@ -70,6 +70,8 @@ pub(super) struct DeviceWork {
     pub(super) native: NativeDescription,
     /// Native authority; retiring or replacing it ends this runtime.
     pub(super) life: Lifetime,
+    /// Authentication work and the confirmed client share this native authority.
+    pub(super) lan: RefCell<super::lan::DirectLan>,
     pub(super) observations: Observations,
     pub(super) light_write: Option<Rc<DeviceWriteGate>>,
     /// Current logical delivery target; logical-only replacement swaps it.
@@ -101,6 +103,7 @@ impl DeviceWork {
             key,
             native,
             life: Lifetime::default(),
+            lan: RefCell::new(super::lan::DirectLan::default()),
             observations: Observations::default(),
             light_write,
             sink: RefCell::new(sink),
@@ -334,6 +337,8 @@ impl DeviceWork {
     /// notification handshakes are retired.
     pub(super) fn retire(&self) {
         self.life.close();
+        self.lan.take().stop();
+        self.refresh_changed.notify(usize::MAX);
         self.refresh.borrow().notify_initial_changed();
         self.current_sink().close();
         let property_subscriptions = self.is_light()

@@ -27,7 +27,7 @@ fn one_device_read_timeout_keeps_other_devices_on_the_hub() {
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             let work = control.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let one = function(&control.context.registry, "one", "outlet:2");

@@ -54,7 +54,7 @@ fn mqtt_network_retry_caps_at_six_hundred_seconds_and_new_token_resets_it_immedi
             let one = function(&c.context.registry, "one", "outlet:2");
             let binding = crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 };
             let work = c.context.directory.borrow().devices["one"]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let read_due = c.clock.now() + Duration::from_millis(200);
@@ -107,7 +107,7 @@ fn a_real_cloud_online_recovery_reopens_one_exhausted_subscription_window() {
             until(|| {
                 peer.count(property) == 4
                     && c.context.directory.borrow().devices["one"]
-                        .admitted
+                        .work
                         .as_ref()
                         .unwrap()
                         .test_cloud_exhausted()
@@ -199,7 +199,7 @@ fn held_online_subscription_cannot_retry_after_device_access_is_revoked() {
             assert!(c.context.notifications.borrow().is_some());
             assert!(
                 c.context.directory.borrow().devices["one"]
-                    .admitted
+                    .work
                     .as_ref()
                     .unwrap()
                     .test_cloud_subscribed_empty()

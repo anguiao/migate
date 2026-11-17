@@ -9,7 +9,7 @@ fn direct_command_refreshes_even_when_cloud_notifications_are_ready() {
         future::or(cloud.run(&listener), async {
             let ac = function(&control.context.registry, did, "air-conditioner:2");
             let work = control.context.directory.borrow().devices[did]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let bindings = work.native.device().functions()[0].observation_bindings();
@@ -77,7 +77,7 @@ fn invalid_legacy_feedback_isolated_per_property_and_newer_notification_wins() {
             let ac = function(&control.context.registry, did, "air-conditioner:2");
             until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
             let work = control.context.directory.borrow().devices[did]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let mode = PropertyBinding { siid: 2, piid: 2 };
@@ -183,7 +183,7 @@ fn mcn02_partial_acceptance_reads_once_after_all_sent_steps() {
             let ac = function(&control.context.registry, did, "air-conditioner:2");
             until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
             let work = control.context.directory.borrow().devices[did]
-                .admitted
+                .work
                 .clone()
                 .unwrap();
             let bindings = work.native.device().functions()[0].observation_bindings();

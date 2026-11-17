@@ -67,7 +67,7 @@ fn function(c: &Control, id: &str) -> crate::device::Function {
 
 fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {
     c.context.directory.borrow().devices[DID]
-        .admitted
+        .work
         .as_ref()
         .unwrap()
         .clone()

@@ -94,7 +94,7 @@ fn refresh_after_write(
         .borrow()
         .devices
         .get(&original.key.id)
-        .and_then(|slot| slot.admitted.clone())
+        .and_then(|slot| slot.work.clone())
     else {
         return;
     };
