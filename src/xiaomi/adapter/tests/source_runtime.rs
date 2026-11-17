@@ -11,7 +11,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let group = function(&c.context.registry, "group-1", "light:2");
+        let group = function(&c.context, "group-1", "light:2");
         assert_eq!(
             group.description().temperature_interval(),
             Some(TemperatureInterval::new(2700, 6500).unwrap())
@@ -34,7 +34,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         }
         c.context.reconcile("member-a").unwrap();
         until(|| {
-            function(&c.context.registry, "group-1", "light:2")
+            function(&c.context, "group-1", "light:2")
                 .description()
                 .temperature_interval()
                 == Some(TemperatureInterval::new(3000, 6400).unwrap())
@@ -128,7 +128,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
                 Some(super::super::model::PathKind::Local)
             );
 
-            let old = function(&control.context.registry, "group-1", "light:2");
+            let old = function(&control.context, "group-1", "light:2");
             assert_eq!(
                 old.description().temperature_interval(),
                 Some(TemperatureInterval::new(2700, 6500).unwrap())
@@ -146,7 +146,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             }
             control.context.reconcile("member-a").unwrap();
             until(|| {
-                function(&control.context.registry, "group-1", "light:2")
+                function(&control.context, "group-1", "light:2")
                     .description()
                     .temperature_interval()
                     == Some(TemperatureInterval::new(3000, 6400).unwrap())
@@ -175,7 +175,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             assert_eq!(peer.count("rpcReq", "group-1", 2), writes);
 
             // Native notifications now project into the new logical sink.
-            let new = function(&control.context.registry, "group-1", "light:2");
+            let new = function(&control.context, "group-1", "light:2");
             peer.notify_value(
                 "group-1",
                 PropertyBinding { siid: 2, piid: 1 },
@@ -192,8 +192,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
 async fn revoke_and_readmit(c: &Control, id: &str) -> crate::device::Function {
     let before = c
         .context
-        .registry
-        .get(&DeviceKey::new("xiaomi", "one"))
+        .physical(&DeviceKey::new("xiaomi", "one"))
         .unwrap();
     let native = c.context.directory.borrow().devices["one"]
         .work
@@ -215,12 +214,11 @@ async fn revoke_and_readmit(c: &Control, id: &str) -> crate::device::Function {
     c.context.reconcile("one").unwrap();
     until(|| {
         c.context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "one"))
+            .physical(&DeviceKey::new("xiaomi", "one"))
             .is_some_and(|now| !before.same_instance(&now))
     })
     .await;
-    let new = function(&c.context.registry, "one", id);
+    let new = function(&c.context, "one", id);
     until(|| new.snapshot().power() == Some(Power::Off)).await;
     new
 }
@@ -238,7 +236,7 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
         let (release, gate) = flume::bounded(1);
         block_on(rig.run(|c| async move {
             until(|| c.cloud.lock().unwrap().homes > 0).await;
-            let old = function(&c.context.registry, "one", "outlet:2");
+            let old = function(&c.context, "one", "outlet:2");
             until(|| old.snapshot().power() == Some(Power::Off)).await;
             c.cloud.lock().unwrap().property_gate = Some(gate);
             let mut command = Box::pin(old.execute(Command::On));
@@ -312,7 +310,7 @@ fn a_sent_local_power_receipt_settles_after_revocation_and_readmission() {
                 c.peer(peer, |peer| async move {
                     initialized(control, &peer, &["one"]).await;
                     peer.state.borrow_mut().hold_writes = true;
-                    let old = function(&control.context.registry, "one", id);
+                    let old = function(&control.context, "one", id);
                     let mut command = Box::pin(old.execute(Command::On));
                     assert!(poll_once(command.as_mut()).await.is_none());
                     until(|| peer.count("rpcReq", "one", 2) == 1).await;

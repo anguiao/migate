@@ -50,22 +50,24 @@ fn relay_subscriptions_report_only_the_changed_physical_channel() {
                 uid: "account".into(),
                 home_id: "home".into(),
             };
-            let entries: Vec<_> = (2..=4)
-                .map(|siid| {
-                    let mut entry = entry(&device, siid, &[]);
-                    entry.identity.relay = Some(PublishedRelay {
-                        scope: scope.clone(),
-                        function_id: format!("relay:{siid}"),
-                        device_type: if siid == 4 {
-                            crate::configuration::RelayType::Light
-                        } else {
-                            crate::configuration::RelayType::Switch
-                        },
-                    });
-                    entry
-                })
-                .collect();
-            let handler = model_handler(entries.clone());
+            let entries = || {
+                (2..=4)
+                    .map(|siid| {
+                        let mut entry = entry(&device, siid, &[]);
+                        entry.identity.relay = Some(PublishedRelay {
+                            scope: scope.clone(),
+                            function_id: format!("relay:{siid}"),
+                            device_type: if siid == 4 {
+                                crate::configuration::RelayType::Light
+                            } else {
+                                crate::configuration::RelayType::Switch
+                            },
+                        });
+                        entry
+                    })
+                    .collect()
+            };
+            let handler = model_handler(entries());
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -154,7 +156,7 @@ fn relay_subscriptions_report_only_the_changed_physical_channel() {
                             .contains(rs_matter::persist::BINDINGS_KEY)
                             .unwrap()
                     );
-                    let restored = model_handler(entries.clone());
+                    let restored = model_handler(entries());
                     restored.lifecycle(&im, LifecycleOp::Startup).unwrap();
                     let bytes = read_bytes(&restored, &Context::at(&im, 3, 0x1e, 0))
                         .await

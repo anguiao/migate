@@ -348,10 +348,10 @@ fn mixed_group_dispatches_each_adapted_policy_and_keeps_composite_fan_independen
     block_on(rig.run(|c| async move {
         c.announce();
         until(|| c.context.group_repair("group-1").is_some()).await;
-        let group = function(&c.context.registry, "group-1", "light:2");
-        let member = function(&c.context.registry, "member-a", "light:2");
-        let fan = function(&c.context.registry, "member-a", "fan:8");
-        let generic = function(&c.context.registry, "member-b", "light:9");
+        let group = function(&c.context, "group-1", "light:2");
+        let member = function(&c.context, "member-a", "light:2");
+        let fan = function(&c.context, "member-a", "fan:8");
+        let generic = function(&c.context, "member-b", "light:9");
         until(|| {
             group.snapshot().power() == Some(Power::On)
                 && member.snapshot().power() == Some(Power::On)
@@ -468,7 +468,7 @@ fn ambiguous_member_stays_visible_and_cannot_supply_group_feedback() {
         assert_eq!(current.derived.visible_functions(&key).len(), 2);
         assert!(current.derived.rules["group-1"].members.is_empty());
         assert!(current.derived.member_issues["group-1"][0].contains("ambiguous"));
-        let group = function(&c.context.registry, "group-1", "light:2");
+        let group = function(&c.context, "group-1", "light:2");
         assert!(!group.description().supports_rgb());
         assert_eq!(group.snapshot().power(), Some(Power::Unknown));
         let text = c
@@ -521,7 +521,7 @@ fn native_rgb_uses_its_own_interface_even_with_an_unresolved_member() {
     block_on(rig.run(|c| async move {
         c.announce();
         until(|| c.context.graph.borrow().rules.contains_key("group-1")).await;
-        let group = function(&c.context.registry, "group-1", "light:2");
+        let group = function(&c.context, "group-1", "light:2");
         until(|| group.snapshot().power() == Some(Power::On)).await;
         let current = c.publication.current();
         let served = &current.derived.served[&DeviceKey::new("xiaomi", "group-1")];

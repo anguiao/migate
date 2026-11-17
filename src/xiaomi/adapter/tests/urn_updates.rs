@@ -17,8 +17,7 @@ async fn ready(c: &Control) {
     until(|| {
         c.context.cloud_candidate("one", true).is_ok()
             && c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+                .physical(&DeviceKey::new("xiaomi", "one"))
                 .is_some_and(|physical| {
                     physical.functions()[0]
                         .snapshot()
@@ -61,7 +60,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
                 .work
                 .clone()
                 .unwrap();
-            let two = function(&c.context.registry, "two", "light:2");
+            let two = function(&c.context, "two", "light:2");
             peer.property("two", 2, true);
             until(|| two.snapshot().power() == Some(Power::On)).await;
             let urn = "urn:miot-spec-v2:device:light:0000A001:xiaomi-ceil04:2:0000C802";
@@ -75,7 +74,7 @@ fn a_successful_native_replacement_restores_cloud_online_notifications() {
             }
             c.context.request_sync();
             until(|| old.life.is_closed() && cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "light:2");
+            let one = function(&c.context, "one", "light:2");
             peer.online("one", false);
             peer.property("two", 2, false);
             until(|| two.snapshot().power() == Some(Power::Off)).await;
@@ -108,8 +107,8 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one") && cloud_active(&c, "two")).await;
-            let one = function(&c.context.registry, "one", "outlet:2");
-            let two = function(&c.context.registry, "two", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
+            let two = function(&c.context, "two", "outlet:2");
             until(|| {
                 one.snapshot().power() == Some(Power::Off)
                     && two.snapshot().power() == Some(Power::Off)
@@ -172,7 +171,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
         ready(&c).await;
         let app_before = c.publication.current();
         let committed = app_before.configuration.device(&key).cloned().unwrap();
-        let physical = c.context.registry.get(&key).unwrap();
+        let physical = c.context.physical(&key).unwrap();
         let matter = PublishedLightModel::new(&c.publication, &c.store);
         let attributes = matter.read(committed.endpoint).await;
         let terminal = c.terminal();
@@ -243,7 +242,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
                     attributes.configuration_version
                 ),
             );
-            assert!(physical.same_instance(&c.context.registry.get(&key).unwrap()));
+            assert!(physical.same_instance(&c.context.physical(&key).unwrap()));
             let writes = c.cloud.lock().unwrap().numeric_writes.len();
             assert_eq!(
                 terminal
@@ -319,7 +318,7 @@ fn model_change_alone_fetches_and_commits_the_matching_description_once() {
         let key = DeviceKey::new("xiaomi", "one");
         let before = c.publication.current();
         let identity = before.configuration.device(&key).unwrap().clone();
-        let physical = c.context.registry.get(&key).unwrap();
+        let physical = c.context.physical(&key).unwrap();
         let urn = identity.native.as_ref().unwrap().instance_type().to_owned();
         c.cloud
             .lock()
@@ -353,7 +352,7 @@ fn model_change_alone_fetches_and_commits_the_matching_description_once() {
                 .configuration_version,
             identity.configuration_version
         );
-        assert!(physical.same_instance(&c.context.registry.get(&key).unwrap()));
+        assert!(physical.same_instance(&c.context.physical(&key).unwrap()));
         assert_eq!(c.cloud.lock().unwrap().instance_reads[&urn], 1);
         let catalogs = c.cloud.lock().unwrap().catalogs;
         c.context.request_sync();
@@ -482,7 +481,7 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         }
         c.context.refresh_source("one");
         until(|| {
-            c.context.registry.get(&key).is_some_and(|physical| {
+            c.context.physical(&key).is_some_and(|physical| {
                 physical.functions()[0]
                     .description()
                     .temperature_interval()
@@ -615,7 +614,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             .cloned()
             .expect("restored light has a committed configuration");
         let configuration_version = committed.configuration_version;
-        let physical = c.context.registry.get(&key).unwrap();
+        let physical = c.context.physical(&key).unwrap();
         let native_runtime = c.context.directory.borrow().devices["one"]
             .work
             .clone()
@@ -668,7 +667,7 @@ fn metadata_only_type_change_reuses_the_instance_without_refetching() {
             reads, 1,
             "the first directory read must fetch the new instance exactly once"
         );
-        let current = c.context.registry.get(&key).unwrap();
+        let current = c.context.physical(&key).unwrap();
         assert!(
             physical.same_instance(&current),
             "a metadata-only URN change must reuse the served physical instance"

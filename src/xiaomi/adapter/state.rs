@@ -1,7 +1,6 @@
 use super::{bootstrap::Clock, model::Ready, tasks::TaskSet};
 use crate::{
     configuration::{CommittedConfiguration, DerivedConfiguration},
-    device::DeviceRegistry,
     storage::Store,
     xiaomi::mijia::MijiaClient,
 };
@@ -57,7 +56,6 @@ pub(super) struct Context {
     pub(super) configuration: RefCell<Rc<CommittedConfiguration>>,
     /// The one committed group graph installed with the serving configuration.
     pub(super) graph: RefCell<Rc<DerivedConfiguration>>,
-    pub(super) registry: DeviceRegistry,
     pub(super) store: Store,
     pub(super) tasks: TaskSet,
     pub(super) configuration_changed: Rc<Event>,

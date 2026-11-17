@@ -21,22 +21,14 @@ fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device(
         }
         until(|| {
             cloud_active(&c, "one")
-                && function(&c.context.registry, "one", "outlet:2")
-                    .snapshot()
-                    .power()
-                    == Some(Power::Off)
+                && function(&c.context, "one", "outlet:2").snapshot().power() == Some(Power::Off)
         })
         .await;
         broker.property("one", 2, true).await;
-        until(|| {
-            function(&c.context.registry, "one", "outlet:2")
-                .snapshot()
-                .power()
-                == Some(Power::On)
-        })
-        .await;
+        until(|| function(&c.context, "one", "outlet:2").snapshot().power() == Some(Power::On))
+            .await;
         assert_eq!(
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .snapshot()
                 .availability,
             Availability::Available
@@ -88,7 +80,7 @@ fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
                 })
                 .await;
                 until(|| !local_active(control, "multi")).await;
-                let outlet = function(&control.context.registry, "multi", "outlet:3");
+                let outlet = function(&control.context, "multi", "outlet:3");
                 cloud.qos2("multi", 3, true, 41);
                 until(|| cloud.received(41, false)).await;
                 local.notify("multi", 3, true);
@@ -142,7 +134,7 @@ fn local_cloud_local_delivery_epochs_do_not_reactivate_an_old_pubrel() {
                 until(|| local_active(control, "one")).await;
                 local.notify("one", 2, false);
                 until(|| {
-                    function(&control.context.registry, "one", "outlet:2")
+                    function(&control.context, "one", "outlet:2")
                         .snapshot()
                         .power()
                         == Some(Power::Off)
@@ -154,14 +146,14 @@ fn local_cloud_local_delivery_epochs_do_not_reactivate_an_old_pubrel() {
                 cloud.send(Packet::PubRel(PubRel::new(45)));
                 until(|| cloud.received(45, true)).await;
                 assert_eq!(
-                    function(&control.context.registry, "one", "outlet:2")
+                    function(&control.context, "one", "outlet:2")
                         .snapshot()
                         .power(),
                     Some(Power::Off)
                 );
                 cloud.property("one", 2, true);
                 until(|| {
-                    function(&control.context.registry, "one", "outlet:2")
+                    function(&control.context, "one", "outlet:2")
                         .snapshot()
                         .power()
                         == Some(Power::On)
@@ -208,7 +200,7 @@ fn exhausted_local_preparation_uses_cloud_and_diagnostic_wakes_do_not_restart_it
                 assert_eq!(local.count("subscribe", "multi", 9), count);
                 cloud.property("multi", 9, true);
                 until(|| {
-                    function(&control.context.registry, "multi", "outlet:9")
+                    function(&control.context, "multi", "outlet:9")
                         .snapshot()
                         .power()
                         == Some(Power::On)
@@ -249,8 +241,7 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
                 until(|| {
                     control
                         .context
-                        .registry
-                        .get(&DeviceKey::new("xiaomi", "one"))
+                        .physical(&DeviceKey::new("xiaomi", "one"))
                         .is_some_and(|physical| {
                             physical.functions()[0].snapshot().power() == Some(Power::Off)
                         })
@@ -258,7 +249,7 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
                 .await;
                 assert_eq!(local.count("get", "one", 2), 1);
                 assert_eq!(local.count("subscribe", "one", 2), 0);
-                function(&control.context.registry, "one", "outlet:2")
+                function(&control.context, "one", "outlet:2")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -293,7 +284,7 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                         .clock
                         .automatic
                         .store(false, std::sync::atomic::Ordering::Relaxed);
-                    let one = function(&control.context.registry, "one", "outlet:2");
+                    let one = function(&control.context, "one", "outlet:2");
                     local.state.borrow_mut().hold_writes = true;
                     let mut first = Box::pin(one.execute(Command::On));
                     assert!(poll_once(first.as_mut()).await.is_none());
@@ -447,7 +438,7 @@ fn device_timeout_keeps_local_notifications_until_connection_is_lost() {
                 until(|| cloud.count("device/one/state/#") == 1).await;
 
                 local.state.borrow_mut().hold_writes = true;
-                let one = function(&control.context.registry, "one", "outlet:2");
+                let one = function(&control.context, "one", "outlet:2");
                 let command = one.execute(Command::On);
                 assert_eq!(command.await, Err(crate::device::CommandError::Timeout));
                 assert!(local_active(control, "one"));

@@ -4,7 +4,7 @@ use crate::xiaomi::capability::tests::source::SourceFixture;
 #[test]
 fn list_and_status_show_the_derived_mcn02_direct_patch() {
     block_on(async {
-        let (_directory, store, status, registry, _receivers) = fixture();
+        let (_directory, store, status, mut devices, _receivers) = fixture();
         let instance = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/miot/lumi-mcn02-synthetic.json"
         ))
@@ -21,10 +21,10 @@ fn list_and_status_show_the_derived_mcn02_direct_patch() {
             .commit_configuration(&configuration, &[])
             .unwrap();
         let (physical, _receivers) = PhysicalDevice::new(description);
-        registry.insert(physical);
+        devices.push(physical);
 
         for command in ["list", "status ac"] {
-            let output = handle_line(&registry, &store.devices(), &status, command)
+            let output = handle_line(&devices, &store.devices(), &status, command)
                 .await
                 .unwrap()
                 .unwrap();

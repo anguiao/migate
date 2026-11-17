@@ -31,7 +31,7 @@ fn standard_and_extended_lights_read_and_subscribe_their_exact_properties() {
             }
             let control = &c;
             c.peer(peer, |peer| async move {
-                let light = function(&control.context.registry, "one", "light:2");
+                let light = function(&control.context, "one", "light:2");
                 until(|| {
                     light.snapshot().lighting().unwrap().brightness_percent == Some(100.0)
                         && light
@@ -78,7 +78,7 @@ fn local_light_acceptance_keeps_actual_state_until_feedback() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "light:2");
+            let light = function(&control.context, "one", "light:2");
             until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature))
                 .await;
             let action = light
@@ -123,7 +123,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                 c.peer(peer, |peer| async move {
                     until(|| control.context.active_notification("one") == Some(PathKind::Local))
                         .await;
-                    let light = function(&control.context.registry, "one", "light:2");
+                    let light = function(&control.context, "one", "light:2");
                     until(|| {
                         light
                             .snapshot()
@@ -166,7 +166,7 @@ fn on_off_and_dimmable_source_io_use_only_real_bindings() {
                 c.peer(peer, |peer| async move {
                     until(|| control.context.active_notification("one") == Some(PathKind::Local))
                         .await;
-                    let light = function(&control.context.registry, "one", "light:2");
+                    let light = function(&control.context, "one", "light:2");
                     until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0))
                         .await;
                     let work = control.context.directory.borrow().devices["one"]
@@ -284,7 +284,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
         peer.value("one", BRIGHTNESS, json!(101));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let light = function(&control.context.registry, "one", "light:2");
+            let light = function(&control.context, "one", "light:2");
             until(|| {
                 light
                     .snapshot()
@@ -369,7 +369,7 @@ fn rgb_notification_source_requires_all_five_property_subscriptions() {
             until(|| work.test_local_exhausted()).await;
             assert!(!work.test_local_subscribed_pair(MODE.siid, MODE.piid));
             assert_eq!(control.context.active_notification("one"), None);
-            let light = function(&control.context.registry, "one", "light:2");
+            let light = function(&control.context, "one", "light:2");
             assert_eq!(light.snapshot().availability, Availability::Available);
             light
                 .begin_light_action(brightness(60.0), true)
@@ -392,7 +392,7 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "light:2");
+            let light = function(&control.context, "one", "light:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -457,7 +457,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-                let light = function(&control.context.registry, "one", "light:2");
+                let light = function(&control.context, "one", "light:2");
                 let work = control.context.directory.borrow().devices["one"]
                     .work
                     .clone()
@@ -524,7 +524,7 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "light:2");
+            let light = function(&control.context, "one", "light:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -570,7 +570,7 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-            let light = function(&control.context.registry, "one", "light:2");
+            let light = function(&control.context, "one", "light:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -628,7 +628,7 @@ fn unknown_mode_color_values_update_only_cache_until_the_mode_changes() {
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-                let light = function(&control.context.registry, "one", "light:2");
+                let light = function(&control.context, "one", "light:2");
                 let work = control.context.directory.borrow().devices["one"]
                     .work
                     .clone()

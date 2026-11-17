@@ -163,11 +163,7 @@ fn unreliable_ble_and_proxy_cloud_offline_does_not_block_reads() {
     block_on(rig.run(|c| async move {
         for did in dids {
             wait_cloud_values(&c, did).await;
-            let physical = c
-                .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", did))
-                .unwrap();
+            let physical = c.context.physical(&DeviceKey::new("xiaomi", did)).unwrap();
             assert_eq!(physical.availability(), Availability::Available);
             let status = c
                 .context
@@ -205,8 +201,7 @@ fn unreliable_ble_and_proxy_cloud_offline_does_not_block_reads() {
         c.context.update_all_availability();
         assert_eq!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "blt.sensor"))
+                .physical(&DeviceKey::new("xiaomi", "blt.sensor"))
                 .unwrap()
                 .availability(),
             Availability::Unavailable("no usable read or notification path".into())
@@ -248,8 +243,7 @@ fn a_reliable_offline_sensor_does_not_read_or_become_available() {
         }
         let physical = c
             .context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "sensor"))
+            .physical(&DeviceKey::new("xiaomi", "sensor"))
             .unwrap();
         assert_eq!(
             physical.availability(),
@@ -313,11 +307,7 @@ fn prefixed_control_devices_keep_offline_blocking() {
                 Err("device offline".into()),
                 "{did}"
             );
-            let physical = c
-                .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", did))
-                .unwrap();
+            let physical = c.context.physical(&DeviceKey::new("xiaomi", did)).unwrap();
             assert_eq!(
                 physical.availability(),
                 Availability::Unavailable("no usable read or notification path".into()),

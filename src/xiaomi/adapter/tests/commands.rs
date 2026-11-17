@@ -9,9 +9,9 @@ fn commands_are_concurrent_across_channels_and_fifo_with_execution_time_toggle()
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "multi"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let a = function(&control.context.registry, "one", "outlet:2");
-            let b = function(&control.context.registry, "multi", "outlet:3");
-            let d = function(&control.context.registry, "multi", "outlet:4");
+            let a = function(&control.context, "one", "outlet:2");
+            let b = function(&control.context, "multi", "outlet:3");
+            let d = function(&control.context, "multi", "outlet:4");
             let mut first = Box::pin(a.execute(Command::On));
             let mut second = Box::pin(a.execute(Command::Toggle));
             let mut third = Box::pin(a.execute(Command::Off));
@@ -72,7 +72,7 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "two"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -88,7 +88,7 @@ fn an_offline_event_before_an_active_success_reply_preserves_acceptance() {
                 Availability::Unavailable(_)
             ));
             assert_eq!(
-                function(&control.context.registry, "two", "outlet:2")
+                function(&control.context, "two", "outlet:2")
                     .snapshot()
                     .availability,
                 Availability::Available
@@ -122,14 +122,13 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "light:2");
+            let one = function(&control.context, "one", "light:2");
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
             let before_physical = control
                 .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+                .physical(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
             let mut changed = control.context.directory.borrow().devices["one"]
                 .work
@@ -161,8 +160,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
             let current_physical = loop {
                 let current = control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .unwrap();
                 if !before_physical.same_instance(&current) {
                     break current;
@@ -220,7 +218,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["multi"]).await;
             let key = DeviceKey::new("xiaomi", "multi");
-            let physical = control.context.registry.get(&key).unwrap();
+            let physical = control.context.physical(&key).unwrap();
             let runtime_order = physical
                 .functions()
                 .iter()
@@ -254,7 +252,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 .unwrap()
                 .native = Some(stable.clone());
             control.context.reconcile("multi").unwrap();
-            let current = control.context.registry.get(&key).unwrap();
+            let current = control.context.physical(&key).unwrap();
             assert!(
                 physical.same_instance(&current),
                 "an identical duplicate description keeps the serving instance"
@@ -293,7 +291,7 @@ fn rejected_write_keeps_a_prior_inflight_read_valid() {
             let before = peer.count("get", "one", 2);
             work.refresh_property("outlet:2", binding);
             until(|| peer.count("get", "one", 2) == before + 1).await;
-            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let outlet = function(&control.context, "one", "outlet:2");
             let mut action = Box::pin(outlet.execute(Command::On));
             assert!(poll_once(action.as_mut()).await.is_none());
             until(|| {
@@ -339,8 +337,7 @@ fn old_read_before_the_receipt_does_not_suppress_accepted_power() {
                 until(|| {
                     control
                         .context
-                        .registry
-                        .get(&DeviceKey::new("xiaomi", "one"))
+                        .physical(&DeviceKey::new("xiaomi", "one"))
                         .and_then(|device| device.function("outlet:2"))
                         .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
                 })
@@ -360,7 +357,7 @@ fn old_read_before_the_receipt_does_not_suppress_accepted_power() {
                 let before = peer.count("get", "one", 2);
                 work.refresh_property("outlet:2", binding);
                 until(|| peer.count("get", "one", 2) == before + 1).await;
-                let outlet = function(&control.context.registry, "one", "outlet:2");
+                let outlet = function(&control.context, "one", "outlet:2");
                 let mut action = Box::pin(outlet.execute(Command::On));
                 assert!(poll_once(action.as_mut()).await.is_none());
                 until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -391,8 +388,7 @@ fn outlet_without_notifications_uses_the_shared_post_write_feedback() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .and_then(|device| device.function("outlet:2"))
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
@@ -410,7 +406,7 @@ fn outlet_without_notifications_uses_the_shared_post_write_feedback() {
             .await;
             assert!(work.function_observer("outlet:2").is_none());
             let before = peer.count("get", "one", 2);
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -438,8 +434,7 @@ fn outlet_post_write_read_before_receipt_remains_the_observed_state() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .and_then(|device| device.function("outlet:2"))
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
@@ -452,7 +447,7 @@ fn outlet_post_write_read_before_receipt_remains_the_observed_state() {
             until(|| !work.refresh.borrow().contains("outlet:2", binding)).await;
             peer.state.borrow_mut().hold_writes = true;
             let before = peer.count("get", "one", 2);
-            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let outlet = function(&control.context, "one", "outlet:2");
             let mut action = Box::pin(outlet.execute(Command::On));
             assert!(poll_once(action.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -487,8 +482,7 @@ fn outlet_receipt_refreshes_again_after_a_post_write_inflight_read() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .and_then(|device| device.function("outlet:2"))
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
@@ -502,7 +496,7 @@ fn outlet_receipt_refreshes_again_after_a_post_write_inflight_read() {
             peer.state.borrow_mut().hold_writes = true;
             peer.state.borrow_mut().hold_reads = true;
             let before = peer.count("get", "one", 2);
-            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let outlet = function(&control.context, "one", "outlet:2");
             let mut action = Box::pin(outlet.execute(Command::On));
             assert!(poll_once(action.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -536,8 +530,7 @@ fn outlet_read_started_before_the_write_does_not_satisfy_feedback() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .and_then(|device| device.function("outlet:2"))
                     .is_some_and(|function| function.snapshot().power() == Some(Power::Off))
             })
@@ -552,7 +545,7 @@ fn outlet_read_started_before_the_write_does_not_satisfy_feedback() {
             let before = peer.count("get", "one", 2);
             work.refresh_property("outlet:2", binding);
             until(|| peer.count("get", "one", 2) == before + 1).await;
-            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let outlet = function(&control.context, "one", "outlet:2");
             outlet.execute(Command::On).await.unwrap();
             assert_eq!(outlet.snapshot().power(), Some(Power::On));
             peer.state.borrow_mut().hold_reads = false;
@@ -581,7 +574,7 @@ fn cp7pd_matter_channels_and_master_trigger_preserve_the_outlet_layout() {
                 let control = &c;
                 c.peer(peer, |peer| async move {
                     initialized(control, &peer, &["multi"]).await;
-                    let entries = control.publication.frozen();
+                    let entries = control.publication.matter_configuration().entries;
                     assert_eq!(entries.len(), 1);
                     let entry = &entries[0];
                     assert!(entry.identity.relay.is_none());
@@ -624,9 +617,7 @@ fn cp7pd_matter_channels_and_master_trigger_preserve_the_outlet_layout() {
                     .await;
                     until(|| {
                         ids.iter().zip([false, true, false]).all(|(id, value)| {
-                            function(&control.context.registry, "multi", id)
-                                .snapshot()
-                                .power()
+                            function(&control.context, "multi", id).snapshot().power()
                                 == Some(if value { Power::On } else { Power::Off })
                         })
                     })
@@ -654,7 +645,7 @@ fn single_power_receipt_preserves_correlated_acceptance_from_an_invalid_batch() 
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
             peer.state.borrow_mut().hold_writes = true;
-            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let outlet = function(&control.context, "one", "outlet:2");
             let mut action = Box::pin(outlet.execute(Command::On));
             assert!(poll_once(action.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;

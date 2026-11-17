@@ -49,7 +49,7 @@ fn rejected_read_returns_to_existing_queue_after_recovery() {
     let (release, gate) = flume::bounded(1);
     rig.cloud.lock().unwrap().restore_gate = Some(gate);
     block_on(rig.run(|c| async move {
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         until(|| one.snapshot().power() == Some(Power::Off)).await;
         c.clock
             .automatic
@@ -86,7 +86,7 @@ fn late_unauthorized_from_identical_old_session_cannot_stop_new_generation() {
     rig.cloud.lock().unwrap().online.insert("one".into());
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         until(|| one.snapshot().power() == Some(Power::Off)).await;
         {
             let mut cloud = c.cloud.lock().unwrap();

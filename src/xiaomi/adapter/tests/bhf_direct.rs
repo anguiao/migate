@@ -62,7 +62,7 @@ fn setup_instance(instance: Value) -> (Rig, LegacyDevice) {
 }
 
 fn function(c: &Control, id: &str) -> crate::device::Function {
-    super::support::function(&c.context.registry, DID, id)
+    super::support::function(&c.context, DID, id)
 }
 
 fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {

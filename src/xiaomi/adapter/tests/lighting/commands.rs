@@ -208,7 +208,7 @@ fn retired_consumer_keeps_sent_http_startup_owned_until_original_receipt() {
     }
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        let light = function(&c.context.registry, "one", "light:2");
+        let light = function(&c.context, "one", "light:2");
         until(|| light.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let action = light.begin_light_action(brightness(60.0), false).unwrap();
@@ -258,7 +258,7 @@ fn cloud_partial_auth_rejection_clears_runtime_light_state_when_access_is_restri
     }
     block_on(rig.run(|c| async move {
         until(|| c.context.directory.borrow().scope_valid()).await;
-        let light = function(&c.context.registry, "one", "light:2");
+        let light = function(&c.context, "one", "light:2");
         until(|| {
             light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature)
                 && light.snapshot().lighting().unwrap().color.is_some()
@@ -453,7 +453,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
     }
     let (release, gate) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        let old = function(&c.context.registry, "one", "light:2");
+        let old = function(&c.context, "one", "light:2");
         until(|| old.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         c.cloud.lock().unwrap().property_gate = Some(gate);
         let first = old.begin_light_action(brightness(60.0), false).unwrap();
@@ -475,8 +475,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
         .unwrap();
         let before = c
             .context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "one"))
+            .physical(&DeviceKey::new("xiaomi", "one"))
             .expect("the committed light is served");
         c.context
             .directory
@@ -491,12 +490,11 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
         c.context.reconcile("one").unwrap();
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+                .physical(&DeviceKey::new("xiaomi", "one"))
                 .is_some_and(|now| !before.same_instance(&now))
         })
         .await;
-        let new = function(&c.context.registry, "one", "light:2");
+        let new = function(&c.context, "one", "light:2");
         until(|| new.snapshot().lighting().unwrap().brightness_percent == Some(50.0)).await;
         let next = new.begin_light_action(brightness(70.0), true).unwrap();
         async_io::Timer::after(std::time::Duration::from_millis(30)).await;

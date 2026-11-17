@@ -13,11 +13,11 @@ fn home_relay_uses_current_hub_access_before_cloud_directory_recovers() {
                 c.announce();
                 let control = &c;
                 c.peer(panel_peer(RelayMode::Wired), |peer| async move {
-                    let relay = function(&control.context.registry, "one", "relay:2");
+                    let relay = function(&control.context, "one", "relay:2");
                     until(|| {
                         control.context.diagnostics().catalog_problem.is_some()
                             && relay.snapshot().power() == Some(Power::Off)
-                            && control.publication.frozen().len() == 3
+                            && control.publication.matter_configuration().entries.len() == 3
                     })
                     .await;
                     assert!(!control.context.directory.borrow().devices["one"].confirmed);
@@ -95,7 +95,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             }).await;
             let plan = control.publication.plan().unwrap().unwrap();
             control.publication.apply(control.publication.prepare(plan)).unwrap();
-            let entries = control.publication.frozen();
+            let entries = control.publication.matter_configuration().entries;
             let mut endpoints = entries.iter().map(|entry| entry.identity.endpoint).collect::<Vec<_>>();
             endpoints.sort();
             assert_eq!(endpoints.len(), 3);
@@ -120,14 +120,14 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             assert_eq!(peer.count("rpcReq", "one", 4), 0);
             assert!(!model.power(ep3).await.unwrap());
             peer.notify_value("one", binding(3, 1), json!(true), false);
-            until(|| function(&control.context.registry, "one", "relay:3").snapshot().power() == Some(Power::On)).await;
+            until(|| function(&control.context, "one", "relay:3").snapshot().power() == Some(Power::On)).await;
             assert!(model.power(ep3).await.unwrap());
             assert!(!model.power(ep4).await.unwrap());
 
             // The Home request is already queued behind an explicit terminal
             // request when a new mode arrives, before publication can commit.
             peer.state.borrow_mut().hold_writes = true;
-            let relay = function(&control.context.registry, "one", "relay:3");
+            let relay = function(&control.context, "one", "relay:3");
             let mut first = Box::pin(relay.execute(Command::On));
             assert!(poll_once(first.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 3) == 2).await;
@@ -138,10 +138,10 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             assert!(model.write_label(ep3, "Unsaved").await.is_err());
             assert_eq!(model.label(ep3).await, "Middle relay");
             peer.notify_value("one", binding(3, 2), json!(1), false);
-            until(|| function(&control.context.registry, "one", "relay:3").snapshot().relay_mode() == Some(RelayMode::Wireless)).await;
+            until(|| function(&control.context, "one", "relay:3").snapshot().relay_mode() == Some(RelayMode::Wireless)).await;
             let plan = control.publication.plan().unwrap().unwrap();
             assert!(control.publication.apply(control.publication.prepare(plan)).is_err());
-            assert_eq!(control.publication.frozen().len(), 3);
+            assert_eq!(control.publication.matter_configuration().entries.len(), 3);
             peer.state.borrow_mut().hold_writes = false;
             peer.release("one", 3, accepted("one", 3, 0)).await;
             first.await.unwrap();
@@ -151,7 +151,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             database.execute_batch("DROP TRIGGER fail_relay_save").unwrap();
             let plan = control.publication.plan().unwrap().unwrap();
             control.publication.apply(control.publication.prepare(plan)).unwrap();
-            assert_eq!(control.publication.frozen().len(), 2);
+            assert_eq!(control.publication.matter_configuration().entries.len(), 2);
             assert!(model.invoke(ep3, 0).await.is_err());
             let terminal = control.terminal();
             assert!(terminal.handle_line("off one relay:3").await.unwrap().unwrap().contains("command accepted"));
@@ -159,18 +159,18 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
 
             for siid in [2, 4] { peer.notify_value("one", binding(siid, 2), json!(1), false); }
             until(|| [2, 3, 4].iter().all(|siid|
-                function(&control.context.registry, "one", &format!("relay:{siid}"))
+                function(&control.context, "one", &format!("relay:{siid}"))
                     .snapshot().relay_mode() == Some(RelayMode::Wireless))).await;
             let plan = control.publication.plan().unwrap().unwrap();
             control.publication.apply(control.publication.prepare(plan)).unwrap();
-            assert!(control.publication.frozen().is_empty());
+            assert!(control.publication.matter_configuration().entries.is_empty());
             for siid in [2, 3, 4] { peer.notify_value("one", binding(siid, 2), json!(0), false); }
             until(|| [2, 3, 4].iter().all(|siid|
-                function(&control.context.registry, "one", &format!("relay:{siid}"))
+                function(&control.context, "one", &format!("relay:{siid}"))
                     .snapshot().relay_mode() == Some(RelayMode::Wired))).await;
             let plan = control.publication.plan().unwrap().unwrap();
             control.publication.apply(control.publication.prepare(plan)).unwrap();
-            let restored = control.publication.frozen();
+            let restored = control.publication.matter_configuration().entries;
             assert_eq!(restored.len(), 3);
             assert!(restored.iter().any(|entry| entry.identity.endpoint == ep3));
             let model = PublishedRelayModel::new(&control.publication, &control.store);
@@ -196,7 +196,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                 c.peer(peer, |peer| async move {
                     until(|| {
                         [2, 3, 4].iter().all(|siid| {
-                            function(&control.context.registry, "one", &format!("relay:{siid}"))
+                            function(&control.context, "one", &format!("relay:{siid}"))
                                 .snapshot()
                                 .relay_mode()
                                 == Some(RelayMode::Wired)
@@ -281,7 +281,7 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                     assert_eq!(peer.count("rpcReq", "one", 4), 0);
                     peer.notify_value("one", binding(3, 1), json!(true), false);
                     until(|| {
-                        function(&control.context.registry, "one", "relay:3")
+                        function(&control.context, "one", "relay:3")
                             .snapshot()
                             .power()
                             == Some(Power::On)

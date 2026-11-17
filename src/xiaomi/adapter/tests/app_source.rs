@@ -141,7 +141,6 @@ impl AppSource {
                 let (instance, inputs) =
                     PhysicalDevice::new(derived.served[&device.key].description.clone());
                 receivers.extend(inputs);
-                adapter.context.registry.insert(instance.clone());
                 let sink = Rc::new(LogicalSink::new(instance.clone()));
                 let light_write = native
                     .device()

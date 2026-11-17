@@ -35,7 +35,7 @@ fn read_started_before_off_cannot_clear_the_on_write_barrier() {
                 })
             })
             .await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             function
                 .begin_fan(FanCommand::Power(false))
                 .unwrap()
@@ -68,7 +68,7 @@ fn cached_on_notification_cannot_clear_the_on_write_barrier() {
                     && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             function
                 .begin_fan(FanCommand::Power(false))
                 .unwrap()

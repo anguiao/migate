@@ -176,7 +176,7 @@ fn cached_scope_restarts_with_ha_state(ha_stopped: bool) {
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let fan = function(&control.context.registry, did, "fan:2");
+            let fan = function(&control.context, did, "fan:2");
             until(|| {
                 let snapshot = fan.snapshot().fan().unwrap();
                 snapshot.power.value == Some(true)
@@ -312,7 +312,7 @@ fn sent_timeout_is_not_replayed_and_only_failed_device_recovers_with_new_baselin
             .await;
             until(|| {
                 dids.iter().all(|did| {
-                    let state = function(&control.context.registry, did, "fan:2")
+                    let state = function(&control.context, did, "fan:2")
                         .snapshot()
                         .fan()
                         .unwrap();
@@ -324,8 +324,8 @@ fn sent_timeout_is_not_replayed_and_only_failed_device_recovers_with_new_baselin
             .await;
             control.clock.automatic.store(false, Ordering::Relaxed);
             first.drop_write.store(true, Ordering::Relaxed);
-            let fan1 = function(&control.context.registry, dids[0], "fan:2");
-            let fan2 = function(&control.context.registry, dids[1], "fan:2");
+            let fan1 = function(&control.context, dids[0], "fan:2");
+            let fan2 = function(&control.context, dids[1], "fan:2");
             assert_eq!(
                 fan1.begin_fan(FanCommand::Power(false))
                     .unwrap()
@@ -440,7 +440,7 @@ fn credential_replacement_result(drop_reply: bool) {
         Box::pin(async move {
             until(|| control.context.direct_candidate(did).is_ok()).await;
             until(|| {
-                function(&control.context.registry, did, "fan:2")
+                function(&control.context, did, "fan:2")
                     .snapshot()
                     .fan()
                     .unwrap()
@@ -450,7 +450,7 @@ fn credential_replacement_result(drop_reply: bool) {
             })
             .await;
             old.hold_write.store(true, Ordering::Relaxed);
-            let action = function(&control.context.registry, did, "fan:2")
+            let action = function(&control.context, did, "fan:2")
                 .begin_fan(FanCommand::Power(false))
                 .unwrap();
             until(|| old.writes.lock().unwrap().len() == 1).await;

@@ -6,7 +6,7 @@ use crate::device::TemperatureSourceState;
 const ID: &str = "temperature:3:1001";
 
 fn source(context: &super::super::state::Context) -> TemperatureSourceState {
-    super::support::function(&context.registry, "sensor", ID)
+    super::support::function(context, "sensor", ID)
         .snapshot()
         .temperature_source()
         .unwrap()
@@ -312,9 +312,9 @@ fn readmitted_device_gets_a_fresh_temperature_instance() {
             slot.cloud_access = cloud_access;
         }
         c.context.reconcile("sensor").unwrap();
-        until(|| c.context.registry.get(&DeviceKey::new("xiaomi", "sensor"))
+        until(|| c.context.physical(&DeviceKey::new("xiaomi", "sensor"))
             .is_some_and(|physical| !old_physical.same_instance(&physical))).await;
-        let new = function(&c.context.registry, "sensor", ID);
+        let new = function(&c.context, "sensor", ID);
         assert_eq!(new.snapshot().temperature_source(), Some(TemperatureSourceState::AwaitingReading));
         assert_eq!(new.snapshot().measurement().unwrap().value, None);
         release.send(()).unwrap();

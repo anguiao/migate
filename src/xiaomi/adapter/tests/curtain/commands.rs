@@ -11,7 +11,7 @@ fn curtain_local_commands_write_one_quantized_property_without_refresh() {
         let control = &c;
         c.peer(peer(), |peer| async move {
             settled(control).await;
-            let function = function(&control.context.registry, "one", "curtain:2");
+            let function = function(&control.context, "one", "curtain:2");
             let before = function.snapshot();
             let reads = peer.count("get", "one", 0);
             for command in [
@@ -106,7 +106,7 @@ fn curtain_cloud_commands_write_single_values_and_retain_the_request_in_diagnost
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             settled(&c).await;
-            let function = function(&c.context.registry, "one", "curtain:2");
+            let function = function(&c.context, "one", "curtain:2");
             let before = function.snapshot();
             assert_eq!(function.matter_curtain().1, Some(25));
             let reads = c.cloud.lock().unwrap().property_reads.len();
@@ -173,15 +173,15 @@ fn curtain_local_stop_waits_for_old_receipt_and_other_device_is_independent() {
         c.peer(peer, |peer| async move {
             settled(control).await;
             until(|| {
-                function(&control.context.registry, "two", "curtain:2")
+                function(&control.context, "two", "curtain:2")
                     .snapshot()
                     .availability
                     == Availability::Available
             })
             .await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "curtain:2");
-            let two = function(&control.context.registry, "two", "curtain:2");
+            let one = function(&control.context, "one", "curtain:2");
+            let two = function(&control.context, "two", "curtain:2");
             let before = one.snapshot();
             let first = one.begin_curtain(CurtainCommand::Target(10.0)).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
@@ -320,7 +320,7 @@ fn curtain_without_ready_notifications_reads_a_single_post_command_snapshot() {
             peer.value("one", TARGET, json!(90));
             peer.state.borrow_mut().hold_writes = true;
             let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
+            let action = function(&control.context, "one", "curtain:2")
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
@@ -392,7 +392,7 @@ fn post_command_read_failure_retries_without_changing_acceptance() {
                 .read_fail
                 .insert(("one".into(), 2, 3));
             let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
+            let action = function(&control.context, "one", "curtain:2")
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             action.accepted().await.unwrap();
@@ -474,7 +474,7 @@ fn rejected_curtain_write_does_not_request_a_one_shot_read() {
             .await;
             peer.state.borrow_mut().hold_writes = true;
             let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
+            let action = function(&control.context, "one", "curtain:2")
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
@@ -527,7 +527,7 @@ fn old_inflight_read_cannot_satisfy_or_overwrite_the_post_write_snapshot() {
             work(control).refresh_property("curtain:2", CURRENT);
             until(|| peer.count("get", "one", 0) == before + 1).await;
             peer.value("one", CURRENT, json!(48));
-            function(&control.context.registry, "one", "curtain:2")
+            function(&control.context, "one", "curtain:2")
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap()
                 .accepted()
@@ -580,7 +580,7 @@ fn accepted_command_without_a_read_route_refreshes_after_recovery() {
             .await;
             peer.state.borrow_mut().hold_writes = true;
             let before = peer.count("get", "one", 0);
-            let action = function(&control.context.registry, "one", "curtain:2")
+            let action = function(&control.context, "one", "curtain:2")
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
@@ -639,7 +639,7 @@ fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
                 http.raw_values.insert(("one".into(), 2, 4), json!(90));
             }
             let before = c.cloud.lock().unwrap().property_reads.len();
-            let action = function(&c.context.registry, "one", "curtain:2")
+            let action = function(&c.context, "one", "curtain:2")
                 .begin_curtain(CurtainCommand::Target(90.0))
                 .unwrap();
             action.accepted().await.unwrap();

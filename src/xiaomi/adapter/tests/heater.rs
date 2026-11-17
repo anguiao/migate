@@ -25,10 +25,7 @@ fn work(c: &Control) -> Rc<super::work::DeviceWork> {
 }
 
 fn snapshot(c: &Control) -> HeaterSnapshot {
-    function(&c.context.registry, "one", ID)
-        .snapshot()
-        .heater()
-        .unwrap()
+    function(&c.context, "one", ID).snapshot().heater().unwrap()
 }
 
 fn peer() -> Rc<Peer> {
@@ -87,7 +84,7 @@ fn heating_uses_standard_properties_for_feedback_and_separate_writes() {
                     "{binding:?}"
                 );
             }
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             let before = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let temperature = function

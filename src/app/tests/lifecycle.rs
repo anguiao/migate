@@ -344,7 +344,7 @@ impl futures_lite::io::AsyncRead for ObservedEof<'_> {
 }
 
 #[test]
-fn empty_registry_starts_the_bridge_and_eof_keeps_the_source_running() {
+fn empty_configuration_starts_the_bridge_and_eof_keeps_the_source_running() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -470,7 +470,7 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                                 .source
                                 .initial_reads_ready(&committed.current().configuration)
                         );
-                        published_at_start.set(committed.frozen().len());
+                        published_at_start.set(committed.matter_configuration().entries.len());
                         started.notify(usize::MAX);
                         Ok(())
                     },
@@ -566,4 +566,121 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
             result.unwrap();
         })
     }).unwrap().join().unwrap();
+}
+
+struct WaitingDeadline(Rc<event_listener::Event>);
+impl super::super::StartupDeadline for WaitingDeadline {
+    fn expired(&self) -> bool {
+        false
+    }
+    async fn wait(&self) {
+        self.0.notify(usize::MAX);
+        future::pending::<()>().await;
+    }
+}
+
+#[test]
+fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let store = Store::open(directory.path()).unwrap();
+                let identity = store.load_identity().unwrap();
+                let status = status(&store);
+                let source = AppSource::new(&store, Some(outlet()));
+                source.confirm_all();
+                let app = Rc::new(
+                    crate::app::App::open(source.handle.clone(), store.clone()).unwrap(),
+                );
+                let waiting = Rc::new(event_listener::Event::new());
+                let waiting_seen = waiting.listen();
+                let gate = StartupGate::until(WaitingDeadline(waiting));
+                let started = event_listener::Event::new();
+                let started_seen = started.listen();
+                let stop = event_listener::Event::new();
+                let stopping = stop.listen();
+                let socket = std::net::UdpSocket::bind("[::1]:0").unwrap();
+                let port = socket.local_addr().unwrap().port();
+                drop(socket);
+                let current = app.clone();
+                let source_store = store.clone();
+                let bridge = super::super::run_lifecycle(
+                    BridgeOptions {
+                        store: &store,
+                        identity: &identity,
+                        status: &status,
+                        port,
+                    },
+                    async { Ok((app.clone(), gate)) },
+                    async move {
+                        waiting_seen.await;
+                        assert!(
+                            !current.source.initial_reads_ready(&current.current().configuration)
+                        );
+                        let database = rusqlite::Connection::open(source_store.path()).unwrap();
+                        database
+                            .execute_batch(
+                                "CREATE TRIGGER fail_withdrawal BEFORE UPDATE ON bridge_configuration
+                                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                            )
+                            .unwrap();
+                        source.remove("test-outlet");
+                        let plan = current.plan().unwrap().unwrap();
+                        assert!(current.apply(current.prepare(plan)).is_err());
+                        assert!(
+                            current.source.initial_reads_ready(&current.current().configuration)
+                        );
+                        let _resources = (source, database);
+                        future::pending().await
+                    },
+                    Cursor::new([]),
+                    Vec::new(),
+                    async {
+                        stopping.await;
+                        Ok(())
+                    },
+                    |_| {
+                        started.notify(usize::MAX);
+                        Ok(())
+                    },
+                );
+                let controller = async {
+                    started_seen.await;
+                    let parts = crate::matter::tests::support::running_parts(port).await;
+                    assert!(parts.is_empty(), "withdrawn source was assembled: {parts:?}");
+                    assert!(app.failure().is_some());
+                    assert!(
+                        store
+                            .devices()
+                            .load_configuration()
+                            .unwrap()
+                            .device(outlet().key())
+                            .unwrap()
+                            .native
+                            .is_some()
+                    );
+                    assert_eq!(
+                        crate::matter::tests::support::persisted_root_version(&store),
+                        app.current().configuration.root_version,
+                    );
+                    stop.notify(usize::MAX);
+                };
+                future::or(
+                    async {
+                        let (result, ()) = future::zip(bridge, controller).await;
+                        result.unwrap();
+                    },
+                    async {
+                        async_io::Timer::after(std::time::Duration::from_secs(10)).await;
+                        panic!("timed out reading the startup topology")
+                    },
+                )
+                .await;
+            });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }

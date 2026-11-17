@@ -258,7 +258,7 @@ fn mapping_rebuild_keeps_late_subscriptions_and_commits_new_source_facts() {
     assert_eq!(saved.relay_channels[0].mode, Some(RelayMode::Wireless));
     assert_eq!(saved.relay_channels[0].device_type, RelayType::Switch);
     assert_eq!(saved.descriptions[0].name.as_deref(), Some("Renamed panel"));
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
     assert_eq!(
         store.matter().get(subscription).unwrap().unwrap(),
         b"another late subscription"
@@ -286,7 +286,7 @@ fn a_pending_mapping_cannot_carry_subscriptions_across_a_home_change() {
         ..fixtures::scope()
     };
     source.scope(next_scope.clone());
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
 
     let db = rusqlite::Connection::open(store.path()).unwrap();
     db.execute_batch(
@@ -298,7 +298,7 @@ fn a_pending_mapping_cannot_carry_subscriptions_across_a_home_change() {
     assert!(app.apply(app.prepare(plan)).is_err());
     assert_eq!(store.devices().load_configuration().unwrap(), mapped);
     assert!(store.matter().contains(subscription).unwrap());
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
     db.execute_batch("DROP TRIGGER fail_scope").unwrap();
     let plan = app.plan().unwrap().unwrap();
     app.apply(app.prepare(plan)).unwrap();

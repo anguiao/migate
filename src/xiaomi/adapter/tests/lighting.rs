@@ -48,7 +48,7 @@ fn peer_values(c: &Control) -> Rc<Peer> {
 }
 async fn ready_light(c: &Control) -> crate::device::Function {
     until(|| c.context.active_notification("one") == Some(PathKind::Local)).await;
-    let function = function(&c.context.registry, "one", "light:2");
+    let function = function(&c.context, "one", "light:2");
     until(|| {
         let snapshot = function.snapshot();
         let light = snapshot.lighting().unwrap();
@@ -86,13 +86,12 @@ fn freeze_light_clock(c: &Control) {
         .store(false, std::sync::atomic::Ordering::Relaxed);
 }
 async fn ready_replacement_light(c: &Control) -> crate::device::Function {
-    let before = c.context.registry.get(&DeviceKey::new("xiaomi", "one"));
+    let before = c.context.physical(&DeviceKey::new("xiaomi", "one"));
     future::or(
         async {
             until(|| {
                 c.context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .is_some_and(|now| before.as_ref().is_none_or(|old| !old.same_instance(&now)))
                     && c.context.active_notification("one")
                         == Some(super::super::model::PathKind::Local)

@@ -84,7 +84,7 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         until(|| c.cloud.lock().unwrap().infos == before + 2).await;
         c.cloud.lock().unwrap().property_status = 503;
         assert!(
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .is_err()
@@ -95,8 +95,7 @@ fn an_old_directory_round_cannot_confirm_deletion_or_clear_new_http_pause() {
         assert!(c.context.credentials.borrow().http_paused());
         assert!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "two"))
+                .physical(&DeviceKey::new("xiaomi", "two"))
                 .is_some()
         );
         assert!(
@@ -146,7 +145,7 @@ fn candidate_unauthorized_requests_coalesce_into_one_mijia_recovery_and_resume_p
                     .service_token(),
                 "restored-service"
             );
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -242,7 +241,7 @@ fn rejected_or_verification_recovery_preserves_local_access_and_stops_only_mijia
                 );
                 control.clock.advance(Duration::from_secs(600));
                 control.context.request_sync();
-                function(&control.context.registry, "one", "outlet:2")
+                function(&control.context, "one", "outlet:2")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -298,7 +297,7 @@ fn coalesced_candidate_401s_preserve_the_temporary_recovery_backoff() {
                 future::yield_now().await;
             }
             assert_eq!(control.cloud.lock().unwrap().restores, 1);
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

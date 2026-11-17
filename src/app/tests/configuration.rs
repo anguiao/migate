@@ -55,7 +55,7 @@ fn startup_revocation_overlay_keeps_committed_versions_for_the_removal_plan() {
     let restored = AppSource::new(&store, None);
     assert!(restored.physical.is_none());
     let app = Rc::new(App::open(restored.handle.clone(), store.clone()).unwrap());
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
     let plan = app.plan().unwrap().unwrap();
     assert!(plan.rebuild);
     assert_eq!(plan.configuration.root_version, before.root_version + 1);
@@ -69,7 +69,7 @@ fn startup_revocation_overlay_keeps_committed_versions_for_the_removal_plan() {
     assert!(withdrawn.native.is_none());
     let prepared = app.prepare(plan);
     app.apply(prepared).unwrap();
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
     let saved = store.devices().load_configuration().unwrap();
     assert_eq!(saved, *app.current().configuration);
     assert_eq!(store.devices().load_revocations().unwrap().len(), 1);
@@ -100,7 +100,7 @@ fn failed_device_withdrawal_omits_the_retired_source_from_restored_reports() {
     let app = App::open(source.handle.clone(), store.clone()).unwrap();
     let subscription = crate::matter::subscription_keys().start;
     store.matter().put(subscription, b"same home").unwrap();
-    assert_eq!(app.frozen().len(), 1);
+    assert_eq!(app.matter_configuration().entries.len(), 1);
     source.remove(&outlet().key().id);
     let db = rusqlite::Connection::open(store.path()).unwrap();
     db.execute_batch(
@@ -110,7 +110,7 @@ fn failed_device_withdrawal_omits_the_retired_source_from_restored_reports() {
     .unwrap();
     let plan = app.plan().unwrap().unwrap();
     assert!(app.apply(app.prepare(plan)).is_err());
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
     assert_eq!(
         store.matter().get(subscription).unwrap().unwrap(),
         b"same home"
@@ -118,7 +118,7 @@ fn failed_device_withdrawal_omits_the_retired_source_from_restored_reports() {
     db.execute_batch("DROP TRIGGER reject_removal").unwrap();
     let plan = app.plan().unwrap().unwrap();
     app.apply(app.prepare(plan)).unwrap();
-    assert!(app.frozen().is_empty());
+    assert!(app.matter_configuration().entries.is_empty());
     assert_eq!(
         store.matter().get(subscription).unwrap().unwrap(),
         b"same home"

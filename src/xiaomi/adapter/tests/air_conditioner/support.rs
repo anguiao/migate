@@ -22,7 +22,7 @@ pub(super) fn work(c: &Control) -> Rc<super::work::DeviceWork> {
         .clone()
 }
 pub(super) fn snapshot(c: &Control) -> AirConditionerSnapshot {
-    function(&c.context.registry, "one", ID)
+    function(&c.context, "one", ID)
         .snapshot()
         .air_conditioner()
         .unwrap()

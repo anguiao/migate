@@ -17,7 +17,7 @@ use sensor_binding::activate_temperature_bindings;
 
 use crate::{
     configuration::{self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput},
-    device::{DeviceKey, DeviceRegistry, Function, FunctionKey, PhysicalDevice},
+    device::{DeviceKey, Function, FunctionKey, PhysicalDevice},
     matter,
     storage::{Identity, StorageError, Store},
     terminal::AuthStatus,
@@ -41,7 +41,6 @@ pub(crate) struct EffectiveConfiguration {
     pub(crate) configuration: Rc<CommittedConfiguration>,
     pub(crate) derived: Rc<DerivedConfiguration>,
     pub(crate) entries: Vec<Rc<SourceEntry>>,
-    pub(crate) published: DeviceRegistry,
 }
 
 impl EffectiveConfiguration {
@@ -81,7 +80,6 @@ impl App {
         // so withdrawals still receive their version increments.
         let derived = source.committed_graph();
         let entries = source.entries(&configuration);
-        let published = serving_registry(&derived.published, &entries);
         activate_temperature_bindings(&configuration, &entries);
         Ok(Self {
             source,
@@ -90,7 +88,6 @@ impl App {
                 configuration,
                 derived,
                 entries,
-                published,
             })),
             committed: event_listener::Event::new(),
             rebuild_requested: event_listener::Event::new(),
@@ -163,22 +160,23 @@ impl App {
         self.source.stop_actions();
     }
 
-    /// Frozen published references for one Matter instance. Only the current
-    /// logical functions and their reserved endpoints are published;
-    /// historical reservations stay in storage. Matter never rereads the
-    /// configuration tables.
-    pub(crate) fn frozen(&self) -> Vec<matter::FrozenEntry> {
+    /// Assemble one Matter instance from the same committed configuration.
+    /// Only retained sources and visible functions use their reserved endpoints;
+    /// historical reservations stay in storage.
+    pub(crate) fn matter_configuration(&self) -> matter::MatterConfiguration {
         let current = self.current();
         let mut entries = current
-            .published
-            .list()
-            .into_iter()
-            .filter(|device| {
-                self.source
-                    .source_retained(&current.configuration.scope, device.key())
+            .entries
+            .iter()
+            .filter(|entry| {
+                let key = entry.physical.key();
+                current.derived.published.contains(key)
+                    && self
+                        .source
+                        .source_retained(&current.configuration.scope, key)
             })
-            .map(|device| {
-                let key = device.key();
+            .map(|entry| {
+                let key = entry.physical.key();
                 let committed = current
                     .configuration
                     .device(key)
@@ -199,8 +197,8 @@ impl App {
                             .endpoint,
                     })
                     .collect::<Vec<_>>();
-                matter::FrozenEntry {
-                    device,
+                matter::PublishedEntry {
+                    device: entry.physical.clone(),
                     identity: matter::PublishedIdentity {
                         endpoint: committed.endpoint,
                         unique_id: committed.unique_id.clone(),
@@ -229,7 +227,7 @@ impl App {
                     .source
                     .source_retained(&current.configuration.scope, &key.device)
             {
-                entries.push(matter::FrozenEntry {
+                entries.push(matter::PublishedEntry {
                     device: source.physical.clone(),
                     identity: matter::PublishedIdentity {
                         endpoint: channel.endpoint,
@@ -246,11 +244,10 @@ impl App {
             }
         }
         entries.sort_by_key(|entry| entry.identity.endpoint);
-        entries
-    }
-
-    pub(crate) fn root_version(&self) -> u32 {
-        self.current().configuration.root_version
+        matter::MatterConfiguration {
+            entries,
+            root_version: current.configuration.root_version,
+        }
     }
 
     /// Collect the latest effective input and produce a pure candidate plan.
@@ -347,14 +344,12 @@ impl App {
             let entries =
                 self.source
                     .install(&configuration, &derived, &operations, prepared.resources);
-            let published = published_registry(&derived.published, &entries);
             activate_temperature_bindings(&configuration, &entries);
             let root_version = configuration.root_version;
             self.replace_current(EffectiveConfiguration {
                 configuration,
                 derived,
                 entries,
-                published,
             });
             self.committed.notify(usize::MAX);
             log::info!("Bridge configuration committed at root version {root_version}");
@@ -372,34 +367,4 @@ fn installed_function(entries: &[Rc<SourceEntry>], key: &FunctionKey) -> Option<
         .find(|entry| entry.physical.key() == &key.device)?
         .physical
         .function(&key.id)
-}
-
-/// The initial serving set only keeps devices with a restored reference.
-fn serving_registry(
-    published: &BTreeSet<DeviceKey>,
-    entries: &[Rc<SourceEntry>],
-) -> DeviceRegistry {
-    let registry = DeviceRegistry::new();
-    for key in published {
-        if let Some(entry) = entries.iter().find(|entry| entry.physical.key() == key) {
-            registry.insert(entry.physical.clone());
-        }
-    }
-    registry
-}
-
-/// After a successful commit every published device has an installed entry.
-fn published_registry(
-    published: &BTreeSet<DeviceKey>,
-    entries: &[Rc<SourceEntry>],
-) -> DeviceRegistry {
-    let registry = DeviceRegistry::new();
-    for key in published {
-        let entry = entries
-            .iter()
-            .find(|entry| entry.physical.key() == key)
-            .expect("a published device keeps its serving entry");
-        registry.insert(entry.physical.clone());
-    }
-    registry
 }

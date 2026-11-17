@@ -28,7 +28,7 @@ const WINDOW_SECONDS: u16 = 900;
 #[path = "tests/bridge.rs"]
 mod tests;
 
-/// Service registrations belong to the bridge, not one frozen Matter instance.
+/// Service registrations survive individual Matter runs.
 pub(crate) struct Advertisement {
     mdns: AstroMdns,
     port: u16,
@@ -65,28 +65,17 @@ pub(crate) trait LabelWriter {
     ) -> Result<(), StorageError>;
 }
 
-/// One frozen Matter instance and storage failures that outlive its run future.
+/// Matter persistence and label access, including failures that outlive a run future.
 pub(crate) struct Bridge<'a> {
     identity: &'a Identity,
     pub(super) store: StoreAdapter,
-    /// Explicit committed published references, identities and root version
-    /// captured by the application; a running instance never rereads the
-    /// device configuration tables.
-    frozen: (Vec<model::FrozenEntry>, u32),
     renamer: Rc<dyn LabelWriter>,
 }
 impl<'a> Bridge<'a> {
-    pub(crate) fn new(
-        entries: Vec<model::FrozenEntry>,
-        root_version: u32,
-        store: &Store,
-        identity: &'a Identity,
-        renamer: Rc<dyn LabelWriter>,
-    ) -> Self {
+    pub(crate) fn new(store: &Store, identity: &'a Identity, renamer: Rc<dyn LabelWriter>) -> Self {
         Self {
             identity,
             store: StoreAdapter::new(store.matter()),
-            frozen: (entries, root_version),
             renamer,
         }
     }
@@ -98,11 +87,15 @@ impl<'a> Bridge<'a> {
 
     pub(crate) async fn run_with_advertisement(
         &self,
+        configuration: model::MatterConfiguration,
         advertisement: &mut Advertisement,
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
         self.check_failure()?;
-        let (frozen, root_version) = self.frozen.clone();
+        let model::MatterConfiguration {
+            entries,
+            root_version,
+        } = configuration;
         let store = &self.store;
         let socket = advertisement.bind()?;
         let bound_port = advertisement.port;
@@ -121,7 +114,7 @@ impl<'a> Bridge<'a> {
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler = model::handler_from(frozen, crypto.rand()?, self.renamer.clone());
+        let handler = model::handler_from(entries, crypto.rand()?, self.renamer.clone());
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         let persist_kv = matter.kv(store.clone());

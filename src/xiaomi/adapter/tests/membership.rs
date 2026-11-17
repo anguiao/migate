@@ -29,8 +29,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                 until(|| control.context.cloud_candidate("multi", true).is_ok()).await;
                 let strip = control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "multi"))
+                    .physical(&DeviceKey::new("xiaomi", "multi"))
                     .unwrap();
                 assert_eq!(strip.functions().len(), 3);
                 assert_eq!(strip.description().label(), "Cloud strip");
@@ -39,7 +38,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                     missing_push
                 );
                 assert!(control.context.local_candidate("multi", true).is_err());
-                function(&control.context.registry, "multi", "outlet:9")
+                function(&control.context, "multi", "outlet:9")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -63,7 +62,7 @@ fn invalid_or_missing_local_capabilities_only_restrict_the_applicable_paths() {
                 }
                 peer.list_changed(&["multi"]);
                 initialized(control, &peer, &["one", "multi"]).await;
-                function(&control.context.registry, "multi", "outlet:9")
+                function(&control.context, "multi", "outlet:9")
                     .execute(Command::Off)
                     .await
                     .unwrap();
@@ -103,7 +102,7 @@ fn stale_local_metadata_does_not_block_local_control_after_cloud_admission() {
             .await;
             // Directory metadata disagreement is not an access qualification.
             assert!(control.context.local_candidate("multi", false).is_ok());
-            let usb = function(&control.context.registry, "multi", "outlet:9");
+            let usb = function(&control.context, "multi", "outlet:9");
             usb.execute(Command::On).await.unwrap();
             assert_eq!(peer.count("rpcReq", "multi", 9), 1);
             assert!(control.cloud.lock().unwrap().property_writes.is_empty());
@@ -149,7 +148,7 @@ fn supported_descriptions_and_selected_home_membership_remain_required() {
                             && raw.diagnostic.as_deref().unwrap().contains("missing")
                     })
             );
-            assert_eq!(control.context.registry.list().len(), 1);
+            assert_eq!(control.context.physical_devices().len(), 1);
             for did in ["multi", "two"] {
                 assert!(
                     control
@@ -180,8 +179,7 @@ fn supported_descriptions_and_selected_home_membership_remain_required() {
             assert!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "two"))
+                    .physical(&DeviceKey::new("xiaomi", "two"))
                     .is_none()
             );
         })
@@ -196,13 +194,12 @@ fn cloud_members_wait_for_local_discovery_to_select_the_first_home() {
     block_on(rig.run(|c| async move {
         until(|| c.context.diagnostics().catalog_problem.is_some()).await;
         assert!(c.context.directory.borrow().scope.is_none());
-        assert!(c.context.registry.list().is_empty());
+        assert!(c.context.physical_devices().is_empty());
         assert_eq!(c.cloud.lock().unwrap().details, 0);
         c.announce();
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+                .physical(&DeviceKey::new("xiaomi", "one"))
                 .is_some()
         })
         .await;
@@ -278,7 +275,7 @@ fn five_minute_member_sync_preserves_normal_periodic_channel_reads() {
             );
             peer.notify("one", 2, true);
             until(|| {
-                function(&control.context.registry, "one", "outlet:2")
+                function(&control.context, "one", "outlet:2")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -308,8 +305,8 @@ fn five_minute_member_sync_preserves_normal_periodic_channel_reads() {
 fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
     block_on(Rig::new(false, &[]).run(|mut c| async move {
         c.ready.take().unwrap().wait().await.unwrap();
-        let registry = c.context.registry.clone();
-        assert!(registry.list().is_empty());
+        let context = c.context.clone();
+        assert!(context.physical_devices().is_empty());
         c.announce();
         let peer = Rc::new(Peer::default());
         let control = &c;
@@ -328,11 +325,13 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
                 .device(&key)
                 .cloned()
                 .unwrap();
-            let old = function(&registry, "multi", "outlet:3");
+            let old = function(&context, "multi", "outlet:3");
             control.cloud.lock().unwrap().members.clear();
             peer.list_changed(&["multi"]);
-            until(|| registry.list().is_empty() && peer.state.borrow().unsubscribes.len() == 4)
-                .await;
+            until(|| {
+                context.physical_devices().is_empty() && peer.state.borrow().unsubscribes.len() == 4
+            })
+            .await;
             assert!(
                 control
                     .store
@@ -365,7 +364,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
             assert_eq!(after.functions, before.functions);
             assert_eq!(after.label, "Kitchen saved");
             assert_eq!(
-                function(&registry, "multi", "outlet:3").snapshot().power(),
+                function(&context, "multi", "outlet:3").snapshot().power(),
                 Some(Power::Off)
             );
         })
@@ -407,8 +406,7 @@ fn incomplete_foreign_or_failed_directory_sync_cannot_remove_published_devices()
                 assert!(
                     control
                         .context
-                        .registry
-                        .get(&DeviceKey::new("xiaomi", "one"))
+                        .physical(&DeviceKey::new("xiaomi", "one"))
                         .is_some()
                 );
                 assert!(
@@ -422,7 +420,7 @@ fn incomplete_foreign_or_failed_directory_sync_cannot_remove_published_devices()
                         .is_some()
                 );
                 assert_eq!(
-                    function(&control.context.registry, "one", "outlet:2")
+                    function(&control.context, "one", "outlet:2")
                         .snapshot()
                         .availability,
                     Availability::Available
@@ -461,7 +459,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
                 .clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&control.context.registry, "one", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
@@ -473,8 +471,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .is_none()
                     && !peer.state.borrow().unsubscribes.is_empty()
             })
@@ -493,7 +490,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             peer.notify("one", 2, true);
             peer.notify("multi", 4, true);
             until(|| {
-                function(&control.context.registry, "multi", "outlet:4")
+                function(&control.context, "multi", "outlet:4")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -506,8 +503,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             assert!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .is_none()
             );
             assert_eq!(peer.count("get", "one", 2), retired_reads);
@@ -551,19 +547,17 @@ fn a_complete_cloud_snapshot_remains_valid_across_a_local_reconnect() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .is_none()
             })
             .await;
             assert!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "multi"))
+                    .physical(&DeviceKey::new("xiaomi", "multi"))
                     .is_some()
             );
-            function(&control.context.registry, "multi", "outlet:9")
+            function(&control.context, "multi", "outlet:9")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -592,11 +586,11 @@ fn pending_cloud_descriptions_retry_on_a_later_event_without_blocking_cached_con
             })
             .await;
             initialized(control, &peer, &["one"]).await;
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
-            assert_eq!(control.context.registry.list().len(), 1);
+            assert_eq!(control.context.physical_devices().len(), 1);
             assert!(control.cloud.lock().unwrap().details >= 1);
             control.cloud.lock().unwrap().detail_status = 200;
             peer.list_changed(&["multi"]);

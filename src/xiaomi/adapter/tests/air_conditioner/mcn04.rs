@@ -16,7 +16,7 @@ fn mcn04_state_report_updates_valid_fields_atomically_and_preserves_invalid_fiel
         let control = &c;
         c.peer(peer, |peer| async move {
             until(|| snapshot(control).power.value == Some(true)).await;
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             let before = function.snapshot().revision;
             peer.notify_value_at(
                 "one",
@@ -51,14 +51,14 @@ fn mcn04_state_report_updates_valid_fields_atomically_and_preserves_invalid_fiel
 fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range() {
     block_on(mcn04_rig().run(|c| async move {
         assert!(
-            function(&c.context.registry, "one", ID)
+            function(&c.context, "one", ID)
                 .air_conditioner_constraints()
                 .is_none()
         );
         c.announce();
         let control = &c;
         c.peer(mcn04_peer(), |peer| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(control).mode.value == Some(Mode::Cool)
@@ -159,7 +159,7 @@ fn mcn04_without_range_allows_power_and_swing_but_not_dependent_commands() {
             .insert(("one".into(), MCN_RANGE.siid, MCN_RANGE.piid));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 snapshot(control).mode.value == Some(Mode::Cool)
                     && work(control).function_observer(ID).is_some()
@@ -204,7 +204,7 @@ fn mcn04_combined_steps_recheck_new_feedback_after_mode_send() {
         c.announce();
         let control = &c;
         c.peer(mcn04_peer(), |peer| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(control).mode.value == Some(Mode::Cool)

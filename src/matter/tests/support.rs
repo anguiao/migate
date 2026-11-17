@@ -4,11 +4,16 @@ impl Bridge<'_> {
     /// Test convenience over the real advertisement lifecycle.
     pub(super) async fn run(
         &self,
+        configuration: crate::matter::MatterConfiguration,
         port: u16,
         report_pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
     ) -> Result<(), RuntimeError> {
-        self.run_with_advertisement(&mut crate::matter::Advertisement::new(port), report_pairing)
-            .await
+        self.run_with_advertisement(
+            configuration,
+            &mut crate::matter::Advertisement::new(port),
+            report_pairing,
+        )
+        .await
     }
 }
 
@@ -29,12 +34,14 @@ pub(in crate::matter) use context::Context;
 pub(super) use context::attr;
 pub(super) use fan::{fan_device, fan_device_levels, fan_model, observe_fan_state};
 pub(super) use reports::{read_bytes, report_dataver, report_value};
-pub(crate) use source::{PublishedLightModel, PublishedRelayModel, persisted_root_version};
+pub(crate) use source::{
+    PublishedLightModel, PublishedRelayModel, persisted_root_version, running_parts,
+};
 
 use super::*;
 use crate::{
     device::CommandReceiver,
-    matter::{FrozenEntry, LabelWriter, PublishedFunction, PublishedIdentity},
+    matter::{LabelWriter, PublishedEntry, PublishedFunction, PublishedIdentity},
     storage::{StorageError, Store},
 };
 use std::rc::Rc;
@@ -102,8 +109,8 @@ pub(in crate::matter) fn entry(
     device: &PhysicalDevice,
     endpoint: u16,
     functions: &[(&str, u16)],
-) -> FrozenEntry {
-    FrozenEntry {
+) -> PublishedEntry {
+    PublishedEntry {
         device: device.clone(),
         identity: PublishedIdentity {
             endpoint,
@@ -121,7 +128,7 @@ pub(in crate::matter) fn entry(
     }
 }
 
-pub(in crate::matter) fn single_entry(device: &PhysicalDevice) -> FrozenEntry {
+pub(in crate::matter) fn single_entry(device: &PhysicalDevice) -> PublishedEntry {
     entry(
         device,
         3,
@@ -129,7 +136,9 @@ pub(in crate::matter) fn single_entry(device: &PhysicalDevice) -> FrozenEntry {
     )
 }
 
-pub(in crate::matter) fn model_handler(entries: Vec<FrozenEntry>) -> crate::matter::model::Model {
+pub(in crate::matter) fn model_handler(
+    entries: Vec<PublishedEntry>,
+) -> crate::matter::model::Model {
     crate::matter::model::handler_from(entries, rand::rng(), Rc::new(NoLabels))
 }
 
@@ -159,16 +168,20 @@ impl LabelWriter for NoLabels {
 pub(super) fn startup_error(store: &Store) -> RuntimeError {
     let identity = store.load_identity().unwrap();
     let (device, _receiver) = test_device();
-    let bridge = Bridge::new(
-        vec![single_entry(&device)],
-        1,
-        store,
-        &identity,
-        Rc::new(NoLabels),
-    );
-    block_on(or(bridge.run(0, |_| Ok(())), async {
-        async_io::Timer::after(std::time::Duration::from_secs(5)).await;
-        panic!("startup did not report invalid storage");
-    }))
+    let bridge = Bridge::new(store, &identity, Rc::new(NoLabels));
+    block_on(or(
+        bridge.run(
+            crate::matter::MatterConfiguration {
+                entries: vec![single_entry(&device)],
+                root_version: 1,
+            },
+            0,
+            |_| Ok(()),
+        ),
+        async {
+            async_io::Timer::after(std::time::Duration::from_secs(5)).await;
+            panic!("startup did not report invalid storage");
+        },
+    ))
     .unwrap_err()
 }

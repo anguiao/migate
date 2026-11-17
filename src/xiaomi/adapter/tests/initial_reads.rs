@@ -36,7 +36,7 @@ fn restored_relays_wait_for_power_and_mode_only_on_published_channels() {
         let (restored, _) = rig.reopen_adapter();
         let source = restored.source_handle();
         let restarted = crate::app::App::open(source.clone(), rig.store.clone()).unwrap();
-        assert_eq!(restarted.frozen().len(), 1);
+        assert_eq!(restarted.matter_configuration().entries.len(), 1);
         let panel = work(&restored.context, "one");
         for binding in bindings {
             assert!(!source.initial_reads_ready(&configuration));

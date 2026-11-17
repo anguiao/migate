@@ -90,7 +90,8 @@ fn terminal_binding_persists_without_changing_published_endpoints() {
         let source_event = app.listen();
         let committed_event = app.committed.listen();
         let published = app
-            .frozen()
+            .matter_configuration()
+            .entries
             .into_iter()
             .find(|entry| entry.device.key().id == "ac")
             .unwrap();
@@ -114,7 +115,8 @@ fn terminal_binding_persists_without_changing_published_endpoints() {
         );
         assert_eq!(app.current().configuration.devices, before.devices);
         assert_eq!(
-            app.frozen()
+            app.matter_configuration()
+                .entries
                 .into_iter()
                 .find(|entry| entry.device.key().id == "ac")
                 .unwrap()
@@ -150,7 +152,8 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
         let terminal = Context::committed(app.clone(), &status);
         let view = app.current();
         let published = app
-            .frozen()
+            .matter_configuration()
+            .entries
             .into_iter()
             .find(|entry| entry.device.key().id == "ac")
             .unwrap();
@@ -210,12 +213,9 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
         assert!(output.contains("Ambient temperature: 21.50 °C"), "{output}");
         assert!(output.contains("sensor/temperature:3:1001"), "{output}");
         assert!(output.contains("upstream time 100"), "{output}");
-        let registry = crate::device::DeviceRegistry::new();
-        for device in app.current().devices() {
-            registry.insert(device);
-        }
+        let devices = app.current().devices();
         let formatted = crate::terminal::bridge::tests::support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics,

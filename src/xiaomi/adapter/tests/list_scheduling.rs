@@ -228,13 +228,9 @@ fn filtered_lists_only_update_requested_members_and_preserve_other_access() {
                     .map(|record| observation(record, true))
                     .collect(),
             );
-            let one = context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
-                .unwrap();
+            let one = context.physical(&DeviceKey::new("xiaomi", "one")).unwrap();
             let multi = context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "multi"))
+                .physical(&DeviceKey::new("xiaomi", "multi"))
                 .unwrap();
             assert_eq!(one.availability(), Availability::Available);
             assert_eq!(multi.availability(), Availability::Available);

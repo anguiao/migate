@@ -84,7 +84,7 @@ fn offline_p5c_reads_and_controls_existing_fan_bindings_and_preserves_rejection(
             })
             .await;
             until(|| {
-                let snapshot = function(&control.context.registry, did, "fan:2")
+                let snapshot = function(&control.context, did, "fan:2")
                     .snapshot()
                     .fan()
                     .unwrap();
@@ -93,7 +93,7 @@ fn offline_p5c_reads_and_controls_existing_fan_bindings_and_preserves_rejection(
                     && snapshot.swing.value == Some(false)
             })
             .await;
-            let fan = function(&control.context.registry, did, "fan:2");
+            let fan = function(&control.context, did, "fan:2");
             for command in [
                 FanCommand::Power(true),
                 FanCommand::Power(false),
@@ -194,7 +194,7 @@ fn hub_restoration_keeps_sent_direct_receipt_and_fallback_uses_direct_then_cloud
             })
             .await;
             until(|| {
-                function(&control.context.registry, did, "fan:2")
+                function(&control.context, did, "fan:2")
                     .snapshot()
                     .fan()
                     .unwrap()
@@ -204,7 +204,7 @@ fn hub_restoration_keeps_sent_direct_receipt_and_fallback_uses_direct_then_cloud
             })
             .await;
             direct.hold_write.store(true, Ordering::Relaxed);
-            let action = function(&control.context.registry, did, "fan:2")
+            let action = function(&control.context, did, "fan:2")
                 .begin_fan(FanCommand::Power(false))
                 .unwrap();
             until(|| direct.writes.lock().unwrap().len() == 1).await;
@@ -304,7 +304,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
                     .work
                     .clone()
                     .unwrap();
-                let fan = function(&control.context.registry, did, "fan:2");
+                let fan = function(&control.context, did, "fan:2");
                 fan.snapshot().fan().unwrap().power.value == Some(true)
                     && [(2, 1), (2, 3), (2, 4), (8, 1)].iter().all(|(siid, piid)| {
                         !work.refresh.borrow().contains(
@@ -334,7 +334,7 @@ fn direct_withdrawn_during_hello_reselects_cloud_without_a_direct_write() {
                 .active = Some((record, fresh));
             peer.hold_hello.store(true, Ordering::Relaxed);
             let packets = peer.packets.load(Ordering::Relaxed);
-            let action = function(&control.context.registry, did, "fan:2")
+            let action = function(&control.context, did, "fan:2")
                 .begin_fan(FanCommand::Power(false))
                 .unwrap();
             until(|| peer.packets.load(Ordering::Relaxed) > packets).await;
@@ -421,7 +421,7 @@ fn old_direct_read_cannot_override_a_new_cloud_read() {
                     && control.context.cloud_candidate(did, true).is_ok()
             })
             .await;
-            let fan = function(&control.context.registry, did, "fan:2");
+            let fan = function(&control.context, did, "fan:2");
             until(|| fan.snapshot().fan().unwrap().power.value == Some(true)).await;
             let work = control.context.directory.borrow().devices[did]
                 .work

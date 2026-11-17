@@ -53,11 +53,11 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
-        let registry = DeviceRegistry::new();
+        let mut devices = Vec::new();
         let physical = sensor();
         physical.set_availability(Availability::Available);
         add_device(&store, &physical.description());
-        registry.insert(physical.clone());
+        devices.push(physical.clone());
         physical.functions()[0]
             .observe_measurement(21.5, Some(1_700_000_100), 1_700_000_110)
             .unwrap();
@@ -65,7 +65,7 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
             .observe_measurement(45.0, None, 1_700_000_120)
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "status sensor")
+        let list = handle_line(&devices, &store.devices(), &status, "status sensor")
             .await
             .unwrap()
             .unwrap();
@@ -83,7 +83,7 @@ fn status_shows_independent_values_and_cannot_control_a_sensor() {
         let result = terminal_command(&physical, "on").await.unwrap();
         assert!(result.contains("does not support"), "{result}");
         for line in ["off sensor temperature", "off sensor humidity"] {
-            let result = handle_line(&registry, &store.devices(), &status, line)
+            let result = handle_line(&devices, &store.devices(), &status, line)
                 .await
                 .unwrap()
                 .unwrap();
@@ -116,11 +116,11 @@ fn status_shows_shared_battery_value_and_separate_times() {
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
-        let registry = DeviceRegistry::new();
+        let mut devices = Vec::new();
         let physical = sensor_with_battery(true);
         physical.set_availability(Availability::Available);
         add_device(&store, &physical.description());
-        registry.insert(physical.clone());
+        devices.push(physical.clone());
         physical
             .observe_battery(55.0, Some(1_700_000_600), 1_700_000_610)
             .unwrap();
@@ -128,7 +128,7 @@ fn status_shows_shared_battery_value_and_separate_times() {
             .observe_measurement(21.5, Some(1_700_000_100), 1_700_000_110)
             .unwrap();
 
-        let list = handle_line(&registry, &store.devices(), &status, "status sensor")
+        let list = handle_line(&devices, &store.devices(), &status, "status sensor")
             .await
             .unwrap()
             .unwrap();
@@ -154,7 +154,7 @@ fn measurement_status_shows_native_ppm_and_lux_with_independent_times() {
             .local_status()
             .unwrap();
         let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
-        let registry = DeviceRegistry::new();
+        let mut devices = Vec::new();
         for (id, label, kind, value, expected) in [
             (
                 "co2",
@@ -185,19 +185,14 @@ fn measurement_status_shows_native_ppm_and_lux_with_independent_times() {
             );
             assert!(receivers.is_empty());
             add_device(&store, &physical.description());
-            registry.insert(physical.clone());
+            devices.push(physical.clone());
             physical.functions()[0]
                 .observe_measurement(value, Some(100), 200)
                 .unwrap();
-            let output = handle_line(
-                &registry,
-                &store.devices(),
-                &status,
-                &format!("status {id}"),
-            )
-            .await
-            .unwrap()
-            .unwrap();
+            let output = handle_line(&devices, &store.devices(), &status, &format!("status {id}"))
+                .await
+                .unwrap()
+                .unwrap();
             assert!(output.contains(expected), "{output}");
             assert!(output.contains("upstream time 100"), "{output}");
             assert!(output.contains("received at"), "{output}");

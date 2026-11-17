@@ -152,9 +152,14 @@ pub(crate) struct PublishedRelay {
     pub(crate) device_type: crate::configuration::RelayType,
 }
 
-/// One published physical device frozen with its current publication identity.
-#[derive(Clone)]
-pub(crate) struct FrozenEntry {
+/// One-time startup input assembled from one committed application configuration.
+pub(crate) struct MatterConfiguration {
+    pub(crate) entries: Vec<PublishedEntry>,
+    pub(crate) root_version: u32,
+}
+
+/// A live device handle and its committed publication identity for one Matter instance.
+pub(crate) struct PublishedEntry {
     pub(crate) device: PhysicalDevice,
     pub(crate) identity: PublishedIdentity,
 }
@@ -166,7 +171,7 @@ pub(super) struct Model {
 }
 
 pub(super) fn handler_from(
-    entries: Vec<FrozenEntry>,
+    entries: Vec<PublishedEntry>,
     mut random: impl rand::Rng,
     renamer: Rc<dyn super::bridge::LabelWriter>,
 ) -> Model {
@@ -179,7 +184,7 @@ pub(super) fn handler_from(
         );
     let mut built = Vec::new();
     let bindings = Rc::new(BindingRegistry::new());
-    for FrozenEntry { device, identity } in entries {
+    for PublishedEntry { device, identity } in entries {
         let versions = Versions::new(&mut random);
         if let Some(relay) = &identity.relay {
             let endpoint = identity.endpoint;

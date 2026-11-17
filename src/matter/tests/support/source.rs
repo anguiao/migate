@@ -1,4 +1,4 @@
-//! Read a frozen source publication through the real Matter attribute handler.
+//! Read published source devices through the real Matter attribute handler.
 
 use super::{Context, read_bytes, report_value};
 use crate::{
@@ -41,7 +41,7 @@ pub(crate) struct LightAttributes {
 
 impl PublishedLightModel {
     pub(crate) fn new(app: &Rc<App>, store: &Store) -> Self {
-        let entries = app.frozen();
+        let entries = app.matter_configuration().entries;
         let children = entries
             .iter()
             .map(|entry| {
@@ -149,7 +149,11 @@ pub(crate) fn persisted_root_version(store: &Store) -> u32 {
 impl PublishedRelayModel {
     pub(crate) fn new(app: &Rc<App>, store: &Store) -> Self {
         Self {
-            handler: model::handler_from(app.frozen(), rand::rng(), app.clone()),
+            handler: model::handler_from(
+                app.matter_configuration().entries,
+                rand::rng(),
+                app.clone(),
+            ),
             store: store.clone(),
         }
     }
@@ -359,4 +363,44 @@ impl PublishedRelayModel {
             )
             .await
     }
+}
+
+/// Inspect the actual UDP runner through its commissioning session.
+pub(crate) async fn running_parts(port: u16) -> Vec<u16> {
+    use rs_matter::{
+        crypto::test_only_crypto,
+        dm::{clusters::decl::descriptor::DescriptorClient, devices::test::TEST_DEV_DET},
+        transport::{
+            exchange::Exchange,
+            network::{Address, NoNetwork},
+        },
+    };
+    let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, 0);
+    let crypto = test_only_crypto();
+    let socket = async_io::Async::<std::net::UdpSocket>::bind(
+        "[::1]:0".parse::<std::net::SocketAddr>().unwrap(),
+    )
+    .unwrap();
+    let address = Address::Udp(format!("[::1]:{port}").parse().unwrap());
+    futures_lite::future::or(
+        async {
+            client
+                .run(&crypto, &socket, &socket, NoNetwork)
+                .await
+                .unwrap();
+            panic!("Matter test client exited")
+        },
+        async {
+            Exchange::initiate_pase(&client, &crypto, address, 20_202_021)
+                .await
+                .unwrap()
+                .descriptor()
+                .parts_list_read_with(1, |value| {
+                    value.unwrap().iter().map(Result::unwrap).collect()
+                })
+                .await
+                .unwrap()
+        },
+    )
+    .await
 }

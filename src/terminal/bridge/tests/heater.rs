@@ -9,11 +9,11 @@ fn heater() -> (
     tempfile::TempDir,
     Store,
     AuthStatus,
-    DeviceRegistry,
+    Vec<PhysicalDevice>,
     PhysicalDevice,
     CommandReceiver,
 ) {
-    let (directory, store, status, registry, _) = fixture();
+    let (directory, store, status, mut devices, _) = fixture();
     let (device, mut receivers) = PhysicalDevice::new(
         PhysicalDeviceDescription::new(
             DeviceKey::new("xiaomi", "bath"),
@@ -30,12 +30,12 @@ fn heater() -> (
     );
     device.set_availability(Availability::Available);
     add_device(&store, &device.description());
-    registry.insert(device.clone());
+    devices.push(device.clone());
     (
         directory,
         store,
         status,
-        registry,
+        devices,
         device,
         receivers.remove(0),
     )
@@ -57,7 +57,7 @@ fn settle(request: crate::device::HeaterRequest) {
 #[test]
 fn status_shows_heating_feedback_and_built_in_temperature() {
     block_on(async {
-        let (_directory, store, status, registry, device, _receiver) = heater();
+        let (_directory, store, status, devices, device, _receiver) = heater();
         let function = device.function("heater:3").unwrap();
         function.observe_heater(HeaterValue::Power(false), Some(1), 1);
         function.observe_heater(HeaterValue::Temperature(25), Some(1), 1);
@@ -66,7 +66,7 @@ fn status_shows_heating_feedback_and_built_in_temperature() {
             .observe_heater_temperature(22.5, Some(2), 3)
             .unwrap();
 
-        let output = handle_line(&registry, &store.devices(), &status, "status bath")
+        let output = handle_line(&devices, &store.devices(), &status, "status bath")
             .await
             .unwrap()
             .unwrap();
@@ -80,7 +80,7 @@ fn status_shows_heating_feedback_and_built_in_temperature() {
         function
             .observe_heater_temperature(23.0, Some(4), 4)
             .unwrap();
-        let output = handle_line(&registry, &store.devices(), &status, "status bath")
+        let output = handle_line(&devices, &store.devices(), &status, "status bath")
             .await
             .unwrap()
             .unwrap();
@@ -93,9 +93,9 @@ fn status_shows_heating_feedback_and_built_in_temperature() {
 #[test]
 fn mode_and_temperature_commands_use_the_heating_command_boundary() {
     block_on(async {
-        let (_directory, store, status, registry, device, mut receiver) = heater();
+        let (_directory, store, status, devices, device, mut receiver) = heater();
         let function = device.function("heater:3").unwrap();
-        let view = support::view(&registry, &store.devices()).unwrap();
+        let view = support::view(&devices, &store.devices()).unwrap();
         function.observe_heater(HeaterValue::Power(false), Some(1), 1);
         function.observe_heater(HeaterValue::Temperature(25), Some(1), 1);
 
@@ -151,7 +151,7 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
 
         for (line, power) in [("on bath heater:3", true), ("off bath heater:3", false)] {
             let (result, ()) = zip(
-                handle_line(&registry, &store.devices(), &status, line),
+                handle_line(&devices, &store.devices(), &status, line),
                 async {
                     let request = next_heater(&mut receiver).await;
                     assert_eq!(request.command, HeaterCommand::Power(power));
@@ -168,13 +168,13 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
 #[test]
 fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
     block_on(async {
-        let (_directory, store, status, registry, device, mut receiver) = heater();
+        let (_directory, store, status, mut devices, device, mut receiver) = heater();
         let function = device.function("heater:3").unwrap();
         function.observe_heater(HeaterValue::Power(false), Some(1), 1);
         function.observe_heater(HeaterValue::Temperature(25), Some(1), 1);
 
         let invalid = handle_line(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             "temperature bath heater:3 warm",
@@ -186,7 +186,7 @@ fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
         assert!(poll_once(receiver.next_operation()).await.is_none());
 
         let reply = handle_line(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             "temperature bath heater:3 24",
@@ -213,9 +213,9 @@ fn invalid_temperature_and_non_heating_function_do_not_send_commands() {
             .unwrap(),
         );
         add_device(&store, &outlet.description());
-        registry.insert(outlet);
+        devices.push(outlet);
         let unsupported = handle_line(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             "mode outlet outlet:2 heat",

@@ -55,7 +55,13 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
     app.rename(&key, "").unwrap();
     assert_eq!(physical.description().label(), "");
     assert_eq!(app.current().derived.served[&key].description.label(), "");
-    assert_eq!(app.frozen()[0].device.description().label(), "");
+    assert_eq!(
+        app.matter_configuration().entries[0]
+            .device
+            .description()
+            .label(),
+        ""
+    );
     assert!(
         !block_on(terminal.handle_line("list"))
             .unwrap()

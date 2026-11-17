@@ -7,7 +7,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
         let peer = panel_peer(RelayMode::Wireless);
         let control = &c;
         c.peer(peer, |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:2");
+            let relay = function(&control.context, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -88,8 +88,8 @@ fn relay_power_subscriptions_are_independent_when_another_channel_is_rejected() 
             .insert(("one".into(), 2, 1));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:3");
-            let other = function(&control.context.registry, "one", "relay:4");
+            let relay = function(&control.context, "one", "relay:3");
+            let other = function(&control.context, "one", "relay:4");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -122,7 +122,7 @@ fn mode_notification_stays_live_when_every_power_subscription_is_rejected() {
         }
         let control = &c;
         c.peer(peer, |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:2");
+            let relay = function(&control.context, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -153,7 +153,7 @@ fn rejected_mode_subscription_does_not_block_power_feedback() {
             .insert(("one".into(), 3, 2));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:3");
+            let relay = function(&control.context, "one", "relay:3");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -194,7 +194,7 @@ fn retained_and_stale_modes_do_not_replace_confirmed_feedback() {
             .insert(("one".into(), 2, 2));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:2");
+            let relay = function(&control.context, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -275,7 +275,7 @@ fn mode_without_notify_is_polled_but_never_treated_as_a_power_notification() {
         let peer = panel_peer(RelayMode::Wireless);
         let control = &c;
         c.peer(peer, |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:2");
+            let relay = function(&control.context, "one", "relay:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -332,7 +332,7 @@ fn relay_mode_is_reread_when_its_usable_path_changes_without_device_unavailabili
             let peer = panel_peer(RelayMode::Wireless);
             let control = &c;
             c.peer(peer, |_| async move {
-                let relay = function(&control.context.registry, "one", "relay:2");
+                let relay = function(&control.context, "one", "relay:2");
                 let work = control.context.directory.borrow().devices["one"]
                     .work
                     .clone()

@@ -249,7 +249,7 @@ fn command_diagnostics_record_no_local_submission_for_a_withdrawn_zero_byte_writ
         until(|| c.context.directory.borrow().scope_valid()).await;
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
@@ -290,7 +290,7 @@ fn write_observation_capture_occurs_at_first_socket_bytes() {
         block_on(Rig::new(true, &["one"]).run(|c| async move {
             let wire = Rc::new(Wire::default());
             let (_, driver) = local(&c, wire.clone());
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             let work = c.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -363,7 +363,7 @@ fn a_withdrawn_zero_byte_refresh_keeps_one_demand_until_device_recovery() {
     block_on(Rig::new(true, &["one"]).run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         let work = c.context.directory.borrow().devices["one"]
             .work
             .clone()
@@ -470,9 +470,7 @@ fn dropping_a_zero_byte_refresh_task_retires_its_operation_and_returns_the_deman
                 assert!(wire.written.borrow().is_empty());
                 assert_eq!(c.context.priority(), PathPriority::LocalFirst);
                 assert_eq!(
-                    function(&c.context.registry, "one", "outlet:2")
-                        .snapshot()
-                        .power(),
+                    function(&c.context, "one", "outlet:2").snapshot().power(),
                     Some(Power::Unknown)
                 );
             },
@@ -488,7 +486,7 @@ fn unsent_light_batch_recomputes_mode_and_power_after_retained_observation() {
     block_on(Rig::light("devcea.light.ls2307").run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (_, driver) = local(&c, wire.clone());
-        let light = function(&c.context.registry, "one", "light:2");
+        let light = function(&c.context, "one", "light:2");
         light
             .observe_light(LightPatch {
                 power: Some(true),
@@ -567,7 +565,7 @@ fn latest_tick_withdraws_unsent_transport_frame_and_preserves_linked_power() {
         block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
             let wire = Rc::new(Wire::default());
             let (_, driver) = local(&c, wire.clone());
-            let light = function(&c.context.registry, "one", "light:2");
+            let light = function(&c.context, "one", "light:2");
             light
                 .observe_light(LightPatch {
                     power: Some(false),
@@ -636,7 +634,7 @@ fn unsent_light_target_reselects_cloud_once_without_local_bytes() {
         until(|| c.context.directory.borrow().scope_valid()).await;
         let wire = Rc::new(Wire::default());
         let (handle, driver) = local(&c, wire.clone());
-        let light = function(&c.context.registry, "one", "light:2");
+        let light = function(&c.context, "one", "light:2");
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
@@ -670,7 +668,7 @@ fn an_unsent_light_target_is_not_own_feedback() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (_, driver) = local(&c, wire.clone());
-        let light = function(&c.context.registry, "one", "light:2");
+        let light = function(&c.context, "one", "light:2");
         light
             .observe_light(LightPatch {
                 brightness_percent: Some(10.0),
@@ -730,7 +728,7 @@ fn unsent_stop_keeps_its_actual_result_in_command_diagnostics() {
     block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (_, driver) = local(&c, wire.clone());
-        let light = function(&c.context.registry, "one", "light:2");
+        let light = function(&c.context, "one", "light:2");
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
@@ -838,7 +836,7 @@ fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_by
                         }
                         assert!(wire.written.borrow().is_empty());
                         assert_eq!(
-                            function(&c.context.registry, "one", "motion:2:1024")
+                            function(&c.context, "one", "motion:2:1024")
                                 .snapshot()
                                 .state_sensor()
                                 .unwrap()
@@ -867,7 +865,7 @@ fn unsent_curtain_target_is_cancelled_by_stop_at_the_transport_boundary() {
     block_on(curtain_rig().run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (_, driver) = local(&c, wire.clone());
-        let curtain = function(&c.context.registry, "one", "curtain:2");
+        let curtain = function(&c.context, "one", "curtain:2");
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
@@ -912,7 +910,7 @@ fn curtain_route_change_retries_only_a_request_with_no_local_bytes() {
                 wire.allow(1);
             }
             let (handle, driver) = local(&c, wire.clone());
-            let curtain = function(&c.context.registry, "one", "curtain:2");
+            let curtain = function(&c.context, "one", "curtain:2");
             future::or(
                 async {
                     driver.run(|_| {}).await.unwrap();

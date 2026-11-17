@@ -1,8 +1,8 @@
 use super::next_power;
 
 use crate::device::{
-    Availability, Command, CommandError, DeviceKey, DeviceRegistry, FunctionDescription,
-    FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
+    Availability, Command, CommandError, DeviceKey, FunctionDescription, FunctionKind,
+    PhysicalDevice, PhysicalDeviceDescription, Power,
 };
 use futures_lite::future::{block_on, poll_once};
 
@@ -66,18 +66,13 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
 }
 
 #[test]
-fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
+fn closing_one_device_cancels_only_its_commands() {
     block_on(async {
-        let registry = DeviceRegistry::new();
         let (first, mut first_receivers) = PhysicalDevice::new(description("first"));
         let (second, mut second_receivers) = PhysicalDevice::new(description("second"));
         first.set_availability(Availability::Available);
         second.set_availability(Availability::Available);
-        registry.insert(first.clone());
-        let devices = registry.list();
-        assert_eq!(devices.len(), 1);
-        assert_eq!(devices[0].functions().len(), 3);
-        registry.insert(second.clone());
+        assert_eq!(first.functions().len(), 3);
         let function = first.function("usb").unwrap();
         let other = second.function("usb").unwrap();
         let mut command = Box::pin(function.execute(Command::On));
@@ -85,15 +80,13 @@ fn registry_publishes_whole_devices_and_removal_cancels_only_their_commands() {
         poll_once(command.as_mut()).await;
         poll_once(other_command.as_mut()).await;
         let stale = next_power(&mut first_receivers[2]).await.unwrap();
-        registry.remove(first.key()).unwrap();
+        first.close();
         assert_eq!(command.await, Err(CommandError::Cancelled));
         assert_eq!(stale.accept(), Err(CommandError::Cancelled));
         assert_eq!(
             function.execute(Command::On).await,
             Err(CommandError::Cancelled)
         );
-        assert!(registry.get(first.key()).is_none());
-        assert_eq!(registry.list().len(), 1);
         second.function("usb").unwrap().observe(false);
         next_power(&mut second_receivers[2])
             .await
@@ -128,16 +121,13 @@ fn cancelling_one_channel_does_not_withdraw_another_channel() {
 }
 
 #[test]
-fn registry_removal_wakes_and_ends_waiting_receivers() {
+fn closing_a_device_wakes_and_ends_its_waiting_receivers() {
     block_on(async {
-        let registry = DeviceRegistry::new();
         let (device, mut receivers) = PhysicalDevice::new(description("removed"));
-        let (other, mut other_receivers) = PhysicalDevice::new(description("remaining"));
-        registry.insert(device.clone());
-        registry.insert(other);
+        let (_other, mut other_receivers) = PhysicalDevice::new(description("remaining"));
         let mut waiting = Box::pin(next_power(&mut receivers[0]));
         assert!(poll_once(waiting.as_mut()).await.is_none());
-        registry.remove(device.key()).unwrap();
+        device.close();
         assert!(waiting.await.is_none());
         assert!(
             poll_once(next_power(&mut other_receivers[0]))

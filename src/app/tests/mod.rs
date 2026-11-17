@@ -35,3 +35,26 @@ fn status(store: &Store) -> AuthStatus {
         "/data".into(),
     )
 }
+
+impl crate::app::EffectiveConfiguration {
+    pub(crate) fn published_device(
+        &self,
+        key: &DeviceKey,
+    ) -> Option<crate::device::PhysicalDevice> {
+        if !self.derived.published.contains(key) {
+            return None;
+        }
+        self.entries
+            .iter()
+            .find(|entry| entry.physical.key() == key)
+            .map(|entry| entry.physical.clone())
+    }
+
+    pub(crate) fn published_devices(&self) -> Vec<crate::device::PhysicalDevice> {
+        self.entries
+            .iter()
+            .filter(|entry| self.derived.published.contains(entry.physical.key()))
+            .map(|entry| entry.physical.clone())
+            .collect()
+    }
+}

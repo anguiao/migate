@@ -30,8 +30,8 @@ fn one_device_read_timeout_keeps_other_devices_on_the_hub() {
                 .work
                 .clone()
                 .unwrap();
-            let one = function(&control.context.registry, "one", "outlet:2");
-            let two = function(&control.context.registry, "two", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
+            let two = function(&control.context, "two", "outlet:2");
             let last = one.snapshot().power();
             let reads = peer.count("get", "one", 2);
             let lists = peer.lists();
@@ -93,8 +93,8 @@ fn sent_write_timeout_is_not_replayed_and_other_devices_stay_on_the_hub() {
                     && control.context.cloud_candidate("two", true).is_ok()
             })
             .await;
-            let one = function(&control.context.registry, "one", "outlet:2");
-            let two = function(&control.context.registry, "two", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
+            let two = function(&control.context, "two", "outlet:2");
             let lists = peer.lists();
             peer.state.borrow_mut().hold_writes = true;
             assert_eq!(

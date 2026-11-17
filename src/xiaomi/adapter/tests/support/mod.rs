@@ -1,5 +1,5 @@
 use super::*;
-pub(super) use crate::device::{Command, DeviceRegistry};
+pub(super) use crate::device::Command;
 use crate::xiaomi::capability::NativeDescription;
 pub(super) use crate::xiaomi::capability::tests::source::SourceFixture;
 pub(super) use crate::xiaomi::{
@@ -279,9 +279,13 @@ pub(super) async fn until(mut predicate: impl FnMut() -> bool) {
         future::yield_now().await;
     }
 }
-pub(super) fn function(registry: &DeviceRegistry, did: &str, id: &str) -> crate::device::Function {
-    registry
-        .get(&DeviceKey::new("xiaomi", did))
+pub(super) fn function(
+    context: &super::super::state::Context,
+    did: &str,
+    id: &str,
+) -> crate::device::Function {
+    context
+        .physical(&DeviceKey::new("xiaomi", did))
         .unwrap()
         .function(id)
         .unwrap()
@@ -290,8 +294,7 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
     until(|| {
         dids.iter().all(|did| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", *did))
+                .physical(&DeviceKey::new("xiaomi", *did))
                 .is_some_and(|physical| {
                     physical.availability() == Availability::Available
                         && physical
@@ -480,5 +483,27 @@ impl DeviceWorkTestExt for super::super::work::DeviceWork {
                 received_at: 0,
             },
         )
+    }
+}
+
+impl super::super::state::Context {
+    pub(super) fn physical(&self, key: &DeviceKey) -> Option<crate::device::PhysicalDevice> {
+        self.directory
+            .borrow()
+            .devices
+            .get(&key.id)
+            .and_then(|slot| slot.work.as_ref())
+            .filter(|work| work.key == *key)
+            .map(|work| work.physical())
+    }
+
+    pub(super) fn physical_devices(&self) -> Vec<crate::device::PhysicalDevice> {
+        self.directory
+            .borrow()
+            .devices
+            .values()
+            .filter_map(|slot| slot.work.as_ref())
+            .map(|work| work.physical())
+            .collect()
     }
 }

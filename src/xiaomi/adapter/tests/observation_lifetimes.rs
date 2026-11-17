@@ -68,8 +68,8 @@ fn an_accepted_write_invalidates_an_older_held_local_read() {
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             freeze_initialized(control, &peer, &["one", "two"]).await;
-            let one = function(&control.context.registry, "one", "outlet:2");
-            let two = function(&control.context.registry, "two", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
+            let two = function(&control.context, "two", "outlet:2");
             peer.state.borrow_mut().hold_reads = true;
             refresh_read(control, &peer, "one", 2).await;
 
@@ -96,8 +96,8 @@ fn a_source_change_and_new_read_do_not_invalidate_a_held_write_without_notificat
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             freeze_initialized(control, &peer, &["one", "two"]).await;
-            let one = function(&control.context.registry, "one", "outlet:2");
-            let two = function(&control.context.registry, "two", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
+            let two = function(&control.context, "two", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
@@ -129,12 +129,11 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
         peer.value("one", POWER, json!(false));
         let control = &c;
         c.peer(peer, |peer| async move {
-            let one = function(&control.context.registry, "one", "light:2");
+            let one = function(&control.context, "one", "light:2");
             initialized(control, &peer, &["one"]).await;
             let before = control
                 .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+                .physical(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(one.execute(Command::On));
@@ -167,8 +166,7 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .is_some_and(|now| !before.same_instance(&now))
             })
             .await;
@@ -195,7 +193,7 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
             freeze_initialized(control, &peer, &["multi"]).await;
-            let outlet = function(&control.context.registry, "multi", "outlet:3");
+            let outlet = function(&control.context, "multi", "outlet:3");
             let work = device_work(control, "multi");
             peer.state.borrow_mut().hold_writes = true;
             let mut command = Box::pin(outlet.execute(Command::On));
@@ -226,9 +224,7 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
             assert_eq!(following.await.unwrap().power(), Some(Power::Off));
             for id in ["outlet:4", "outlet:9"] {
                 assert_eq!(
-                    function(&control.context.registry, "multi", id)
-                        .snapshot()
-                        .power(),
+                    function(&control.context, "multi", id).snapshot().power(),
                     Some(Power::Off)
                 );
             }
@@ -257,7 +253,7 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
             .await;
             let work = device_work(control, "one");
             assert!(!work.test_local_subscribed_empty());
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -273,7 +269,7 @@ fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
         assert!(!after.life.is_closed());
         assert!(after.test_local_subscribed_empty());
         assert!(c.context.hub.borrow().access("one").is_none());
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         assert_eq!(one.snapshot().availability, Availability::Available);
         assert_eq!(
             one.execute(Command::Off).await.unwrap().power(),
@@ -368,7 +364,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                 )));
                 peer.notify_value("two", POWER, json!(true), false);
                 until(|| {
-                    function(&control.context.registry, "two", "light:2")
+                    function(&control.context, "two", "light:2")
                         .snapshot()
                         .power()
                         == Some(Power::On)

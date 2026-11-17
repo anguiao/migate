@@ -41,7 +41,7 @@ fn occupancy_rig() -> Rig {
     )
 }
 fn state(c: &Control, id: &str) -> StateSnapshot {
-    function(&c.context.registry, "one", id)
+    function(&c.context, "one", id)
         .snapshot()
         .state_sensor()
         .unwrap()
@@ -101,7 +101,7 @@ fn reads(peer: &Peer, binding: PropertyBinding) -> usize {
         .count()
 }
 fn illumination(c: &Control) -> Option<f64> {
-    function(&c.context.registry, "one", "illuminance:2:1005")
+    function(&c.context, "one", "illuminance:2:1005")
         .snapshot()
         .measurement()
         .unwrap()

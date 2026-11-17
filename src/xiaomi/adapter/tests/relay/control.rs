@@ -10,8 +10,7 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .is_some_and(|device| {
                         device.availability() == Availability::Available
                             && [2, 3, 4].iter().all(|siid| {
@@ -25,9 +24,9 @@ fn unpublished_relays_are_read_and_controlled_per_channel_without_optimism() {
             .await;
             let key = DeviceKey::new("xiaomi", "one");
             assert!(!control.context.graph.borrow().published.contains(&key));
-            let one = function(&control.context.registry, "one", "relay:2");
-            let two = function(&control.context.registry, "one", "relay:3");
-            let three = function(&control.context.registry, "one", "relay:4");
+            let one = function(&control.context, "one", "relay:2");
+            let two = function(&control.context, "one", "relay:3");
+            let three = function(&control.context, "one", "relay:4");
             until(|| {
                 control.context.directory.borrow().devices["one"]
                     .work
@@ -91,7 +90,7 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
     }
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
-            let relay = function(&c.context.registry, "one", "relay:4");
+            let relay = function(&c.context, "one", "relay:4");
             until(|| {
                 relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
                     && relay.snapshot().power() == Some(Power::Off)
@@ -170,7 +169,7 @@ fn home_relay_writes_use_the_issuing_home_and_current_mode_at_the_send_entry() {
         c.announce();
         let control = &c;
         c.peer(panel_peer(RelayMode::Wired), |peer| async move {
-            let relay = function(&control.context.registry, "one", "relay:2");
+            let relay = function(&control.context, "one", "relay:2");
             until(|| {
                 relay.snapshot().relay_mode() == Some(RelayMode::Wired)
                     && relay.snapshot().power() == Some(Power::Off)

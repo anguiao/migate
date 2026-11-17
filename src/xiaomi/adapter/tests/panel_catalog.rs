@@ -65,7 +65,7 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.publication.frozen().len() >= 3).await;
+        until(|| c.publication.matter_configuration().entries.len() >= 3).await;
         let current = c.publication.current();
         assert_eq!(current.configuration.split_devices.len(), 1);
         assert_eq!(current.configuration.relay_channels.len(), 3);
@@ -79,12 +79,13 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
         assert_eq!(middle.label, "Kitchen");
         assert!(
             c.publication
-                .frozen()
+                .matter_configuration()
+                .entries
                 .iter()
                 .all(|entry| entry.device.key().id == "panel")
         );
         assert!(!c.context.directory.borrow().devices.contains_key("alias"));
-        function(&c.context.registry, "panel", "relay:3")
+        function(&c.context, "panel", "relay:3")
             .execute(Command::On)
             .await
             .unwrap();
@@ -125,7 +126,7 @@ fn untyped_split_with_full_panel_details_publishes_and_controls_only_the_parent(
                 .split_devices,
             current.configuration.split_devices
         );
-        assert_eq!(c.publication.frozen().len(), 3);
+        assert_eq!(c.publication.matter_configuration().entries.len(), 3);
         c.cloud
             .lock()
             .unwrap()
@@ -174,7 +175,7 @@ fn complete_catalog_binds_names_and_filters_aliases_before_description_requests(
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.publication.current().published.list().len() >= 3).await;
+        until(|| c.publication.current().published_devices().len() >= 3).await;
         let json = stored_json(&c.store);
         let channels = json["split_devices"]
             .as_array()
@@ -197,12 +198,7 @@ fn complete_catalog_binds_names_and_filters_aliases_before_description_requests(
         );
         for did in ["left-alias", "middle-alias"] {
             assert!(!c.context.directory.borrow().devices.contains_key(did));
-            assert!(
-                c.context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", did))
-                    .is_none()
-            );
+            assert!(c.context.physical(&DeviceKey::new("xiaomi", did)).is_none());
             assert!(
                 !c.cloud
                     .lock()
@@ -215,8 +211,7 @@ fn complete_catalog_binds_names_and_filters_aliases_before_description_requests(
         }
         assert!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "other"))
+                .physical(&DeviceKey::new("xiaomi", "other"))
                 .is_some()
         );
 
@@ -239,8 +234,7 @@ fn complete_catalog_binds_names_and_filters_aliases_before_description_requests(
         );
         assert!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "other"))
+                .physical(&DeviceKey::new("xiaomi", "other"))
                 .is_some()
         );
         c.cloud.lock().unwrap().catalog_status = 200;
@@ -268,22 +262,19 @@ fn cached_alias_never_restores_as_a_physical_device_even_when_catalog_is_offline
     assert!(
         source
             .context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "panel"))
+            .physical(&DeviceKey::new("xiaomi", "panel"))
             .is_some()
     );
     assert!(
         source
             .context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "other"))
+            .physical(&DeviceKey::new("xiaomi", "other"))
             .is_some()
     );
     assert!(
         source
             .context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "left-alias"))
+            .physical(&DeviceKey::new("xiaomi", "left-alias"))
             .is_none()
     );
     assert!(
@@ -312,8 +303,7 @@ fn cached_alias_never_restores_as_a_physical_device_even_when_catalog_is_offline
         );
         assert!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "other"))
+                .physical(&DeviceKey::new("xiaomi", "other"))
                 .is_some()
         );
         assert!(
@@ -354,7 +344,7 @@ fn another_home_cannot_contribute_panel_names_or_turn_an_alias_into_a_device() {
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.publication.current().published.list().len() >= 2).await;
+        until(|| c.publication.current().published_devices().len() >= 2).await;
         let json = stored_json(&c.store);
         let channels = json["split_devices"].as_array().unwrap();
         assert!(channels.iter().any(|item| item["did"] == "own-alias"));
@@ -407,7 +397,7 @@ fn failed_first_catalog_defers_unknown_devices_until_the_retry_classifies_them()
         c.cloud.lock().unwrap().catalog_status = 200;
         c.clock.advance(Duration::from_secs(3));
         c.context.request_sync();
-        until(|| c.publication.current().published.list().len() == 2).await;
+        until(|| c.publication.current().published_devices().len() == 2).await;
         assert!(
             !c.context
                 .directory
@@ -417,8 +407,7 @@ fn failed_first_catalog_defers_unknown_devices_until_the_retry_classifies_them()
         );
         assert!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "other"))
+                .physical(&DeviceKey::new("xiaomi", "other"))
                 .is_some()
         );
     }));

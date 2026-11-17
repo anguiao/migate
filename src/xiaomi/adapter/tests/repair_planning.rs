@@ -21,7 +21,7 @@ fn native_rgb_group_uses_member_temperature_interval_without_repair() {
     }
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         assert!(light.description().supports_rgb());
         assert!(c.context.group_repair("group-1").is_none());
         let native = c.publication.current();
@@ -152,7 +152,7 @@ fn failed_preparation_reuses_only_the_latest_member_temperature_shape() {
             c.store.matter().get(subscription_key).unwrap().unwrap(),
             [1, 2, 3]
         );
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         assert_eq!(
             light.description().temperature_interval(),
             Some(TemperatureInterval::new(3200, 6200).unwrap()),

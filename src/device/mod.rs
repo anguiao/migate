@@ -10,7 +10,6 @@ mod light_command;
 mod light_observation;
 pub(crate) mod lighting;
 mod model;
-mod registry;
 mod state;
 mod step_command;
 mod thermostat;
@@ -43,7 +42,6 @@ pub(crate) use model::{
     Power, RelayMode, Rgb, StateInput, StateSnapshot, TemperatureInterval, TemperatureSourceState,
 };
 pub(crate) use model::{CurtainValue, FanValue, FunctionKey};
-pub use registry::DeviceRegistry;
 pub(crate) use state::{Function, PhysicalDevice};
 pub(crate) use thermostat::TemperatureGrid;
 

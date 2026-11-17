@@ -134,7 +134,7 @@ fn virtual_group_notification_diagnostics_follow_member_subscription_readiness()
             cloud.property("member-a", 2, false);
             cloud.property("member-b", 2, false);
             until(|| {
-                function(&c.context.registry, "group-1", "light:2")
+                function(&c.context, "group-1", "light:2")
                     .snapshot()
                     .power()
                     == Some(Power::Off)
@@ -158,7 +158,7 @@ fn cloud_control_without_ready_notifications_is_sync_limited() {
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         until(|| {
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .snapshot()
                 .availability
                 == Availability::Available
@@ -204,7 +204,7 @@ fn command_diagnostics_keep_inflight_actual_path_when_control_selection_changes(
             initialized(control, &peer, &["one"]).await;
             until(|| control.context.directory.borrow().scope_valid()).await;
             peer.state.borrow_mut().hold_writes = true;
-            let one = function(&control.context.registry, "one", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
             let mut command = Box::pin(one.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
             until(|| peer.count("rpcReq", "one", 2) == 1).await;
@@ -253,7 +253,7 @@ fn command_diagnostics_keep_cloud_rejection_results_without_replay() {
         cloud.property_code = -123;
     }
     block_on(rig.run(|c| async move {
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         until(|| one.snapshot().availability == Availability::Available).await;
         let result = one.execute(Command::On).await;
         assert_eq!(
@@ -289,7 +289,7 @@ fn switch_reasons_identify_http_failure_instead_of_a_generic_access_change() {
         cloud.property_status = 503;
     }
     block_on(rig.run(|c| async move {
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         until(|| one.snapshot().availability == Availability::Available).await;
         assert!(one.execute(Command::On).await.is_err());
         let status = c.context.diagnostics();
@@ -328,7 +328,7 @@ fn switch_reasons_identify_token_expiry_and_saved_credential_restoration() {
         cloud.token_gate = Some(gate);
     }
     block_on(rig.run(|c| async move {
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         until(|| one.snapshot().availability == Availability::Available).await;
         c.clock.advance(Duration::from_secs(5));
         until(|| c.cloud.lock().unwrap().tokens == 1).await;

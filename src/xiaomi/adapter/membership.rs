@@ -5,7 +5,7 @@ use super::{
     work::DeviceWork,
 };
 use crate::{
-    device::{Availability, CommandReceiver, DeviceKey},
+    device::{Availability, CommandReceiver},
     xiaomi::central::DeviceEntry,
 };
 use std::rc::Rc;
@@ -158,12 +158,10 @@ impl Context {
         if let Some(work) = work {
             let physical = work.physical();
             physical.set_availability(Availability::Unavailable("source retired".into()));
-            self.registry.remove(physical.key());
             work.retire();
         }
     }
     pub(super) fn remove_source_slot(&self, did: &str) {
-        self.registry.remove(&DeviceKey::new("xiaomi", did));
         self.retire_work(did);
         let slot = self.directory.borrow_mut().remove_source(did);
         if let Some(slot) = slot

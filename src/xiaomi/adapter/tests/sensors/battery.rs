@@ -21,8 +21,7 @@ fn cloud_battery_read_failure_is_reported_and_success_clears_it() {
     block_on(rig.run(|c| async move {
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "sensor"))
+                .physical(&DeviceKey::new("xiaomi", "sensor"))
                 .and_then(|device| device.battery_snapshot())
                 .and_then(|value| value.value)
                 == Some(55.0)
@@ -249,8 +248,7 @@ fn invalid_battery_data_and_read_failures_preserve_last_value_and_measurements()
             assert_eq!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "sensor"))
+                    .physical(&DeviceKey::new("xiaomi", "sensor"))
                     .unwrap()
                     .availability(),
                 Availability::Available
@@ -291,8 +289,7 @@ fn battery_subscription_denial_or_timeout_does_not_block_measurement_notificatio
                 assert_eq!(
                     control
                         .context
-                        .registry
-                        .get(&DeviceKey::new("xiaomi", "sensor"))
+                        .physical(&DeviceKey::new("xiaomi", "sensor"))
                         .unwrap()
                         .availability(),
                     Availability::Available

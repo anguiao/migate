@@ -1,20 +1,13 @@
 //! Device fixtures and identity checks for module and integration scenarios.
 
 use crate::device::{
-    CommandError, DeviceKey, DeviceRegistry, Function, LightAction, LightTarget, PhysicalDevice,
-    PhysicalDeviceDescription,
+    CommandError, Function, LightAction, LightTarget, PhysicalDevice, PhysicalDeviceDescription,
 };
 use std::sync::Arc;
 
 impl PhysicalDevice {
     pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
-    }
-}
-
-impl DeviceRegistry {
-    pub(crate) fn get(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
-        self.list().into_iter().find(|device| device.key() == key)
     }
 }
 

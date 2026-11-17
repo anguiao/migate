@@ -6,7 +6,7 @@ fn mcn02_offline_direct_batches_feedback_and_uses_legacy_commands() {
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| {
                 let state = ac.snapshot().air_conditioner().unwrap();
                 state.power.value == Some(false)
@@ -90,7 +90,7 @@ fn mcn02_rejection_preserves_accepted_steps_and_never_sends_later_steps() {
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| ac.snapshot().air_conditioner().unwrap().power.value == Some(false)).await;
             peer.rejected
                 .lock()
@@ -200,7 +200,7 @@ fn two_mcn02_devices_share_mapping_and_sent_timeout_is_not_replayed() {
                 dids.iter().all(|did| {
                     control.context.direct_candidate(did).is_ok()
                         && control.context.cloud_candidate(did, true).is_ok()
-                        && function(&control.context.registry, did, "air-conditioner:2")
+                        && function(&control.context, did, "air-conditioner:2")
                             .snapshot()
                             .air_conditioner()
                             .unwrap()
@@ -212,8 +212,8 @@ fn two_mcn02_devices_share_mapping_and_sent_timeout_is_not_replayed() {
             .await;
             control.clock.automatic.store(false, Ordering::Relaxed);
             first.drop_write.store(true, Ordering::Relaxed);
-            let ac1 = function(&control.context.registry, dids[0], "air-conditioner:2");
-            let ac2 = function(&control.context.registry, dids[1], "air-conditioner:2");
+            let ac1 = function(&control.context, dids[0], "air-conditioner:2");
+            let ac2 = function(&control.context, dids[1], "air-conditioner:2");
             assert_eq!(
                 ac1.begin_air_conditioner(AirConditionerCommand::Power(true))
                     .unwrap()
@@ -364,7 +364,7 @@ fn invalid_legacy_ack_is_shown_as_uncertain_by_the_command_diagnostics() {
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
             control.clock.automatic.store(false, Ordering::Relaxed);
             *peer.ack.lock().unwrap() = json!(["invalid"]);

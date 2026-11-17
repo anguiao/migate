@@ -22,7 +22,6 @@ impl App {
             configuration: Rc::new(configuration),
             derived: current.derived.clone(),
             entries: current.entries.clone(),
-            published: current.published.clone(),
         };
         install(&mut next);
         self.source

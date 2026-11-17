@@ -7,7 +7,7 @@ fn direct_command_refreshes_even_when_cloud_notifications_are_ready() {
     let (rig, listener, cloud) = with_cloud_rig(rig);
     block_on(rig.run(|control| async move {
         future::or(cloud.run(&listener), async {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             let work = control.context.directory.borrow().devices[did]
                 .work
                 .clone()
@@ -74,7 +74,7 @@ fn invalid_legacy_feedback_isolated_per_property_and_newer_notification_wins() {
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
             let work = control.context.directory.borrow().devices[did]
                 .work
@@ -180,7 +180,7 @@ fn mcn02_partial_acceptance_reads_once_after_all_sent_steps() {
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)).await;
             let work = control.context.directory.borrow().devices[did]
                 .work

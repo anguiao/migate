@@ -13,7 +13,7 @@ fn rig() -> Rig {
     Rig::custom_lights(&[("one", "dmaker.fan.p5c", instance)])
 }
 fn fan(c: &Control) -> FanSnapshot {
-    function(&c.context.registry, "one", "fan:2")
+    function(&c.context, "one", "fan:2")
         .snapshot()
         .fan()
         .unwrap()
@@ -98,7 +98,7 @@ fn fan_reads_and_subscribes_each_independent_native_property() {
                     .count(),
                 4
             );
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             let revision = function.snapshot().revision;
             peer.notify_value_at("one", SPEED, json!(40), Some(700), false);
             until(|| fan(control).speed.source_time == Some(700)).await;

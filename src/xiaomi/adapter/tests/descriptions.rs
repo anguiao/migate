@@ -26,8 +26,8 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
                 .any(|raw| raw.key.id == "one" && raw.diagnostic.is_some())
         })
         .await;
-        assert!(c.publication.frozen().is_empty());
-        assert!(c.context.registry.list().is_empty());
+        assert!(c.publication.matter_configuration().entries.is_empty());
+        assert!(c.context.physical_devices().is_empty());
         let saved = c.store.devices().load_configuration().unwrap();
         let raw = &saved.descriptions[0];
         assert_eq!(raw.name.as_deref(), Some("Future device"));
@@ -93,7 +93,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
                 .diagnostic
                 .is_some()
         );
-        assert!(restored.context.registry.list().is_empty());
+        assert!(restored.context.physical_devices().is_empty());
         assert_eq!(
             restored.context.directory.borrow().devices["one"]
                 .latest_description
@@ -225,7 +225,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
                 .cloned()
                 .unwrap();
             assert_eq!(before.label, "Controller saved name");
-            let before_physical = control.context.registry.get(&key).unwrap();
+            let before_physical = control.context.physical(&key).unwrap();
             // Hold one old-instance temperature read; its late value stays
             // inside the widened range, so only instance filtering can reject it.
             peer.state.borrow_mut().hold_reads = true;
@@ -257,8 +257,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&key)
+                    .physical(&key)
                     .is_some_and(|now| !before_physical.same_instance(&now))
             })
             .await;
@@ -270,7 +269,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
                 )));
             }
             peer.state.borrow_mut().hold_reads = false;
-            let current = function(&control.context.registry, "one", "light:2");
+            let current = function(&control.context, "one", "light:2");
             device_work(control, "one").refresh();
             until(|| current.snapshot().lighting().unwrap().temperature_kelvin == Some(6000)).await;
             // The old held read (2700 K) belongs to the retired instance and
@@ -351,7 +350,7 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
                     .any(|pending| pending.did == "multi" && pending.reason.contains("exhausted"))
             })
             .await;
-            assert_eq!(control.context.registry.list().len(), 1);
+            assert_eq!(control.context.physical_devices().len(), 1);
             assert!(
                 control
                     .store
@@ -388,7 +387,7 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
                 .unwrap()
                 .unwrap();
             assert!(unknown.starts_with("Unknown device DID.\n"), "{unknown}");
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -409,7 +408,7 @@ fn publication_database_failure_keeps_the_complete_cached_configuration() {
         c.peer(Rc::new(Peer::default()), |peer| async move {
             initialized(control, &peer, &["one"]).await;
             until(|| control.publication.failure().is_some()).await;
-            assert_eq!(control.context.registry.list().len(), 1);
+            assert_eq!(control.context.physical_devices().len(), 1);
             assert!(
                 control
                     .store
@@ -430,7 +429,7 @@ fn publication_database_failure_keeps_the_complete_cached_configuration() {
                     .and_then(|device| device.native.as_ref())
                     .is_none()
             );
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

@@ -55,7 +55,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .device(&key)
                 .cloned()
                 .unwrap();
-            let original_physical = control.context.registry.get(&key).unwrap();
+            let original_physical = control.context.physical(&key).unwrap();
             let original = control.context.directory.borrow().devices["one"]
                 .work
                 .as_ref()
@@ -92,7 +92,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 replaced.description().temperature_interval().unwrap().max(),
                 5600
             );
-            let physical = control.context.registry.get(&key).unwrap();
+            let physical = control.context.physical(&key).unwrap();
             assert_eq!(physical.availability(), Availability::Available);
             assert!(!physical.same_instance(&original_physical));
             let saved = control

@@ -7,7 +7,7 @@ fn external_stop_converges_without_writes_and_cached_target_does_not_resume_it()
         let control = &c;
         c.peer(peer(), |peer| async move {
             settled(control).await;
-            let function = function(&control.context.registry, "one", "curtain:2");
+            let function = function(&control.context, "one", "curtain:2");
             peer.notify_value_at("one", STATUS, json!(2), Some(700), false);
             until(|| curtain(control).status.source_time == Some(700)).await;
             assert_eq!(function.matter_curtain().1, Some(37));
@@ -201,7 +201,7 @@ fn curtain_local_notification_wins_over_old_read_and_failures_keep_observations(
             assert_eq!(curtain(control).current_position.value, Some(64));
             assert_eq!(curtain(control).target_position.value, Some(80));
 
-            let function = function(&control.context.registry, "one", "curtain:2");
+            let function = function(&control.context, "one", "curtain:2");
             let revision = function.snapshot().revision;
             peer.notify_value_at("one", CURRENT, json!(64), Some(403), false);
             until(|| curtain(control).current_position.source_time == Some(403)).await;
@@ -316,9 +316,7 @@ fn curtain_cloud_reads_and_reports_are_independent_and_old_http_read_cannot_over
             assert_eq!(initial.target_position.value, Some(75));
             assert_eq!(initial.status.value, Some(CurtainMotion::Stopped));
             assert_eq!(
-                function(&c.context.registry, "one", "curtain:2")
-                    .matter_curtain()
-                    .1,
+                function(&c.context, "one", "curtain:2").matter_curtain().1,
                 Some(25)
             );
             assert_eq!(

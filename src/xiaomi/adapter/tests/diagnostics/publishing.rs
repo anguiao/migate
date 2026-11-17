@@ -97,7 +97,7 @@ fn refresh_errors_and_successful_recovery_are_published_without_queries() {
     block_on(rig.run_with_status(
         move |status| reports.borrow_mut().push(status),
         |c| async move {
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             until(|| one.snapshot().power().is_some()).await;
             c.clock
                 .automatic
@@ -157,7 +157,7 @@ fn real_command_receipts_and_callback_events_are_published_without_queries() {
             }
         },
         |c| async move {
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             until(|| one.snapshot().availability == Availability::Available).await;
             one.execute(Command::On).await.unwrap();
             until(|| {

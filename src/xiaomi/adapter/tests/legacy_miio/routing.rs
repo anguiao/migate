@@ -9,7 +9,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
     block_on(rig.run_result_without_publication(|control| async move {
         until(|| {
             control.context.direct_candidate(did).is_ok()
-                && function(&control.context.registry, did, "air-conditioner:2")
+                && function(&control.context, did, "air-conditioner:2")
                     .snapshot()
                     .air_conditioner()
                     .is_some_and(|snapshot| snapshot.mode.value.is_some())
@@ -173,7 +173,7 @@ fn mcn02_saved_scope_rebuilds_offline_with_the_same_identity_and_controls() {
     rig.ready = ready;
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| {
                 let state = ac.snapshot().air_conditioner().unwrap();
                 state.power.value == Some(false)
@@ -266,7 +266,7 @@ fn mcn02_hub_and_cloud_continue_using_standard_miot_properties() {
                             )
                         })
                         .await;
-                        let ac = function(&c.context.registry, did, "air-conditioner:2");
+                        let ac = function(&c.context, did, "air-conditioner:2");
                         until(|| {
                             ac.snapshot().air_conditioner().unwrap().temperature.value == Some(24)
                         })
@@ -348,7 +348,7 @@ fn mcn02_unknown_swing_does_not_block_offline_direct_and_recovers() {
     block_on(rig.run(|control| async move {
         let id = "air-conditioner:2";
         let swing = PropertyBinding { siid: 3, piid: 2 };
-        let ac = function(&control.context.registry, did, id);
+        let ac = function(&control.context, did, id);
         let work = control.context.directory.borrow().devices[did]
             .work
             .clone()
@@ -431,7 +431,7 @@ fn mcn02_invalid_identity_feedback_retries_after_backoff_and_recovers() {
         rig.clock.automatic.store(false, Ordering::Relaxed);
         *peer.values.lock().unwrap() = invalid;
         block_on(rig.run(|control| async move {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             until(|| {
                 control.context.diagnostics().devices.iter().any(|device| {
                     device.did == did

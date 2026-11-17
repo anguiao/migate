@@ -149,7 +149,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 .device(&group)
                 .cloned()
                 .unwrap();
-            let two_before = c.context.registry.get(&two).unwrap();
+            let two_before = c.context.physical(&two).unwrap();
             let device_ids = |report: &str| {
                 report
                     .lines()
@@ -225,7 +225,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                 group_before.configuration_version
             );
             // The unchanged outlet keeps serving through the rebuild.
-            let two_after_relation = c.context.registry.get(&two).unwrap();
+            let two_after_relation = c.context.physical(&two).unwrap();
             assert!(two_before.same_instance(&two_after_relation));
             assert_eq!(two_before.label(), two_after_relation.label());
 
@@ -243,7 +243,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
                     .unwrap();
                 (light.description().id.clone(), light.power().unwrap())
             };
-            let light = function(&c.context.registry, "group-1", &id);
+            let light = function(&c.context, "group-1", &id);
             let action = light
                 .begin_light_action(
                     crate::device::LightTarget::brightness(Some(true), 70.0)

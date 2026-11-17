@@ -68,7 +68,7 @@ fn committed_sensor_identities_restart_with_unknown_observations() {
         }
         let control = &c;
         c.peer(peer, |_| async move {
-            let contact = function(&control.context.registry, "contact", "contact:2:2");
+            let contact = function(&control.context, "contact", "contact:2:2");
             until(|| {
                 let co2 = measurement(&control.context, "co2", "co2:8:1029");
                 let lux = measurement(&control.context, "lux", "illuminance:4:1");
@@ -98,8 +98,7 @@ fn committed_sensor_identities_restart_with_unknown_observations() {
     assert_eq!(
         adapter
             .context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "co2"))
+            .physical(&DeviceKey::new("xiaomi", "co2"))
             .unwrap()
             .label(),
         "Office air"
@@ -110,7 +109,7 @@ fn committed_sensor_identities_restart_with_unknown_observations() {
         assert_eq!(reading.source_time, None);
         assert_eq!(reading.received_at, None);
     }
-    let contact = function(&adapter.context.registry, "contact", "contact:2:2")
+    let contact = function(&adapter.context, "contact", "contact:2:2")
         .snapshot()
         .state_sensor()
         .unwrap();
@@ -217,15 +216,14 @@ fn initial_reads_keep_independent_values_and_upstream_update_times() {
             assert_eq!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "sensor"))
+                    .physical(&DeviceKey::new("xiaomi", "sensor"))
                     .unwrap()
                     .availability(),
                 Availability::Available
             );
             // Sensors never produce a native write.
             assert_eq!(peer.count("rpcReq", "sensor", 3), 0);
-            assert_eq!(control.publication.root_version(), 1);
+            assert_eq!(control.publication.current().configuration.root_version, 1);
             assert!(control.publication.plan().unwrap().is_none());
         })
         .await;
@@ -566,8 +564,7 @@ fn invalid_observations_and_read_failures_preserve_each_independent_value() {
             assert!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "sensor"))
+                    .physical(&DeviceKey::new("xiaomi", "sensor"))
                     .unwrap()
                     .availability()
                     == Availability::Available

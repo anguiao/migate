@@ -47,7 +47,7 @@ fn local_speed_waits_for_each_receipt_and_keeps_observations_unchanged() {
                         .all(|binding| !work(control).refresh.borrow().contains("fan:2", *binding))
             })
             .await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             let before = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(40)).unwrap();
@@ -77,7 +77,7 @@ fn off_waits_for_sent_step_and_new_speed_reopens_after_stale_on() {
         let control = &c;
         c.peer(peer(), |peer| async move {
             until(|| fan(control).power.value == Some(true) && fan(control).speed.value == Some(40) && fan(control).swing.value == Some(false) && work(control).function_observer("fan:2").is_some()).await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             let before = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let old = function.begin_fan(FanCommand::Speed(40)).unwrap();
@@ -134,7 +134,7 @@ fn external_notification_does_not_interrupt_started_speed() {
                     && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(55)).unwrap();
             until(|| writes(&peer).len() == 1).await;
@@ -166,7 +166,7 @@ fn terminal_power_zero_speed_and_swing_write_only_their_own_properties() {
                     && fan(control).swing.value == Some(false)
             })
             .await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             let before = function.snapshot().fan();
             let terminal = control.terminal();
             assert_eq!(
@@ -221,7 +221,7 @@ fn off_waits_for_the_old_step_timeout_and_ignores_its_late_receipt() {
             })
             .await;
             peer.state.borrow_mut().hold_writes = true;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             let old = function.begin_fan(FanCommand::Speed(55)).unwrap();
             until(|| writes(&peer).len() == 1).await;
             let off = function.begin_fan(FanCommand::Power(false)).unwrap();
@@ -276,7 +276,7 @@ fn generic_fan_writes_real_discrete_codes_and_observes_actual_speed() {
                     && work(control).function_observer("fan:2").is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", "fan:2");
+            let function = function(&control.context, "one", "fan:2");
             peer.state.borrow_mut().hold_writes = true;
             let action = function.begin_fan(FanCommand::Speed(1)).unwrap();
             until(|| writes(&peer).len() == 1).await;

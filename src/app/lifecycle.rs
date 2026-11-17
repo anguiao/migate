@@ -116,17 +116,11 @@ async fn run_lifecycle<D: StartupDeadline>(
     let mut advertisement = Advertisement::new(options.port);
     loop {
         let renamer: Rc<dyn crate::matter::LabelWriter> = app.clone();
-        let bridge = Bridge::new(
-            app.frozen(),
-            app.root_version(),
-            options.store,
-            options.identity,
-            renamer,
-        );
+        let bridge = Bridge::new(options.store, options.identity, renamer);
         let mut runner = Box::pin(async {
             startup.wait(&app).await;
             bridge
-                .run_with_advertisement(&mut advertisement, &pairing)
+                .run_with_advertisement(app.matter_configuration(), &mut advertisement, &pairing)
                 .await
         });
         loop {

@@ -5,8 +5,8 @@ use support::{add_device, handle_line, next_power, rename, run_input, saved_desc
 
 use crate::{
     device::{
-        Availability, CommandReceiver, DeviceKey, DeviceRegistry, FunctionDescription,
-        FunctionKind, PhysicalDevice, PhysicalDeviceDescription, Power,
+        Availability, CommandReceiver, DeviceKey, FunctionDescription, FunctionKind,
+        PhysicalDevice, PhysicalDeviceDescription, Power,
     },
     storage::Store,
     terminal::AuthStatus,
@@ -20,7 +20,7 @@ fn fixture() -> (
     tempfile::TempDir,
     Store,
     AuthStatus,
-    DeviceRegistry,
+    Vec<PhysicalDevice>,
     Vec<CommandReceiver>,
 ) {
     let directory = tempfile::tempdir().unwrap();
@@ -30,7 +30,7 @@ fn fixture() -> (
         .local_status()
         .unwrap();
     let status = AuthStatus::new(report, "/bin/migate".into(), directory.path().into());
-    let registry = DeviceRegistry::new();
+    let mut devices = Vec::new();
     let mut receivers = Vec::new();
     for (did, ids) in [
         ("one", vec!["outlet:2"]),
@@ -53,16 +53,16 @@ fn fixture() -> (
         );
         physical.set_availability(Availability::Available);
         add_device(&store, &physical.description());
-        registry.insert(physical);
+        devices.push(physical);
         receivers.append(&mut consumers);
     }
-    (directory, store, status, registry, receivers)
+    (directory, store, status, devices, receivers)
 }
 #[test]
 fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
     block_on(async {
-        let (_dir, store, status, registry, mut receivers) = fixture();
-        let omitted = poll_once(handle_line(&registry, &store.devices(), &status, "on one")).await;
+        let (_dir, store, status, devices, mut receivers) = fixture();
+        let omitted = poll_once(handle_line(&devices, &store.devices(), &status, "on one")).await;
         let reply = omitted
             .expect("omitting the function must return immediately")
             .unwrap()
@@ -84,7 +84,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             "toggle one",
             "ON one",
         ] {
-            let result = handle_line(&registry, &store.devices(), &status, invalid)
+            let result = handle_line(&devices, &store.devices(), &status, invalid)
                 .await
                 .unwrap()
                 .unwrap();
@@ -97,11 +97,12 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             }
         }
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on one outlet:2"),
+            handle_line(&devices, &store.devices(), &status, "on one outlet:2"),
             async {
                 let request = next_power(&mut receivers[0]).await.unwrap();
-                registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                devices
+                    .iter()
+                    .find(|device| device.key() == &DeviceKey::new("xiaomi", "one"))
                     .unwrap()
                     .functions()[0]
                     .observe(true);
@@ -111,12 +112,13 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         .await;
         assert_eq!(result.unwrap().unwrap(), "one: command accepted");
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "off multi outlet:9"),
+            handle_line(&devices, &store.devices(), &status, "off multi outlet:9"),
             async {
                 let request = next_power(&mut receivers[4]).await.unwrap();
                 assert!(!request.target);
-                registry
-                    .get(&DeviceKey::new("xiaomi", "multi"))
+                devices
+                    .iter()
+                    .find(|device| device.key() == &DeviceKey::new("xiaomi", "multi"))
                     .unwrap()
                     .function("outlet:9")
                     .unwrap()
@@ -127,8 +129,9 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         .await;
         assert_eq!(result.unwrap().unwrap(), "multi/outlet:9: command accepted");
         assert_eq!(
-            registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+            devices
+                .iter()
+                .find(|device| device.key() == &DeviceKey::new("xiaomi", "one"))
                 .unwrap()
                 .functions()[0]
                 .snapshot()
@@ -140,7 +143,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
 #[test]
 fn explicit_target_does_not_redirect_a_mixed_device_command() {
     block_on(async {
-        let (_dir, store, status, registry, mut existing_receivers) = fixture();
+        let (_dir, store, status, mut devices, mut existing_receivers) = fixture();
         let (physical, mut receivers) = PhysicalDevice::new(
             PhysicalDeviceDescription::new(
                 DeviceKey::new("xiaomi", "mixed"),
@@ -164,13 +167,13 @@ fn explicit_target_does_not_redirect_a_mixed_device_command() {
         );
         physical.set_availability(Availability::Available);
         add_device(&store, &physical.description());
-        registry.insert(physical.clone());
+        devices.push(physical.clone());
         for (line, expected) in [
             ("on mixed", "Invalid command usage"),
             ("on mixed missing", "Unknown function"),
             ("on mixed temperature:3:1001", "does not support"),
         ] {
-            let result = handle_line(&registry, &store.devices(), &status, line)
+            let result = handle_line(&devices, &store.devices(), &status, line)
                 .await
                 .unwrap()
                 .unwrap();
@@ -181,7 +184,7 @@ fn explicit_target_does_not_redirect_a_mixed_device_command() {
             }
         }
         let (result, ()) = future::zip(
-            handle_line(&registry, &store.devices(), &status, "on mixed outlet:2"),
+            handle_line(&devices, &store.devices(), &status, "on mixed outlet:2"),
             async {
                 let request = next_power(&mut receivers[0]).await.unwrap();
                 assert!(request.target);
@@ -196,14 +199,14 @@ fn explicit_target_does_not_redirect_a_mixed_device_command() {
 #[test]
 fn list_and_status_read_shared_power_and_persisted_names() {
     block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
+        let (_dir, store, status, mut devices, _receivers) = fixture();
         let key = DeviceKey::new("xiaomi", "multi");
         rename(&store, &key, "Saved Home name");
         let (physical, _consumers) = PhysicalDevice::new(saved_description(&store, &key));
-        registry.remove(&key);
-        registry.insert(physical.clone());
+        devices.retain(|device| device.key() != &key);
+        devices.push(physical.clone());
         physical.function("outlet:9").unwrap().observe(true);
-        let list = handle_line(&registry, &store.devices(), &status, "list")
+        let list = handle_line(&devices, &store.devices(), &status, "list")
             .await
             .unwrap()
             .unwrap();
@@ -211,7 +214,7 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(list.contains("outlet:9 (主电源): on"));
         assert!(list.contains("one (name one)"));
         physical.set_label("Live Home name".into());
-        let selected = handle_line(&registry, &store.devices(), &status, "status multi")
+        let selected = handle_line(&devices, &store.devices(), &status, "status multi")
             .await
             .unwrap()
             .unwrap();
@@ -219,9 +222,9 @@ fn list_and_status_read_shared_power_and_persisted_names() {
         assert!(selected.contains("Live Home name"));
         assert!(!selected.contains("Saved Home name"));
         assert!(selected.contains("Xiaomi account: not signed in"));
-        registry.remove(physical.key());
+        devices.retain(|device| device.key() != physical.key());
         assert!(
-            handle_line(&registry, &store.devices(), &status, "on multi outlet:9")
+            handle_line(&devices, &store.devices(), &status, "on multi outlet:9")
                 .await
                 .unwrap()
                 .unwrap()
@@ -233,8 +236,8 @@ fn list_and_status_read_shared_power_and_persisted_names() {
 #[test]
 fn command_diagnostics_are_sampled_only_for_reports() {
     block_on(async {
-        let (_dir, store, status, registry, mut receivers) = fixture();
-        let view = support::view(&registry, &store.devices()).unwrap();
+        let (_dir, store, status, devices, mut receivers) = fixture();
+        let view = support::view(&devices, &store.devices()).unwrap();
         let samples = std::cell::Cell::new(0);
         let diagnostics = || {
             samples.set(samples.get() + 1);
@@ -300,7 +303,6 @@ fn withdrawn_raw_description_uses_pending_or_unknown_without_visible_details() {
                 configuration: std::rc::Rc::new(configuration),
                 derived: derived.into(),
                 entries: Vec::new(),
-                published: DeviceRegistry::new(),
             }),
             pending: true,
             failure: Some("withdrawal save failed".into()),
@@ -352,7 +354,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
     };
 
     block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
+        let (_dir, store, status, mut devices, _receivers) = fixture();
         let mut lights = Vec::new();
         for (did, model, source) in [
             (
@@ -386,10 +388,10 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
             rename(&store, &key, &format!("Saved {did} 名称"));
             let (physical, receivers) = PhysicalDevice::new(saved_description(&store, &key));
             physical.set_availability(Availability::Available);
-            registry.insert(physical.clone());
+            devices.push(physical.clone());
             lights.push((physical, receivers));
         }
-        let list = handle_line(&registry, &store.devices(), &status, "list")
+        let list = handle_line(&devices, &store.devices(), &status, "list")
             .await
             .unwrap()
             .unwrap();
@@ -419,7 +421,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 ..Default::default()
             })
             .unwrap();
-        let partial = handle_line(&registry, &store.devices(), &status, "status rgb")
+        let partial = handle_line(&devices, &store.devices(), &status, "status rgb")
             .await
             .unwrap()
             .unwrap();
@@ -448,7 +450,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
                 ..Default::default()
             })
             .unwrap();
-        let rgb = handle_line(&registry, &store.devices(), &status, "status rgb")
+        let rgb = handle_line(&devices, &store.devices(), &status, "status rgb")
             .await
             .unwrap()
             .unwrap();
@@ -460,7 +462,7 @@ fn light_list_and_status_show_capabilities_snapshot_unknowns_and_saved_names() {
         );
         assert!(!rgb.contains("Saved ct 名称"));
         assert!(!rgb.contains("name one"));
-        let ct = handle_line(&registry, &store.devices(), &status, "status ct")
+        let ct = handle_line(&devices, &store.devices(), &status, "status ct")
             .await
             .unwrap()
             .unwrap();
@@ -482,7 +484,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
     use crate::device::{DeviceRequest, LightMode, LightPatch, LightProfile, TemperatureInterval};
 
     block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
+        let (_dir, store, status, mut devices, _receivers) = fixture();
         let (physical, mut receivers) = PhysicalDevice::new(
             PhysicalDeviceDescription::new(
                 DeviceKey::new("xiaomi", "light"),
@@ -506,10 +508,10 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
             })
             .unwrap();
         add_device(&store, &physical.description());
-        registry.insert(physical.clone());
+        devices.push(physical.clone());
         for (line, target) in [("on light light:2", true), ("off light light:2", false)] {
             let (result, ()) = future::zip(
-                handle_line(&registry, &store.devices(), &status, line),
+                handle_line(&devices, &store.devices(), &status, line),
                 async {
                     let DeviceRequest::Power(request) =
                         receivers[0].next_operation().await.unwrap()
@@ -527,7 +529,7 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
             assert_eq!(snapshot.temperature_kelvin, Some(4000));
             assert_eq!(snapshot.mode, Some(LightMode::Temperature));
         }
-        let invalid = handle_line(&registry, &store.devices(), &status, "brightness light 50")
+        let invalid = handle_line(&devices, &store.devices(), &status, "brightness light 50")
             .await
             .unwrap()
             .unwrap();
@@ -538,11 +540,11 @@ fn light_terminal_onoff_remains_power_only_and_has_no_dimming_commands() {
 #[test]
 fn input_recovers_and_returns_at_eof() {
     block_on(async {
-        let (_dir, store, status, registry, mut receivers) = fixture();
+        let (_dir, store, status, devices, mut receivers) = fixture();
         let mut output = Vec::new();
         future::or(
             run_input(
-                &registry,
+                &devices,
                 &store.devices(),
                 &status,
                 Cursor::new(b" \non one outlet:2\nbad\nstatus\noff one outlet:2"),
@@ -551,8 +553,9 @@ fn input_recovers_and_returns_at_eof() {
             async {
                 loop {
                     let request = next_power(&mut receivers[0]).await.unwrap();
-                    registry
-                        .get(&DeviceKey::new("xiaomi", "one"))
+                    devices
+                        .iter()
+                        .find(|device| device.key() == &DeviceKey::new("xiaomi", "one"))
                         .unwrap()
                         .functions()[0]
                         .observe(request.target);
@@ -566,8 +569,9 @@ fn input_recovers_and_returns_at_eof() {
         assert!(output.contains("Available commands:"));
         assert!(output.ends_with("one: command accepted\n"));
         assert_eq!(
-            registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+            devices
+                .iter()
+                .find(|device| device.key() == &DeviceKey::new("xiaomi", "one"))
                 .unwrap()
                 .functions()[0]
                 .snapshot()
@@ -579,9 +583,9 @@ fn input_recovers_and_returns_at_eof() {
 #[test]
 fn input_and_output_errors_propagate() {
     block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
+        let (_dir, store, status, devices, _receivers) = fixture();
         let error = run_input(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             Cursor::new(b"\xff\n"),
@@ -595,7 +599,7 @@ fn input_and_output_errors_propagate() {
         );
         assert!(
             run_input(
-                &registry,
+                &devices,
                 &store.devices(),
                 &status,
                 Cursor::new(b"status\n"),
@@ -609,14 +613,15 @@ fn input_and_output_errors_propagate() {
 #[test]
 fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
     block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
+        let (_dir, store, status, devices, _receivers) = fixture();
         rename(
             &store,
             &DeviceKey::new("xiaomi", "multi"),
             "Home edited name",
         );
-        registry
-            .get(&DeviceKey::new("xiaomi", "multi"))
+        devices
+            .iter()
+            .find(|device| device.key() == &DeviceKey::new("xiaomi", "multi"))
             .unwrap()
             .set_label("Home edited name".into());
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
@@ -637,7 +642,7 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
             devices: Vec::new(),
         };
         let list = support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics.clone(),
@@ -650,7 +655,7 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
         assert!(!list.contains("New cloud name"));
         assert!(list.contains("subscription rejected"));
         let help = support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics.clone(),
@@ -669,7 +674,7 @@ fn pending_diagnostics_keep_the_saved_name_and_help_explains_stable_channels() {
 fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
     use crate::xiaomi::adapter::*;
     block_on(async {
-        let (_dir, store, status, registry, _receivers) = fixture();
+        let (_dir, store, status, devices, _receivers) = fixture();
         let report = AuthService::new(store.xiaomi(), CloudClient::new().unwrap())
             .unwrap()
             .local_status()
@@ -710,7 +715,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
                 .collect(),
         };
         let selected = support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics.clone(),
@@ -726,7 +731,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(selected.contains("Gateway: connected (hub)."), "{selected}");
         assert!(selected.contains("Routing: fallback-first"), "{selected}");
         let all = support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics.clone(),
@@ -738,7 +743,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(all.contains("one routing:"));
         assert!(all.contains("multi routing:"));
         let list = support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics.clone(),
@@ -751,7 +756,7 @@ fn detailed_status_filters_device_routes_while_list_and_help_remain_concise() {
         assert!(!list.contains("routing:"));
         assert!(!list.contains("Selected control:"));
         let help = support::handle_line_with_diagnostics(
-            &registry,
+            &devices,
             &store.devices(),
             &status,
             diagnostics.clone(),

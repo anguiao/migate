@@ -24,7 +24,7 @@ fn work(c: &Control) -> Rc<super::work::DeviceWork> {
         .clone()
 }
 fn curtain(c: &Control) -> CurtainSnapshot {
-    function(&c.context.registry, "one", "curtain:2")
+    function(&c.context, "one", "curtain:2")
         .snapshot()
         .curtain()
         .unwrap()

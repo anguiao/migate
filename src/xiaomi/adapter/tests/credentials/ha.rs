@@ -93,7 +93,7 @@ fn saved_hub_control_works_with_stopped_ha_authorization() {
         control
             .peer(peer, |peer| async move {
                 initialized(current, &peer, &["one"]).await;
-                function(&current.context.registry, "one", "outlet:2")
+                function(&current.context, "one", "outlet:2")
                     .execute(Command::On)
                     .await
                     .unwrap();
@@ -187,7 +187,7 @@ fn saved_refresh_is_adopted_before_slow_directory_and_certificate_finish() {
                     .access_token,
                 "fresh-access"
             );
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -249,7 +249,7 @@ fn expiry_wakes_availability_and_closes_mqtt_while_refresh_hangs() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             c.clock.advance(Duration::from_secs(5));
             until(|| c.cloud.lock().unwrap().tokens == 1).await;
             assert_eq!(
@@ -312,7 +312,7 @@ fn temporary_refresh_failure_keeps_valid_old_token_but_expiry_keeps_local_contro
                 control.context.control_path("one"),
                 Some(super::super::routing::ControlPath::Local(_))
             ));
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -344,7 +344,7 @@ fn explicit_signin_failure_pauses_cloud_but_preserves_cached_local_commands() {
             control.cloud.lock().unwrap().status = 200;
             control.clock.advance(Duration::from_secs(600));
             peer.list_changed(&["one"]);
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -434,7 +434,7 @@ fn stopped_ha_stays_stopped_after_adapter_restart_while_mijia_and_hub_work() {
             ));
             assert!(!control.context.token_usable());
             until(|| control.context.cloud_candidate("one", true).is_ok()).await;
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

@@ -38,7 +38,7 @@ fn repaired_group_publishes_extended_color_and_dispatches_rgb_to_members() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         let capabilities = light.description().capabilities().clone();
         assert!(
             capabilities.contains(&Capability::ColorRgb),
@@ -110,7 +110,7 @@ fn repaired_group_native_controls_do_not_depend_on_member_writes() {
     let rig = repair_rig(1, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         for did in ["member-a", "member-b"] {
             force_unavailable(&c.context, did, "member unavailable");
         }
@@ -158,7 +158,7 @@ fn repaired_group_state_follows_confirmed_member_and_clears_on_loss() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         let work = c.context.directory.borrow().devices["member-a"]
             .work
             .clone()
@@ -269,13 +269,13 @@ fn queued_rgb_rechecks_action_and_member_power_before_sending() {
         let (rig, release) = gated_rig(0, true);
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
-            let member = function(&c.context.registry, "member-b", "light:2");
+            let member = function(&c.context, "member-b", "light:2");
             let holding = async {
                 member.execute(Command::Off).await.unwrap();
             };
             let scenario = async {
                 wait_holding_member_b(&c).await;
-                let light = function(&c.context.registry, "group-1", "light:2");
+                let light = function(&c.context, "group-1", "light:2");
                 let action = light.begin_light_action(rgb(0x00ff00), true).unwrap();
                 action.accepted().await.unwrap();
                 match change {
@@ -360,7 +360,7 @@ fn submitted_rgb_receipt_survives_stop_before_or_after_early_success() {
         }
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
-            let light = function(&c.context.registry, "group-1", "light:2");
+            let light = function(&c.context, "group-1", "light:2");
             let action = light.begin_light_action(rgb(0x0000ff), true).unwrap();
             if early_success {
                 action.accepted().await.unwrap();
@@ -446,7 +446,7 @@ fn repaired_unaligned_native_grid_quantizes_and_out_of_interval_is_unknown() {
     }
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         assert_eq!(
             light.description().temperature_interval(),
             Some(TemperatureInterval::new(2700, 6450).unwrap())
@@ -498,7 +498,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
     let rig = repair_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         let committed = c
             .store
             .devices()
@@ -557,8 +557,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         wait_for(
             || {
                 c.context
-                    .registry
-                    .get(&group_key)
+                    .physical(&group_key)
                     .and_then(|physical| physical.function("light:2"))
                     .is_none_or(|function| !function.description().supports_rgb())
             },
@@ -625,7 +624,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
             "re-confirmed members must restore repair",
         )
         .await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         assert!(light.description().supports_rgb());
         let again = c
             .store
@@ -649,7 +648,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_mijia_recovery() {
     rig.cloud.lock().unwrap().restore_gate = Some(gate);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         c.cloud.lock().unwrap().property_status = 401;
         let denied = light.begin_light_action(rgb(0x00ff00), true).unwrap();
         assert!(denied.accepted().await.is_err());
@@ -665,10 +664,7 @@ fn repaired_group_unauthorized_member_path_recovers_after_mijia_recovery() {
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
         until(|| {
             ["member-a", "member-b"].iter().all(|did| {
-                function(&c.context.registry, did, "light:2")
-                    .snapshot()
-                    .power()
-                    == Some(Power::On)
+                function(&c.context, did, "light:2").snapshot().power() == Some(Power::On)
             })
         })
         .await;
@@ -703,7 +699,7 @@ fn repaired_group_native_partial_failure_fails_without_optimistic_state() {
     }
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         wait_for(
             || light.snapshot().lighting().unwrap().temperature_kelvin == Some(2700),
             "native CT did not settle",
@@ -752,7 +748,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
         }
         block_on(rig.run(|c| async move {
             repair_ready(&c).await;
-            let light = function(&c.context.registry, "group-1", "light:2");
+            let light = function(&c.context, "group-1", "light:2");
             for (index, did) in ["member-a", "member-b"].into_iter().enumerate() {
                 c.cloud
                     .lock()
@@ -771,7 +767,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
                     .iter()
                     .enumerate()
                     .all(|(index, did)| {
-                        let snapshot = function(&c.context.registry, did, "light:2").snapshot();
+                        let snapshot = function(&c.context, did, "light:2").snapshot();
                         snapshot.power().and_then(crate::device::Power::value) == powers[index]
                             && snapshot.lighting().unwrap().mode.is_some()
                     })
@@ -832,7 +828,7 @@ fn repaired_rgb_eligibility_and_acceptance_use_actual_member_power() {
 fn rgb_action_keeps_the_member_sources_captured_by_its_first_frame() {
     block_on(repair_rig(0, true).run(|c| async move {
         repair_ready(&c).await;
-        let group = function(&c.context.registry, "group-1", "light:2");
+        let group = function(&c.context, "group-1", "light:2");
         // A committed member can temporarily have no admitted runtime. It must
         // not join an action already in progress when that runtime appears.
         let delayed = c
@@ -879,11 +875,11 @@ fn first_member_acceptance_does_not_discard_another_members_queued_write() {
     let (rig, release) = gated_rig(0, true);
     block_on(rig.run(|c| async move {
         repair_ready(&c).await;
-        let member = function(&c.context.registry, "member-b", "light:2");
+        let member = function(&c.context, "member-b", "light:2");
         let holding = async { member.execute(Command::Off).await.unwrap() };
         let scenario = async {
             wait_holding_member_b(&c).await;
-            let group = function(&c.context.registry, "group-1", "light:2");
+            let group = function(&c.context, "group-1", "light:2");
             group
                 .begin_light_action(rgb(0x224466), true)
                 .unwrap()

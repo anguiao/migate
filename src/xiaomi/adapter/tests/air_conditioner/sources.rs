@@ -31,7 +31,7 @@ fn cloud_reads_writes_and_notifications_use_the_same_standard_bindings() {
                     && !work(&c).refresh.borrow().contains(ID, MODE)
             })
             .await;
-            let function = function(&c.context.registry, "one", ID);
+            let function = function(&c.context, "one", ID);
             let before = function.snapshot();
             let action = function
                 .begin_air_conditioner(Command::Speed(Speed::Auto))
@@ -166,7 +166,7 @@ fn retained_mode_keeps_recovery_reads_and_commands_require_the_fresh_mode() {
                 .context
                 .property_value_event(&source, "one", MODE, &json!(4), Some(3), true);
             assert_eq!(snapshot(control).mode.value, Some(Mode::Cool));
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             for command in [Command::Temperature(26), Command::Speed(Speed::High)] {
                 assert_eq!(
                     function
@@ -209,7 +209,7 @@ fn mcn04_old_read_and_retained_on_do_not_release_off_barrier() {
         c.announce();
         let control = &c;
         c.peer(mcn04_peer(), |peer| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(control).power.value == Some(true)
@@ -278,7 +278,7 @@ fn mcn04_cloud_read_notification_and_standard_writes() {
     let (rig, listener, cloud) = with_cloud_rig(rig);
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
-            let function = function(&c.context.registry, "one", ID);
+            let function = function(&c.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(&c).power.value == Some(false)
@@ -321,7 +321,7 @@ fn mcn04_replacement_source_reloads_state_and_range_and_rejects_old_notification
         let captured = old.clone();
         let control = &c;
         c.peer(mcn04_peer(), |_| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(control).mode.value == Some(Mode::Cool)
@@ -332,13 +332,13 @@ fn mcn04_replacement_source_reloads_state_and_range_and_rejects_old_notification
         })
         .await;
         until(|| c.context.hub.borrow().session().is_none()).await;
-        let initial = function(&c.context.registry, "one", ID);
+        let initial = function(&c.context, "one", ID);
         assert!(!initial.air_conditioner_constraints_ready());
         let replacement = mcn04_peer();
         replacement.value("one", MCN_STATE, json!("P0_M1_T26_S3_D0"));
         let control = &c;
         c.peer(replacement, |_| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(control).mode.value == Some(Mode::Heat)
@@ -373,7 +373,7 @@ fn mcn04_retained_report_cannot_replace_fresh_state_or_range_diagnostic() {
         c.announce();
         let control = &c;
         c.peer(mcn04_peer(), |_| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && snapshot(control).mode.value == Some(Mode::Cool)
@@ -420,7 +420,7 @@ fn mcn04_new_range_notification_wins_over_old_inflight_read() {
         c.announce();
         let control = &c;
         c.peer(mcn04_peer(), |peer| async move {
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             until(|| {
                 function.air_conditioner_constraints_ready()
                     && work(control).function_observer(ID).is_some()

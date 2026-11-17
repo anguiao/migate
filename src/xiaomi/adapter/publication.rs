@@ -475,14 +475,11 @@ impl SourceHandle {
                         "logical instance replaced".into(),
                     ));
                     old.close();
-                    self.0.registry.remove(old.physical.key());
-                    self.0.registry.insert(source.sink.physical.clone());
                 }
                 OperationKind::Added
                 | OperationKind::ReplacedNative
                 | OperationKind::ReplacedAuthority => {
                     self.0.retire_work(&source.key.id);
-                    self.0.registry.insert(source.sink.physical.clone());
                     // Binding feedback history is retired only when the real
                     // control bindings changed; authority and logical
                     // replacements keep the same DID's raw receipts.

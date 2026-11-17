@@ -10,9 +10,7 @@ fn a_switch_keeps_a_failed_read_and_retry_after_a_new_notification() {
         future::or(peer.run(&listener), async {
             until(|| {
                 cloud_active(&c, "one")
-                    && function(&c.context.registry, "one", "outlet:2")
-                        .snapshot()
-                        .power()
+                    && function(&c.context, "one", "outlet:2").snapshot().power()
                         == Some(Power::Off)
                     && work(&c, "one")
                         .refresh
@@ -32,7 +30,7 @@ fn a_switch_keeps_a_failed_read_and_retry_after_a_new_notification() {
             }
             let binding = PropertyBinding { siid: 2, piid: 1 };
             let one_work = work(&c, "one");
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             let before = cloud_reads(&c, "one", 2);
             one_work.refresh_property("outlet:2", binding);
             c.clock.advance(Duration::from_millis(201));
@@ -85,13 +83,9 @@ fn foreground_cloud_read_failure_preserves_other_control_and_live_notifications(
                 until(|| {
                     cloud_active(&c, "one")
                         && cloud_active(&c, "two")
-                        && function(&c.context.registry, "one", "outlet:2")
-                            .snapshot()
-                            .power()
+                        && function(&c.context, "one", "outlet:2").snapshot().power()
                             == Some(Power::Off)
-                        && function(&c.context.registry, "two", "outlet:2")
-                            .snapshot()
-                            .power()
+                        && function(&c.context, "two", "outlet:2").snapshot().power()
                             == Some(Power::Off)
                         && work(&c, "one")
                             .refresh
@@ -104,7 +98,7 @@ fn foreground_cloud_read_failure_preserves_other_control_and_live_notifications(
                 c.clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
-                let one = function(&c.context.registry, "one", "outlet:2");
+                let one = function(&c.context, "one", "outlet:2");
                 peer.property("one", 2, true);
                 until(|| one.snapshot().power() == Some(Power::On)).await;
                 {
@@ -144,7 +138,7 @@ fn foreground_cloud_read_failure_preserves_other_control_and_live_notifications(
                 assert!(c.context.cloud_candidate("two", true).is_ok());
                 assert!(cloud_active(&c, "one"));
                 assert!(cloud_active(&c, "two"));
-                function(&c.context.registry, "two", "outlet:2")
+                function(&c.context, "two", "outlet:2")
                     .execute(Command::On)
                     .await
                     .unwrap();

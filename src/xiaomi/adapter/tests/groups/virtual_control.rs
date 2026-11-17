@@ -11,7 +11,7 @@ fn terminal_controls_hidden_member_without_publishing_or_redirecting_it() {
         assert!(current.derived.visible_functions(&member).is_empty());
         let before = current.configuration.clone();
         let terminal = c.terminal();
-        let light = function(&c.context.registry, "member-a", "light:2");
+        let light = function(&c.context, "member-a", "light:2");
         for command in ["list", "status member-a"] {
             let report = terminal.handle_line(command).await.unwrap().unwrap();
             assert!(report.contains("Matter: hidden or reserved;"), "{report}");
@@ -55,7 +55,7 @@ fn virtual_group_native_writes_refresh_actual_member_values_and_mode() {
     let rig = super::super::support::repair_rig(1, true);
     block_on(rig.run(|c| async move {
         super::super::support::repair_ready(&c).await;
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         // Native control acceptance does not manufacture actual state. Reads
         // must use the members, including mode when a CT command selects white.
         for (dimension, target, values) in [

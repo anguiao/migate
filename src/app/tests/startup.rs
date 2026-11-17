@@ -116,7 +116,7 @@ fn removing_a_waiting_device_uses_the_committed_configuration() {
             .unwrap()
             .expect("removed device changes the graph");
         app.apply(app.prepare(plan)).unwrap();
-        assert!(app.frozen().is_empty());
+        assert!(app.matter_configuration().entries.is_empty());
         assert!(poll_once(wait.as_mut()).await.is_some());
     });
 }
@@ -133,7 +133,7 @@ fn adding_a_device_during_the_wait_requires_its_initial_result() {
         source.describe(outlet("new-outlet"));
         let plan = app.plan().unwrap().expect("new device changes the graph");
         app.apply(app.prepare(plan)).unwrap();
-        assert_eq!(app.frozen().len(), 2);
+        assert_eq!(app.matter_configuration().entries.len(), 2);
 
         source.read_power(true);
         assert!(poll_once(wait.as_mut()).await.is_none());

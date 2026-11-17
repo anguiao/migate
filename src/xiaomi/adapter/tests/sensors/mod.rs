@@ -22,7 +22,7 @@ fn sensor_peer(temperature: f64, humidity: f64) -> Rc<Peer> {
 }
 
 fn measurement(context: &super::super::state::Context, did: &str, id: &str) -> MeasurementSnapshot {
-    super::support::function(&context.registry, did, id)
+    super::support::function(context, did, id)
         .snapshot()
         .measurement()
         .expect("sensor function")
@@ -58,8 +58,7 @@ fn battery(
     did: &str,
 ) -> Option<crate::device::BatterySnapshot> {
     context
-        .registry
-        .get(&DeviceKey::new("xiaomi", did))
+        .physical(&DeviceKey::new("xiaomi", did))
         .unwrap()
         .battery_snapshot()
 }

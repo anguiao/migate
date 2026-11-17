@@ -18,7 +18,7 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
             })
             .await;
             let key = DeviceKey::new("xiaomi", "one");
-            let old_device = control.context.registry.get(&key).unwrap();
+            let old_device = control.context.physical(&key).unwrap();
             let old = old_device.function("fan:2").unwrap();
             peer.state.borrow_mut().hold_writes = true;
             let sent = old.begin_fan(FanCommand::Speed(60)).unwrap();
@@ -54,15 +54,13 @@ fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&key)
+                    .physical(&key)
                     .is_some_and(|current| !old_device.same_instance(&current))
             })
             .await;
             let replacement = control
                 .context
-                .registry
-                .get(&key)
+                .physical(&key)
                 .unwrap()
                 .function("fan:2")
                 .unwrap();

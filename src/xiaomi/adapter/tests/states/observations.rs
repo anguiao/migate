@@ -24,7 +24,7 @@ fn native_state_initial_reads_and_local_notifications_are_read_only() {
             );
             assert_eq!(state(control, "contact:2:2").source_time, Some(12));
             assert_eq!(
-                function(&control.context.registry, "one", "contact:2:2")
+                function(&control.context, "one", "contact:2:2")
                     .execute(Command::Off)
                     .await,
                 Err(crate::device::CommandError::Unsupported)

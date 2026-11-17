@@ -341,8 +341,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
                         .await;
                         assert_eq!(rig.store.lan().load(&scope, &record.did).unwrap(), None);
                         let physical = context
-                            .registry
-                            .get(&DeviceKey::new("xiaomi", &record.did))
+                            .physical(&DeviceKey::new("xiaomi", &record.did))
                             .unwrap();
                         assert!(
                             matches!(physical.availability(), Availability::Unavailable(_)),

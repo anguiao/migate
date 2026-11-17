@@ -12,7 +12,7 @@ fn certificate_failure_does_not_delay_cloud_directory_or_control() {
     }
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().certs == 1).await;
-        let one = function(&c.context.registry, "one", "outlet:2");
+        let one = function(&c.context, "one", "outlet:2");
         until(|| one.snapshot().availability == Availability::Available).await;
         one.execute(Command::On).await.unwrap();
         assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
@@ -45,7 +45,7 @@ fn expired_local_certificate_revokes_only_the_local_candidate() {
             control.clock.advance(by);
             until(|| control.context.local_candidate("one", false).is_err()).await;
             assert!(control.context.cloud_candidate("one", true).is_ok());
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -137,7 +137,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             })
             .await;
             let before = control.cloud.lock().unwrap().certs;
-            function(&control.context.registry, "one", "outlet:2")
+            function(&control.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -151,7 +151,7 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
             })
             .await;
             assert_eq!(
-                function(&control.context.registry, "one", "outlet:2")
+                function(&control.context, "one", "outlet:2")
                     .snapshot()
                     .availability,
                 Availability::Available

@@ -8,8 +8,8 @@ fn same_value_notification_invalidates_an_inflight_read() {
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "two"]).await;
-            let one = function(&control.context.registry, "one", "outlet:2");
-            let two = function(&control.context.registry, "two", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
+            let two = function(&control.context, "two", "outlet:2");
             peer.state.borrow_mut().hold_reads = true;
             let reads = peer.count("get", "one", 2);
             control.context.directory.borrow().devices["one"]
@@ -39,7 +39,7 @@ fn retained_outlet_snapshot_neither_replaces_state_nor_invalidates_a_read() {
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one"]).await;
-            let one = function(&control.context.registry, "one", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
             let work = control.context.directory.borrow().devices["one"]
                 .work
                 .clone()
@@ -67,8 +67,8 @@ fn notification_after_write_preserves_state_and_advances_the_channel_fifo() {
         let control = &c;
         c.peer(peer, |peer| async move {
             initialized(control, &peer, &["one", "two"]).await;
-            let one = function(&control.context.registry, "one", "outlet:2");
-            let two = function(&control.context.registry, "two", "outlet:2");
+            let one = function(&control.context, "one", "outlet:2");
+            let two = function(&control.context, "two", "outlet:2");
             peer.state.borrow_mut().hold_writes = true;
             let mut first = Box::pin(one.execute(Command::On));
             let mut second = Box::pin(one.execute(Command::Toggle));
@@ -142,15 +142,14 @@ fn virtual_groups_follow_typed_members_and_new_relations_without_group_reads() {
             until(|| {
                 ["group-1", "group-2"].iter().all(|did| {
                     c.context
-                        .registry
-                        .get(&DeviceKey::new("xiaomi", *did))
+                        .physical(&DeviceKey::new("xiaomi", *did))
                         .is_some()
                 })
             })
             .await;
             until(|| cloud_active(&c, "one") && cloud_active(&c, "two")).await;
-            let first = function(&c.context.registry, "group-1", "light:2");
-            let second = function(&c.context.registry, "group-2", "light:2");
+            let first = function(&c.context, "group-1", "light:2");
+            let second = function(&c.context, "group-2", "light:2");
             until(|| {
                 first.snapshot().power() == Some(Power::Off)
                     && second.snapshot().power() == Some(Power::Off)
@@ -276,7 +275,7 @@ fn virtual_group_reconnect_reads_members_even_when_property_subscriptions_fail()
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
             assert!(member.observer().is_none());
-            let group = function(&c.context.registry, "group-1", "light:2");
+            let group = function(&c.context, "group-1", "light:2");
             assert_eq!(group.snapshot().power(), Some(Power::Off));
             let key = ("member-a".to_string(), 2, 1);
             let reads = || {

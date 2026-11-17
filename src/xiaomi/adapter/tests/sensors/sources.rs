@@ -175,8 +175,7 @@ fn a_read_only_device_is_available_without_notifications_and_recovers_them() {
             assert_eq!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "sensor"))
+                    .physical(&DeviceKey::new("xiaomi", "sensor"))
                     .unwrap()
                     .availability(),
                 Availability::Available
@@ -257,8 +256,7 @@ fn losing_the_notification_path_retains_readings_and_recovers() {
             assert_eq!(
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "sensor"))
+                    .physical(&DeviceKey::new("xiaomi", "sensor"))
                     .unwrap()
                     .availability(),
                 Availability::Available

@@ -41,7 +41,7 @@ fn standard_miot_direct_poll_recovers_an_external_fan_change() {
                 && bindings
                     .iter()
                     .all(|binding| !work.refresh.borrow().contains("fan:2", *binding))
-                && function(&control.context.registry, did, "fan:2")
+                && function(&control.context, did, "fan:2")
                     .snapshot()
                     .fan()
                     .unwrap()
@@ -56,7 +56,7 @@ fn standard_miot_direct_poll_recovers_an_external_fan_change() {
         control.clock.advance(Duration::from_secs(17));
         control.clock.automatic.store(true, Ordering::Relaxed);
         until(|| {
-            function(&control.context.registry, did, "fan:2")
+            function(&control.context, did, "fan:2")
                 .snapshot()
                 .fan()
                 .unwrap()
@@ -103,7 +103,7 @@ fn p5c_direct_fan_command_reads_feedback_once_after_all_steps() {
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|control| {
         Box::pin(async move {
-            let fan = function(&control.context.registry, did, "fan:2");
+            let fan = function(&control.context, did, "fan:2");
             until(|| fan.snapshot().fan().unwrap().speed.value == Some(40)).await;
             let work = control.context.directory.borrow().devices[did]
                 .work

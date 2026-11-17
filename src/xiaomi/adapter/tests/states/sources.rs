@@ -204,7 +204,7 @@ fn native_state_mixed_proxy_does_not_borrow_control_eligibility_or_claim_physica
         .insert(("proxy.state".into(), 42, 2), json!(false));
     block_on(rig.run(|c| async move {
         until(|| {
-            function(&c.context.registry, "proxy.state", "contact:42:2")
+            function(&c.context, "proxy.state", "contact:42:2")
                 .snapshot()
                 .state_sensor()
                 .unwrap()
@@ -242,8 +242,7 @@ fn native_state_mixed_proxy_does_not_borrow_control_eligibility_or_claim_physica
         );
         assert_eq!(
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "proxy.state"))
+                .physical(&DeviceKey::new("xiaomi", "proxy.state"))
                 .unwrap()
                 .availability(),
             Availability::Available

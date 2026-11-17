@@ -19,7 +19,7 @@ fn unsent_step_is_revalidated_after_a_range_change_at_the_transport_boundary() {
     block_on(rig().run(|c| async move {
         let wire = Rc::new(Wire::default());
         let (_, driver) = local(&c, wire.clone());
-        let function = function(&c.context.registry, "one", "air-conditioner:3");
+        let function = function(&c.context, "one", "air-conditioner:3");
         function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Cool), Some(1), 1);
         future::or(
             async {
@@ -53,7 +53,7 @@ fn feedback_after_mode_receipt_restricts_the_next_unsent_step() {
         let wire = Rc::new(Wire::default());
         wire.allow(usize::MAX);
         let (_, driver) = local(&c, wire.clone());
-        let function = function(&c.context.registry, "one", "air-conditioner:3");
+        let function = function(&c.context, "one", "air-conditioner:3");
         function.observe_air_conditioner(AirConditionerValue::Power(true), Some(1), 1);
         function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Cool), Some(1), 1);
         function.set_air_conditioner_constraints(
@@ -118,7 +118,7 @@ fn route_switch_reselects_only_an_unsent_air_conditioner_step() {
                 wire.allow(1);
             }
             let (handle, driver) = local(&c, wire.clone());
-            let function = function(&c.context.registry, "one", "air-conditioner:3");
+            let function = function(&c.context, "one", "air-conditioner:3");
             function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Cool), Some(1), 1);
             future::or(
                 async {
@@ -202,7 +202,7 @@ fn possibly_sent_failed_air_conditioner_step_is_not_replayed_or_followed() {
         let wire = Rc::new(Wire::default());
         wire.allow(1);
         let (handle, driver) = local(&c, wire.clone());
-        let function = function(&c.context.registry, "one", "air-conditioner:3");
+        let function = function(&c.context, "one", "air-conditioner:3");
         function.observe_air_conditioner(AirConditionerValue::Mode(Mode::Cool), Some(1), 1);
         future::or(
             async {

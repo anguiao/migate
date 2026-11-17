@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     configuration::DerivedConfiguration,
-    device::{Availability, DeviceRegistry, PhysicalDevice},
+    device::{Availability, PhysicalDevice},
     storage::Store,
     xiaomi::{auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
@@ -64,7 +64,6 @@ impl XiaomiAdapter {
             .as_ref()
             .and_then(|record| stored.scope.clone().filter(|scope| scope.uid == record.uid));
         let revocations = store.devices().load_revocations()?;
-        let registry = DeviceRegistry::new();
         let mut restored = Vec::new();
         let mut staged = Vec::new();
         let mut restored_relations = Vec::new();
@@ -177,7 +176,6 @@ impl XiaomiAdapter {
             )),
             hub: RefCell::new(Hub::default()),
             graph: RefCell::new(Rc::new(graph)),
-            registry,
             store,
             tasks: TaskSet::default(),
             configuration_changed: Rc::new(Event::new()),
@@ -208,7 +206,6 @@ impl XiaomiAdapter {
                 context.configuration_changed.clone(),
                 light_write,
             ));
-            context.registry.insert(sink.physical.clone());
             let slot = DeviceSlot {
                 work: Some(work.clone()),
                 ..Default::default()

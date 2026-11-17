@@ -23,7 +23,7 @@ fn unavailable_first_admission_has_a_baseline_and_readmission_drops_the_old_hist
             .store(false, std::sync::atomic::Ordering::Relaxed);
         c.cloud.lock().unwrap().property_status = 503;
         assert!(
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .is_err()
@@ -124,7 +124,7 @@ fn repeated_directory_and_property_feedback_keep_the_last_real_switch_reason() {
             until(|| control.cloud.lock().unwrap().infos > count).await;
             peer.notify("one", 2, true);
             until(|| {
-                function(&control.context.registry, "one", "outlet:2")
+                function(&control.context, "one", "outlet:2")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -303,7 +303,7 @@ fn non_member_function_handover_preserves_the_light_groups_reason() {
             assert!(member.function_observer("humidity:30:1008").is_none());
             c.cloud.lock().unwrap().property_status = 503;
             assert!(
-                function(&c.context.registry, "member-b", "light:2")
+                function(&c.context, "member-b", "light:2")
                     .execute(Command::Off)
                     .await
                     .is_err()
@@ -352,7 +352,7 @@ fn actual_member_light_handover_records_the_group_even_when_its_summary_stays_cl
                 .await;
                 control.cloud.lock().unwrap().property_status = 503;
                 assert!(
-                    function(&control.context.registry, "member-b", "light:2")
+                    function(&control.context, "member-b", "light:2")
                         .execute(Command::Off)
                         .await
                         .is_err()

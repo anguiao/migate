@@ -153,17 +153,10 @@ fn a_slow_periodic_read_does_not_block_another_device() {
             .clone();
         assert_ne!(first, second);
         releases[second.as_str()].send(()).unwrap();
-        until(|| {
-            function(&c.context.registry, &second, "outlet:2")
-                .snapshot()
-                .power()
-                == Some(Power::On)
-        })
-        .await;
+        until(|| function(&c.context, &second, "outlet:2").snapshot().power() == Some(Power::On))
+            .await;
         assert_eq!(
-            function(&c.context.registry, &first, "outlet:2")
-                .snapshot()
-                .power(),
+            function(&c.context, &first, "outlet:2").snapshot().power(),
             Some(Power::Off)
         );
         releases[first.as_str()].send(()).unwrap();

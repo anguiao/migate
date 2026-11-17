@@ -22,7 +22,7 @@ fn route_change_reselects_only_an_unsent_step_and_records_each_path() {
                 wire.allow(1);
             }
             let (handle, driver) = local(&c, wire.clone());
-            let fan = function(&c.context.registry, "one", "fan:2");
+            let fan = function(&c.context, "one", "fan:2");
             future::or(
                 async {
                     driver.run(|_| {}).await.unwrap();
@@ -119,7 +119,7 @@ fn possibly_sent_rejected_step_is_never_replayed_or_followed() {
         let wire = Rc::new(Wire::default());
         wire.allow(1);
         let (handle, driver) = local(&c, wire.clone());
-        let fan = function(&c.context.registry, "one", "fan:2");
+        let fan = function(&c.context, "one", "fan:2");
         future::or(
             async {
                 driver.run(|_| {}).await.unwrap();
@@ -164,7 +164,7 @@ fn unsent_speed_uses_the_latest_power_observation_at_the_send_boundary() {
         block_on(fan_rig().run(|c| async move {
             let wire = Rc::new(Wire::default());
             let (_, driver) = local(&c, wire.clone());
-            let fan = function(&c.context.registry, "one", "fan:2");
+            let fan = function(&c.context, "one", "fan:2");
             fan.observe_fan(FanValue::Power(!latest), Some(1), 1);
             future::or(
                 async {
@@ -208,7 +208,7 @@ fn transport_failure_after_fan_bytes_is_reported_as_uncertain() {
         let wire = Rc::new(Wire::default());
         wire.allow(1);
         let (_, driver) = local(&c, wire.clone());
-        let fan = function(&c.context.registry, "one", "fan:2");
+        let fan = function(&c.context, "one", "fan:2");
         future::zip(
             async {
                 let _ = driver.run(|_| {}).await;

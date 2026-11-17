@@ -14,7 +14,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
     block_on(rig.run(|c| async move {
         let key = DeviceKey::new("xiaomi", "one");
         until(|| {
-            function(&c.context.registry, "one", "light:2")
+            function(&c.context, "one", "light:2")
                 .snapshot()
                 .lighting()
                 .unwrap()
@@ -29,7 +29,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
             .unwrap();
         let before = c.publication.current().configuration.clone();
         let old = before.device(&key).unwrap().clone();
-        let old_physical = c.context.registry.get(&key).unwrap();
+        let old_physical = c.context.physical(&key).unwrap();
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
         db.execute_batch(
             "CREATE TRIGGER fail_state_upgrade BEFORE UPDATE ON bridge_configuration
@@ -80,8 +80,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
         assert_eq!(c.store.devices().load_configuration().unwrap(), *before);
         assert!(
             c.context
-                .registry
-                .get(&key)
+                .physical(&key)
                 .unwrap()
                 .same_instance(&old_physical)
         );
@@ -100,8 +99,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
         .await;
         until(|| {
             c.context
-                .registry
-                .get(&key)
+                .physical(&key)
                 .and_then(|physical| physical.function("contact:42:2"))
                 .is_some_and(|function| {
                     function.snapshot().state_sensor().unwrap().active == Some(false)
@@ -145,7 +143,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
         let app =
             Rc::new(crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap());
         assert_eq!(app.current().configuration, current);
-        let restored_physical = restored.context.registry.get(&key).unwrap();
+        let restored_physical = restored.context.physical(&key).unwrap();
         assert_eq!(
             restored_physical
                 .function("contact:42:2")

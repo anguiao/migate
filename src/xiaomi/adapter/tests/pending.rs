@@ -371,7 +371,7 @@ fn pending_removed_device_version_overflow_survives_without_a_slot_until_readmis
             assert_reasons(&status, "one", &[expected]);
             assert!(status.devices.is_empty());
             assert!(!c.context.directory.borrow().devices.contains_key("one"));
-            assert!(c.context.registry.get(&key).is_none());
+            assert!(c.context.physical(&key).is_none());
         }
 
         let synchronized = c.context.configuration_changed.listen();
@@ -400,7 +400,7 @@ fn pending_removed_device_version_overflow_survives_without_a_slot_until_readmis
         assert!(c.context.diagnostics().pending.is_empty());
         c.publication.apply(c.publication.prepare(plan)).unwrap();
         assert!(c.context.diagnostics().pending.is_empty());
-        assert!(c.context.registry.get(&key).is_some());
+        assert!(c.context.physical(&key).is_some());
         assert_eq!(
             c.publication
                 .current()

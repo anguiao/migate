@@ -32,10 +32,10 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
         .unwrap();
     let (restored, _) = rig.reopen_adapter();
     let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
-    assert_eq!(app.frozen().len(), 1);
+    assert_eq!(app.matter_configuration().entries.len(), 1);
     let plan = app.plan().unwrap().unwrap();
     app.apply(app.prepare(plan)).unwrap();
-    assert_eq!(app.frozen().len(), 2);
+    assert_eq!(app.matter_configuration().entries.len(), 2);
     let saved = rig.store.devices().load_configuration().unwrap();
     assert_eq!(saved.device(&neighbor.key), Some(&neighbor));
     assert_eq!(
@@ -271,7 +271,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
             Some(&retained)
         );
         assert_eq!(
-            function(&c.context.registry, "group-1", "light:2")
+            function(&c.context, "group-1", "light:2")
                 .description()
                 .temperature_interval(),
             Some(crate::device::TemperatureInterval::new(3000, 6000).unwrap())
@@ -433,8 +433,13 @@ fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay(
         .unwrap();
     let (restored, _) = rig.reopen_adapter();
     let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
-    assert_eq!(app.frozen().len(), 1);
-    assert!(!app.frozen()[0].device.description().has_battery());
+    assert_eq!(app.matter_configuration().entries.len(), 1);
+    assert!(
+        !app.matter_configuration().entries[0]
+            .device
+            .description()
+            .has_battery()
+    );
     let plan = app.plan().unwrap().unwrap();
     assert!(
         plan.configuration
@@ -460,14 +465,24 @@ fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay(
     assert!(app.apply(prepared).is_err());
     assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
     assert_eq!(*app.current().configuration, before);
-    assert_eq!(app.frozen().len(), 1);
-    assert!(!app.frozen()[0].device.description().has_battery());
+    assert_eq!(app.matter_configuration().entries.len(), 1);
+    assert!(
+        !app.matter_configuration().entries[0]
+            .device
+            .description()
+            .has_battery()
+    );
     assert!(app.failure().is_some());
     assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
     db.execute_batch("DROP TRIGGER fail_startup").unwrap();
     let prepared = app.prepare(app.plan().unwrap().unwrap());
     app.apply(prepared).unwrap();
-    assert!(app.frozen()[0].device.description().has_battery());
+    assert!(
+        app.matter_configuration().entries[0]
+            .device
+            .description()
+            .has_battery()
+    );
     assert!(
         app.current()
             .configuration
@@ -517,9 +532,9 @@ fn restored_topology_is_the_selected_scope_and_published_intersection() {
     block_on(poll_once(ready.wait()))
         .expect("cache readiness is synchronous")
         .unwrap();
-    let registry = &source.context.registry;
-    assert_eq!(registry.list().len(), 1);
-    let physical = registry.get(&DeviceKey::new("xiaomi", "kept")).unwrap();
+    let context = &source.context;
+    assert_eq!(context.physical_devices().len(), 1);
+    let physical = context.physical(&DeviceKey::new("xiaomi", "kept")).unwrap();
     assert_eq!(physical.functions().len(), 3);
     assert_eq!(physical.description().label(), "saved name");
     for function in physical.functions() {
@@ -565,9 +580,9 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
     for _ in 0..2 {
         let (source, ready) = rig.reopen_adapter();
         block_on(poll_once(ready.wait())).unwrap().unwrap();
-        let registry = &source.context.registry;
-        assert_eq!(registry.list().len(), 3);
-        assert!(registry.get(&single.key).is_some());
+        let context = &source.context;
+        assert_eq!(context.physical_devices().len(), 3);
+        assert!(context.physical(&single.key).is_some());
         assert_eq!(
             rig.store
                 .devices()
@@ -579,7 +594,7 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
             3
         );
         for group in &groups {
-            assert!(registry.get(group.device().key()).is_some());
+            assert!(context.physical(group.device().key()).is_some());
             assert!(
                 source
                     .context
@@ -615,25 +630,24 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| {
-                    control.context.registry.list().len() == 3
+                    control.context.physical_devices().len() == 3
                         && control
                             .context
-                            .registry
-                            .list()
+                            .physical_devices()
                             .iter()
                             .all(|physical| physical.availability() == Availability::Available)
                 })
                 .await;
-                let registry = &control.context.registry;
+                let context = &control.context;
                 assert_eq!(
-                    registry
-                        .get(&DeviceKey::new("xiaomi", "multi"))
+                    context
+                        .physical(&DeviceKey::new("xiaomi", "multi"))
                         .unwrap()
                         .functions()
                         .len(),
                     3
                 );
-                let one = function(registry, "one", "outlet:2");
+                let one = function(context, "one", "outlet:2");
                 assert_eq!(one.snapshot().power(), Some(Power::Unknown));
                 assert_eq!(
                     one.execute(Command::Toggle).await,
@@ -654,17 +668,17 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
                 peer.notify("two", 2, true);
                 peer.notify("multi", 4, true);
                 until(|| {
-                    function(registry, "two", "outlet:2").snapshot().power() == Some(Power::On)
-                        && function(registry, "multi", "outlet:4").snapshot().power()
+                    function(context, "two", "outlet:2").snapshot().power() == Some(Power::On)
+                        && function(context, "multi", "outlet:4").snapshot().power()
                             == Some(Power::On)
                 })
                 .await;
                 assert_eq!(
-                    function(registry, "multi", "outlet:3").snapshot().power(),
+                    function(context, "multi", "outlet:3").snapshot().power(),
                     Some(Power::Unknown)
                 );
                 assert_eq!(
-                    function(registry, "multi", "outlet:9").snapshot().power(),
+                    function(context, "multi", "outlet:9").snapshot().power(),
                     Some(Power::Unknown)
                 );
             })
@@ -677,7 +691,7 @@ fn multiple_devices_publish_before_initial_reads_and_unknown_online_commands_wor
 fn cached_build_dropped_before_run_releases_its_context_and_closes_commands() {
     let rig = Rig::new(true, &["one"]);
     let weak = Rc::downgrade(&rig.source.context);
-    let function = function(&rig.source.context.registry, "one", "outlet:2");
+    let function = function(&rig.source.context, "one", "outlet:2");
     drop(rig);
     assert!(weak.upgrade().is_none());
     assert_eq!(

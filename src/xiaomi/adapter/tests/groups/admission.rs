@@ -47,8 +47,7 @@ fn native_group_description_restarts_after_its_loading_token_is_retired() {
         c.context.request_sync();
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .physical(&DeviceKey::new("xiaomi", "group-1"))
                 .is_some()
         })
         .await;
@@ -64,7 +63,7 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let light = function(&c.context.registry, "group-1", "light:2");
+        let light = function(&c.context, "group-1", "light:2");
         c.cloud.lock().unwrap().property_code = -704_012_904;
         assert!(light.execute(Command::Off).await.is_err());
         assert!(matches!(
@@ -122,7 +121,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
     }
     block_on(rig.run(|c| async move {
         c.announce();
-        until(|| c.context.registry.get(&DeviceKey::new("xiaomi", "group-1")).is_some()
+        until(|| c.context.physical(&DeviceKey::new("xiaomi", "group-1")).is_some()
             && c.context.graph.borrow().rules.get("group-1").is_some_and(|rule|
                 rule.members.iter().any(|member| member.device.id == "one"))).await;
         let key = DeviceKey::new("xiaomi", "group-1");
@@ -138,7 +137,7 @@ fn native_group_publication_preserves_complete_configuration_on_storage_failure(
         assert_eq!(old.groups[0].members, ["one"]);
         let member = DeviceKey::new("xiaomi", "one");
         assert!(!old.derive().published.contains(&member), "a member of a published group must be hidden");
-        assert!(c.publication.current().published.get(&member).is_none());
+        assert!(c.publication.current().published_device(&member).is_none());
 
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
         db.execute_batch("CREATE TRIGGER fail_configuration BEFORE UPDATE ON bridge_configuration WHEN NEW.json LIKE '%member-new%' BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
@@ -205,8 +204,7 @@ fn new_group_does_not_wait_for_a_held_member_description() {
         .await;
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .physical(&DeviceKey::new("xiaomi", "group-1"))
                 .is_some()
         })
         .await;
@@ -278,8 +276,7 @@ fn missing_description_member_group_is_controllable_with_unknown_state() {
         c.announce();
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .physical(&DeviceKey::new("xiaomi", "group-1"))
                 .is_some()
         })
         .await;
@@ -351,8 +348,7 @@ fn repeated_and_failed_directories_keep_the_admitted_native_group() {
         c.announce();
         until(|| {
             c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "group-1"))
+                .physical(&DeviceKey::new("xiaomi", "group-1"))
                 .is_some()
         })
         .await;

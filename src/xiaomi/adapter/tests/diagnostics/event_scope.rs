@@ -22,8 +22,7 @@ async fn cloud_ready(c: &Control, dids: &[&str]) {
         dids.iter().all(|did| {
             c.context.cloud_candidate(did, true).is_ok()
                 && c.context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", *did))
+                    .physical(&DeviceKey::new("xiaomi", *did))
                     .unwrap()
                     .functions()[0]
                     .snapshot()
@@ -102,7 +101,7 @@ fn cloud_write_device_errors_leave_other_devices_pending_until_their_own_event()
             pending_offline(&c, "two");
             c.cloud.lock().unwrap().property_code = code;
             assert!(matches!(
-                function(&c.context.registry, "one", "outlet:2")
+                function(&c.context, "one", "outlet:2")
                     .execute(Command::On)
                     .await,
                 Err(crate::device::CommandError::Rejected(_))
@@ -169,7 +168,7 @@ fn first_http_pause_processes_every_device_and_preserves_the_first_backoff() {
         cloud_ready(&c, &["one", "two"]).await;
         c.cloud.lock().unwrap().property_status = 503;
         assert!(
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .is_err()

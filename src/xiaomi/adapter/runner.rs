@@ -107,9 +107,6 @@ impl XiaomiAdapter {
 impl Drop for XiaomiAdapter {
     fn drop(&mut self) {
         self.context.stop();
-        for physical in self.context.registry.list() {
-            self.context.registry.remove(physical.key());
-        }
         for slot in self.context.directory.borrow().devices.values() {
             if let Some(loading) = &slot.loading {
                 loading.life.close();

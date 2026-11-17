@@ -8,7 +8,7 @@ fn curtain_rejection_and_timeout_are_reported_without_replay() {
         let control = &c;
         c.peer(peer(), |peer| async move {
             settled(control).await;
-            let function = function(&control.context.registry, "one", "curtain:2");
+            let function = function(&control.context, "one", "curtain:2");
             let before = function.snapshot().curtain();
             peer.state.borrow_mut().hold_writes = true;
             let rejected = function
@@ -57,8 +57,7 @@ fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replaceme
             peer.state.borrow_mut().hold_writes = true;
             let old_device = control
                 .context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
+                .physical(&DeviceKey::new("xiaomi", "one"))
                 .unwrap();
             let old = old_device.function("curtain:2").unwrap();
             let sent = old.begin_curtain(CurtainCommand::Target(15.0)).unwrap();
@@ -83,8 +82,7 @@ fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replaceme
             let replacement = loop {
                 let current = control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "one"))
+                    .physical(&DeviceKey::new("xiaomi", "one"))
                     .unwrap();
                 if !old_device.same_instance(&current) {
                     break current;
@@ -143,7 +141,7 @@ fn curtain_cloud_failure_and_timeout_do_not_retry_or_infer_motion() {
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             settled(&c).await;
-            let function = function(&c.context.registry, "one", "curtain:2");
+            let function = function(&c.context, "one", "curtain:2");
             let before = function.snapshot().curtain();
             c.cloud.lock().unwrap().property_code = -704;
             let rejected = function

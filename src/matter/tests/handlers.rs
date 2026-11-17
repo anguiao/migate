@@ -165,7 +165,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let entry = app.frozen().remove(0);
+    let entry = app.matter_configuration().entries.remove(0);
     let stored = app
         .current()
         .configuration
@@ -257,10 +257,10 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
 
         let (single, mut single_receivers) = super::physical("single", false);
         let (multi, mut receivers) = super::physical("multi", true);
-        let multi_entry = entry(&multi, 4, &[("outlet_1", 5), ("outlet_2", 6), ("usb", 7)]);
-        let stored = multi_entry.identity.clone();
+        let multi_entry = || entry(&multi, 4, &[("outlet_1", 5), ("outlet_2", 6), ("usb", 7)]);
+        let stored = multi_entry().identity;
         {
-            let handler = model_handler(vec![single_entry(&single), multi_entry.clone()]);
+            let handler = model_handler(vec![single_entry(&single), multi_entry()]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -403,7 +403,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
         rejoined.set_availability(Availability::Available);
         rejoined.functions()[0].observe(false);
         {
-            let handler = model_handler(vec![single_entry(&rejoined), multi_entry]);
+            let handler = model_handler(vec![single_entry(&rejoined), multi_entry()]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -524,7 +524,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
         app.apply(app.prepare(app.plan().unwrap().unwrap()))
             .unwrap();
         let first = source.physical.as_ref().unwrap();
-        let second = app.current().published.get(&second_key).unwrap();
+        let second = app.current().published_device(&second_key).unwrap();
         let first_stored = app
             .current()
             .configuration
@@ -537,7 +537,11 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
             .device(&second_key)
             .unwrap()
             .clone();
-        let handler = crate::matter::model::handler_from(app.frozen(), rand::rng(), app.clone());
+        let handler = crate::matter::model::handler_from(
+            app.matter_configuration().entries,
+            rand::rng(),
+            app.clone(),
+        );
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         write_label(&handler, &im, first_stored.endpoint, "Renamed first")
             .await

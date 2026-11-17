@@ -84,9 +84,9 @@ fn composite_controls_route_commands_and_feedback_to_their_own_bindings() {
             let control = &c;
             c.peer(peer, |peer| async move {
                 until(|| control.context.active_notification("one") == Some(PathKind::Local)).await;
-                let first = function(&control.context.registry, "one", "light:2");
-                let fan = function(&control.context.registry, "one", "fan:3");
-                let second = function(&control.context.registry, "one", "light:4");
+                let first = function(&control.context, "one", "light:2");
+                let fan = function(&control.context, "one", "fan:3");
+                let second = function(&control.context, "one", "light:4");
                 until(|| {
                     first.snapshot().power().is_some()
                         && fan.snapshot().fan().unwrap().speed.value.is_some()
@@ -201,8 +201,8 @@ fn stopping_one_light_does_not_cancel_another_lights_queued_action() {
             }
             let control = &c;
             c.peer(peer, |peer| async move {
-                let first = function(&control.context.registry, "one", "light:2");
-                let second = function(&control.context.registry, "one", "light:4");
+                let first = function(&control.context, "one", "light:2");
+                let second = function(&control.context, "one", "light:4");
                 until(|| {
                     first
                         .snapshot()
@@ -282,7 +282,7 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
                 })
                 .await;
                 let key = DeviceKey::new("xiaomi", "one");
-                let physical = control.context.registry.get(&key).unwrap();
+                let physical = control.context.physical(&key).unwrap();
                 let before = control.publication.current();
                 let old = before.configuration.device(&key).unwrap().clone();
                 assert!(
@@ -328,7 +328,7 @@ fn core_metadata_can_change_without_rebuilding_source_or_matter() {
                 .await;
                 let current = control.publication.current();
                 let new = current.configuration.device(&key).unwrap();
-                assert!(physical.same_instance(&control.context.registry.get(&key).unwrap()));
+                assert!(physical.same_instance(&control.context.physical(&key).unwrap()));
                 assert_eq!(new.functions, old.functions);
                 assert_eq!(new.configuration_version, old.configuration_version);
                 assert_eq!(
@@ -408,7 +408,7 @@ fn another_functions_ready_notification_does_not_suppress_fan_feedback() {
             .await;
             assert!(work.function_observer("fan:5").is_none());
             let before = peer.count("get", "one", 5);
-            function(&control.context.registry, "one", "fan:5")
+            function(&control.context, "one", "fan:5")
                 .begin_fan(FanCommand::Power(false))
                 .unwrap()
                 .accepted()

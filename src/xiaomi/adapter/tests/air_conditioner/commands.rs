@@ -11,7 +11,7 @@ fn sent_temperature_settles_after_feedback_change(change_mode: bool) {
                     && work(control).function_observer(ID).is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             function.set_air_conditioner_constraints(restrictions(vec![24, 26]));
             peer.state.borrow_mut().hold_writes = true;
             let action = function
@@ -58,7 +58,7 @@ fn feedback_before_mode_receipt_restricts_the_unsent_combination_step() {
                     && work(control).function_observer(ID).is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             function.set_air_conditioner_constraints(restrictions(vec![24, 26]));
             peer.state.borrow_mut().hold_writes = true;
             let action = function
@@ -100,7 +100,7 @@ fn off_still_interrupts_an_in_flight_temperature_and_waits_for_its_receipt() {
                     && work(control).function_observer(ID).is_some()
             })
             .await;
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             let original = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let temperature = function
@@ -153,7 +153,7 @@ fn local_standard_reads_notifications_and_ordered_writes_keep_receipts_separate(
                             && status.ready)
                 );
             }
-            let function = function(&control.context.registry, "one", ID);
+            let function = function(&control.context, "one", ID);
             let before = function.snapshot();
             peer.state.borrow_mut().hold_writes = true;
             let action = function

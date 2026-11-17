@@ -6,7 +6,7 @@ use crate::{
     RuntimeError,
     app::EffectiveConfiguration,
     device::{
-        CommandReceiver, CommandRequest, DeviceKey, DeviceRegistry, DeviceRequest, PhysicalDevice,
+        CommandReceiver, CommandRequest, DeviceKey, DeviceRequest, PhysicalDevice,
         PhysicalDeviceDescription,
     },
     storage::{DeviceStore, StorageError, Store},
@@ -77,7 +77,7 @@ pub(super) fn saved_description(store: &Store, key: &DeviceKey) -> PhysicalDevic
         .clone()
 }
 
-pub(super) fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<View, StorageError> {
+pub(super) fn view(devices: &[PhysicalDevice], store: &DeviceStore) -> Result<View, StorageError> {
     let configuration = store.load_configuration()?;
     let accessible_descriptions = configuration
         .descriptions
@@ -85,14 +85,10 @@ pub(super) fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<Vie
         .map(|source| source.key.clone())
         .collect();
     let derived = configuration.derive();
-    let configurable_devices = registry
-        .list()
+    let configurable_devices = devices.iter().map(|device| device.key().clone()).collect();
+    let entries = devices
         .iter()
-        .map(|device| device.key().clone())
-        .collect();
-    let entries = registry
-        .list()
-        .into_iter()
+        .cloned()
         .map(|physical| {
             let native = configuration
                 .device(physical.key())
@@ -114,7 +110,6 @@ pub(super) fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<Vie
             configuration: Rc::new(configuration),
             derived: derived.into(),
             entries,
-            published: registry.clone(),
         }),
         pending: false,
         failure: None,
@@ -124,37 +119,37 @@ pub(super) fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<Vie
 }
 
 pub(crate) async fn handle_line(
-    registry: &DeviceRegistry,
+    devices: &[PhysicalDevice],
     store: &DeviceStore,
     status: &AuthStatus,
     line: &str,
 ) -> Result<Option<String>, StorageError> {
-    handle_line_with_diagnostics(registry, store, status, diagnostics(), line).await
+    handle_line_with_diagnostics(devices, store, status, diagnostics(), line).await
 }
 
 /// Exercise formatting with an explicit diagnostic input, without a live source.
 pub(crate) async fn handle_line_with_diagnostics(
-    registry: &DeviceRegistry,
+    devices: &[PhysicalDevice],
     store: &DeviceStore,
     status: &AuthStatus,
     diagnostics: AdapterStatus,
     line: &str,
 ) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
-    view(registry, store)?
+    view(devices, store)?
         .handle_words(&words, status, || diagnostics)
         .await
 }
 
 pub(super) async fn run_input(
-    registry: &DeviceRegistry,
+    devices: &[PhysicalDevice],
     store: &DeviceStore,
     status: &AuthStatus,
     input: impl futures_lite::io::AsyncBufRead + Unpin,
     output: impl futures_lite::io::AsyncWrite + Unpin,
 ) -> Result<(), RuntimeError> {
     read_commands(input, output, async |line| {
-        handle_line(registry, store, status, line).await
+        handle_line(devices, store, status, line).await
     })
     .await
 }
@@ -174,8 +169,7 @@ pub(crate) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     add_device(&store, &device.description());
-    let registry = DeviceRegistry::new();
-    registry.insert(device.clone());
+    let devices = vec![device.clone()];
     let line = if matches!(line, "on" | "off") {
         format!(
             "{line} {} {}",
@@ -185,7 +179,7 @@ pub(crate) async fn terminal_command(device: &PhysicalDevice, line: &str) -> Opt
     } else {
         line.into()
     };
-    handle_line(&registry, &store.devices(), &status, &line)
+    handle_line(&devices, &store.devices(), &status, &line)
         .await
         .unwrap()
 }

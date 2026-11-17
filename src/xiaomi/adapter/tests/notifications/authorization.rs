@@ -15,7 +15,7 @@ fn restored_home_receives_ha_notifications_after_mijia_rejection() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             peer.property("one", 2, true);
             until(|| one.snapshot().power() == Some(Power::On)).await;
             assert_eq!(c.cloud.lock().unwrap().homes, 0);
@@ -34,7 +34,7 @@ fn http_pause_keeps_cloud_notifications_and_online_reports_cannot_resume_http() 
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             c.cloud.lock().unwrap().property_status = 503;
             assert!(one.execute(Command::On).await.is_err());
             assert!(c.context.credentials.borrow().http_paused());
@@ -80,7 +80,7 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
         block_on(rig.run(|c| async move {
             future::or(peer.run(&listener), async {
                 until(|| cloud_active(&c, "one")).await;
-                let one = function(&c.context.registry, "one", "outlet:2");
+                let one = function(&c.context, "one", "outlet:2");
                 let handle = c
                     .context
                     .notifications
@@ -191,7 +191,7 @@ fn connect_and_suback_authorization_share_refresh_and_preserve_local_control() {
                         control.context.diagnostics().auth.ha,
                         crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
                     ));
-                    function(&control.context.registry, "one", "outlet:2")
+                    function(&control.context, "one", "outlet:2")
                         .execute(Command::On)
                         .await
                         .unwrap();
@@ -254,7 +254,7 @@ fn identical_new_ha_generation_retires_old_connection_and_its_events() {
     block_on(rig.run(|c| async move {
         future::or(peer.run(&listener), async {
             until(|| cloud_active(&c, "one")).await;
-            let one = function(&c.context.registry, "one", "outlet:2");
+            let one = function(&c.context, "one", "outlet:2");
             until(|| one.snapshot().power() == Some(Power::Off)).await;
             let old_key = c.context.ha_key().unwrap();
             let old_handle = c

@@ -7,7 +7,7 @@ fn legacy_poll_reads_external_changes_with_cloud_notifications_ready() {
     let (rig, listener, cloud) = with_cloud_rig(rig);
     block_on(rig.run(|control| async move {
         future::or(cloud.run(&listener), async {
-            let ac = function(&control.context.registry, did, "air-conditioner:2");
+            let ac = function(&control.context, did, "air-conditioner:2");
             let work = control.context.directory.borrow().devices[did]
                 .work
                 .clone()
@@ -95,7 +95,7 @@ fn slow_legacy_poll_does_not_accumulate_or_block_user_control() {
     let did = "308540429";
     let (rig, peer) = setup(did);
     block_on(rig.run(|control| async move {
-        let ac = function(&control.context.registry, did, "air-conditioner:2");
+        let ac = function(&control.context, did, "air-conditioner:2");
         let work = control.context.directory.borrow().devices[did]
             .work
             .clone()

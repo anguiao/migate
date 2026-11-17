@@ -410,7 +410,7 @@ fn mqtt_expiry_records_notification_loss_while_mijia_http_remains_usable() {
                     == Some("access token expired")
             })
             .await;
-            function(&c.context.registry, "one", "outlet:2")
+            function(&c.context, "one", "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();

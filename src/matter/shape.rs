@@ -1,6 +1,6 @@
 //! Canonical fixed Matter shape for one published device.
 //!
-//! The frozen model and publication compare this exact surface when deciding
+//! Configuration planning compares this exact published surface when deciding
 //! root/endpoint ConfigurationVersion changes: the four standard light
 //! profiles with their published CT mired bounds, projected measurement ranges,
 //! air-conditioner device types and thermostat features, visible function order

@@ -39,7 +39,7 @@ fn physical_group_write_uses_its_own_did_and_read_owns_state() {
                 .unwrap();
             (function.description().id.clone(), function.power().unwrap())
         };
-        let light = function(&c.context.registry, "group-1", &id);
+        let light = function(&c.context, "group-1", &id);
         until(|| light.snapshot().power() == Some(Power::Off)).await;
         let key = ("group-1".to_string(), power.siid, power.piid);
         let reads = || {
@@ -157,7 +157,7 @@ fn physical_group_compound_target_requires_every_property_and_readback_owns_stat
                 bindings.brightness().as_ref().unwrap().property(),
             )
         };
-        let light = function(&c.context.registry, "group-1", &id);
+        let light = function(&c.context, "group-1", &id);
         until(|| light.snapshot().power() == Some(Power::Off)).await;
         let target =
             || crate::device::LightTarget::brightness(Some(true), 70.0).expect("valid test target");
@@ -256,7 +256,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
                 slot.work.clone().unwrap(),
             )
         };
-        let light = function(&c.context.registry, "group-1", &id);
+        let light = function(&c.context, "group-1", &id);
         until(|| light.snapshot().power() == Some(Power::On)).await;
         // The record stays present, its own online turns false and the member
         // list becomes invalid: the last confirmed relation is retained.
@@ -394,7 +394,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
                     .id
                     .clone()
             };
-            let light = function(&control.context.registry, "group-p", &id);
+            let light = function(&control.context, "group-p", &id);
             until(|| light.snapshot().power() == Some(Power::On)).await;
             until(|| control.context.active_notification("group-p").is_some()).await;
             let before = peer.count("subscribe", "group-p", 2);
@@ -425,8 +425,7 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "group-p"))
+                    .physical(&DeviceKey::new("xiaomi", "group-p"))
                     .is_none()
             })
             .await;
@@ -453,14 +452,13 @@ fn physical_group_retires_subscriptions_on_virtual_transition_and_withdrawal() {
             until(|| {
                 control
                     .context
-                    .registry
-                    .get(&DeviceKey::new("xiaomi", "group-p"))
+                    .physical(&DeviceKey::new("xiaomi", "group-p"))
                     .is_some()
             })
             .await;
             // Reappearance produces a fresh view; the old retained handle
             // stays unavailable and cleared.
-            let refreshed = function(&control.context.registry, "group-p", &id);
+            let refreshed = function(&control.context, "group-p", &id);
             until(|| peer.count("subscribe", "group-p", 2) > before).await;
             until(|| {
                 matches!(

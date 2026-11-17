@@ -28,11 +28,11 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         until(|| c.context.group_repair("group-1").is_some()).await;
         let before = c.store.devices().load_configuration().unwrap();
         let key = DeviceKey::new("xiaomi", "group-1");
-        let original = c.context.registry.get(&key).unwrap();
+        let original = c.context.physical(&key).unwrap();
         let (restored, ready) = c.reopen_adapter();
         ready.wait().await.unwrap();
-        let registry = restored.context.registry.clone();
-        let group = registry.get(&key).unwrap();
+        let context = restored.context.clone();
+        let group = context.physical(&key).unwrap();
         assert!(!original.same_instance(&group));
         let light = group.function("light:2").unwrap();
         assert!(light.description().supports_rgb());
@@ -62,7 +62,9 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         assert_eq!(after.root_version, before.root_version);
         assert_eq!(after.devices, before.devices);
         assert_eq!(after.groups, before.groups);
-        let member = registry.get(&DeviceKey::new("xiaomi", "member-a")).unwrap();
+        let member = context
+            .physical(&DeviceKey::new("xiaomi", "member-a"))
+            .unwrap();
         assert!(
             member
                 .function("light:2")
@@ -94,7 +96,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
             until(|| group.availability() == Availability::Available).await;
             until(|| {
                 ["member-a", "member-b"].iter().all(|did| {
-                    function(&registry, did, "light:2").snapshot().power() == Some(Power::On)
+                    function(&context, did, "light:2").snapshot().power() == Some(Power::On)
                 })
             })
             .await;
@@ -162,16 +164,17 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
         until(|| {
             c.publication
                 .current()
-                .published
-                .get(&key)
+                .published_device(&key)
                 .is_some_and(|group| !group.functions()[0].description().supports_rgb())
         })
         .await;
         let before = c.store.devices().load_configuration().unwrap();
         let (restored, ready) = c.reopen_adapter();
         ready.wait().await.unwrap();
-        let registry = restored.context.registry.clone();
-        let member = registry.get(&DeviceKey::new("xiaomi", "member-a")).unwrap();
+        let context = restored.context.clone();
+        let member = context
+            .physical(&DeviceKey::new("xiaomi", "member-a"))
+            .unwrap();
         assert!(
             !member.functions()[0].description().supports_rgb(),
             "the committed native profile is restored without a stale logical mirror"

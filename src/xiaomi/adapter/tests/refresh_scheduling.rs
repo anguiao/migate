@@ -51,7 +51,7 @@ async fn trigger_burst(c: &Control, peer: &Peer) {
         peer.notify("multi", 2, value);
     }
     // The following property notification confirms the preceding triggers arrived.
-    let outlet = function(&c.context.registry, "multi", "outlet:4");
+    let outlet = function(&c.context, "multi", "outlet:4");
     let value = outlet.snapshot().power() != Some(Power::On);
     peer.notify("multi", 4, value);
     until(|| outlet.snapshot().power() == Some(if value { Power::On } else { Power::Off })).await;
@@ -82,7 +82,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
                 dids.iter().all(|did| {
                     peer.count("get", did, 2) > 0
                         && control.context.local_candidate(did, false).is_ok()
-                        && function(&control.context.registry, did, "outlet:2")
+                        && function(&control.context, did, "outlet:2")
                             .snapshot()
                             .power()
                             == Some(Power::Off)
@@ -123,7 +123,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
                     .function_observer("outlet:2")
                     .is_none()
             );
-            function(&control.context.registry, feedback_did, "outlet:2")
+            function(&control.context, feedback_did, "outlet:2")
                 .execute(Command::On)
                 .await
                 .unwrap();
@@ -158,7 +158,7 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
             }
             until(|| {
                 dids.iter().all(|did| {
-                    function(&control.context.registry, did, "outlet:2")
+                    function(&control.context, did, "outlet:2")
                         .snapshot()
                         .power()
                         == Some(Power::On)
@@ -184,7 +184,7 @@ fn numeric_outlet_refresh_trigger_is_ignored() {
                 json!(42),
                 false,
             );
-            let outlet = function(&control.context.registry, "multi", "outlet:4");
+            let outlet = function(&control.context, "multi", "outlet:4");
             peer.notify("multi", 4, true);
             until(|| outlet.snapshot().power() == Some(Power::On)).await;
             async_io::Timer::after(Duration::from_millis(50)).await;
@@ -213,7 +213,7 @@ fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadlin
             assert_eq!(peer.count("get", "multi", 0), 1);
             peer.release("multi", 3, json!({"value":false})).await;
             until(|| {
-                function(&control.context.registry, "multi", "outlet:3")
+                function(&control.context, "multi", "outlet:3")
                     .snapshot()
                     .power()
                     == Some(Power::Off)
@@ -240,7 +240,7 @@ fn refresh_rounds_wait_for_every_did_and_trigger_bursts_keep_the_pending_deadlin
             advance_to(&control.clock, Duration::from_millis(1300)).await;
             peer.release("multi", 3, json!({"value":true})).await;
             until(|| {
-                function(&control.context.registry, "multi", "outlet:3")
+                function(&control.context, "multi", "outlet:3")
                     .snapshot()
                     .power()
                     == Some(Power::On)
@@ -430,8 +430,7 @@ fn removal_and_disconnect_cancel_pending_rounds_and_property_backoff() {
                     until(|| {
                         control
                             .context
-                            .registry
-                            .get(&DeviceKey::new("xiaomi", "multi"))
+                            .physical(&DeviceKey::new("xiaomi", "multi"))
                             .is_none()
                             && !peer.state.borrow().unsubscribes.is_empty()
                     })

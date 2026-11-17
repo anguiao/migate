@@ -236,20 +236,21 @@ fn corrupt_protocol_records_recover_without_changing_identity() {
                 store.matter().put(key, &[0xff, 0x11]).unwrap();
                 let identity = store.load_identity().unwrap();
                 let (device, _receiver) = test_device();
-                let bridge = Bridge::new(
-                    vec![single_entry(&device)],
-                    7,
-                    &store,
-                    &identity,
-                    std::rc::Rc::new(NoLabels),
-                );
+                let bridge = Bridge::new(&store, &identity, std::rc::Rc::new(NoLabels));
                 let opened = std::cell::Cell::new(false);
-                let result = block_on(futures_lite::future::poll_once(bridge.run(0, |event| {
-                    if matches!(event, PairingEvent::Opened { .. }) {
-                        opened.set(true);
-                    }
-                    Ok(())
-                })));
+                let result = block_on(futures_lite::future::poll_once(bridge.run(
+                    crate::matter::MatterConfiguration {
+                        entries: vec![single_entry(&device)],
+                        root_version: 7,
+                    },
+                    0,
+                    |event| {
+                        if matches!(event, PairingEvent::Opened { .. }) {
+                            opened.set(true);
+                        }
+                        Ok(())
+                    },
+                )));
                 assert!(result.is_none(), "bridge must keep serving: {result:?}");
                 assert!(opened.get(), "no valid fabric remains after recovery");
                 bridge.check_failure().unwrap();
@@ -323,14 +324,15 @@ fn cancelled_run_keeps_a_recorded_storage_failure() {
             let store = Store::open(dir.path()).unwrap();
             let identity = store.load_identity().unwrap();
             let (device, _receiver) = test_device();
-            let bridge = Bridge::new(
-                vec![single_entry(&device)],
-                1,
-                &store,
-                &identity,
-                std::rc::Rc::new(NoLabels),
+            let bridge = Bridge::new(&store, &identity, std::rc::Rc::new(NoLabels));
+            let running = bridge.run(
+                crate::matter::MatterConfiguration {
+                    entries: vec![single_entry(&device)],
+                    root_version: 1,
+                },
+                0,
+                |_| Ok(()),
             );
-            let running = bridge.run(0, |_| Ok(()));
             let mut callback_store = bridge.store.clone();
             let db = rusqlite::Connection::open(store.path()).unwrap();
             db.execute("ALTER TABLE blobs RENAME TO unavailable_blobs", [])

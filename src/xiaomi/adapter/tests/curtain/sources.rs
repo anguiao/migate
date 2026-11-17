@@ -7,7 +7,7 @@ fn curtain_notification_recovery_settles_a_target_whose_movement_was_missed() {
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             settled(&c).await;
-            let function = function(&c.context.registry, "one", "curtain:2");
+            let function = function(&c.context, "one", "curtain:2");
             assert_eq!(function.matter_curtain().1, Some(25));
             c.clock
                 .automatic
@@ -147,7 +147,7 @@ fn curtain_disconnect_and_retirement_keep_observations_and_recovery_reads_all_pr
             settled(control).await;
             let observed = curtain(control);
             assert_eq!(
-                function(&control.context.registry, "one", "curtain:2")
+                function(&control.context, "one", "curtain:2")
                     .matter_curtain()
                     .1,
                 Some(55)

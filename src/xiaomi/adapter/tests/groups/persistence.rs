@@ -18,8 +18,8 @@ fn failed_revocation_persistence_stops_the_source_after_closing_control() {
     let result = block_on(rig.run_result(|c| async move {
         c.announce();
         let group = DeviceKey::new("xiaomi", "group-1");
-        until(|| c.publication.current().published.get(&group).is_some()).await;
-        let physical = c.publication.current().published.get(&group).unwrap();
+        until(|| c.publication.current().published_device(&group).is_some()).await;
+        let physical = c.publication.current().published_device(&group).unwrap();
         let db = rusqlite::Connection::open(c.store.path()).unwrap();
         db.execute_batch(
             "CREATE TRIGGER fail_revocation BEFORE INSERT ON publication_revocation
@@ -42,8 +42,7 @@ fn failed_revocation_persistence_stops_the_source_after_closing_control() {
     assert!(error.to_string().contains("record revocation"), "{error}");
     assert!(
         context
-            .registry
-            .get(&DeviceKey::new("xiaomi", "group-1"))
+            .physical(&DeviceKey::new("xiaomi", "group-1"))
             .is_none()
             || context
                 .directory
@@ -104,7 +103,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
                 .is_some()
         })
         .await;
-        until(|| c.publication.current().published.get(&group).is_some()).await;
+        until(|| c.publication.current().published_device(&group).is_some()).await;
         let group_before = store
             .devices()
             .load_configuration()
@@ -112,7 +111,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
             .device(&group)
             .cloned()
             .unwrap();
-        let group_physical = c.publication.current().published.get(&group).unwrap();
+        let group_physical = c.publication.current().published_device(&group).unwrap();
 
         // Recovery requires the hidden member's own description to be saved;
         // its admission may lag the group's native publication.
@@ -183,8 +182,8 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         let failing = c.reopen_adapter().0;
         let failing_handle = crate::xiaomi::adapter::SourceHandle(failing.context.clone());
         let recovered_view = crate::app::App::open(failing_handle.clone(), store.clone()).unwrap();
-        assert!(recovered_view.current().published.get(&group).is_none());
-        assert!(recovered_view.current().published.get(&one).is_some());
+        assert!(recovered_view.current().published_device(&group).is_none());
+        assert!(recovered_view.current().published_device(&one).is_some());
         assert!(!failing.context.graph.borrow().rules.contains_key("group-1"));
         // The source below is intentionally not running. Settle the restored
         // member's first read as a failure so this test can exercise Matter
@@ -267,7 +266,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
                 .contains_key("group-1"),
             "the recovery graph applies the persisted revocation"
         );
-        let member = restored.context.registry.get(&one).unwrap();
+        let member = restored.context.physical(&one).unwrap();
         assert_eq!(
             member.functions()[0].snapshot().power(),
             Some(Power::Unknown)
@@ -281,7 +280,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
             let prepared = reopened.prepare(plan);
             reopened.apply(prepared).unwrap();
         }
-        assert!(reopened.current().published.get(&group).is_none());
+        assert!(reopened.current().published_device(&group).is_none());
         let recovered = store.devices().load_configuration().unwrap();
         let reserved = recovered
             .devices
@@ -326,7 +325,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
                 .is_some()
         })
         .await;
-        until(|| c.publication.current().published.get(&group).is_some()).await;
+        until(|| c.publication.current().published_device(&group).is_some()).await;
         let group_before = store
             .devices()
             .load_configuration()
@@ -356,7 +355,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             .expect("hidden member keeps its reserved identity");
         assert!(member_before.native.is_some());
         let root_before = store.devices().load_configuration().unwrap().root_version;
-        assert!(c.publication.current().published.get(&one).is_none());
+        assert!(c.publication.current().published_device(&one).is_none());
         assert!(
             c.publication
                 .current()
@@ -387,7 +386,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             "Configuration: root version {}.",
             c.publication.current().configuration.root_version
         )));
-        // The effective registry keeps every real source ref; a hidden member
+        // The installed entries keep every real source ref; a hidden member
         // is a normal row marked hidden with its confirmed memberships.
         assert!(list.contains("one (name one):"), "{list}");
         assert!(list.contains("Matter: hidden or reserved;"), "{list}");
@@ -430,7 +429,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             reserved.configuration_version,
             group_before.configuration_version + 1
         );
-        until(|| c.publication.current().published.get(&one).is_some()).await;
+        until(|| c.publication.current().published_device(&one).is_some()).await;
         let list = terminal.handle_line("list").await.unwrap().unwrap();
         assert!(
             list.contains("group-1 (native group): not published (confirmed empty relation)."),
@@ -455,7 +454,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
                 "the former hidden member is restored"
             );
         }
-        let member = restored.context.registry.get(&one).unwrap();
+        let member = restored.context.physical(&one).unwrap();
         assert_eq!(
             member.functions()[0].snapshot().power(),
             Some(Power::Unknown)
@@ -471,8 +470,8 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
             opened.apply(prepared).unwrap();
         }
         assert_eq!(opened.current().configuration.root_version, root_after);
-        assert!(opened.current().published.get(&group).is_none());
-        assert!(opened.current().published.get(&one).is_some());
+        assert!(opened.current().published_device(&group).is_none());
+        assert!(opened.current().published_device(&one).is_some());
         let recovered = store.devices().load_configuration().unwrap();
         let reserved = recovered
             .devices
