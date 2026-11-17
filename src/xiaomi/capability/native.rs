@@ -9,7 +9,7 @@ use crate::xiaomi::legacy_miio::Mapping;
 
 /// The direct protocol selected from validated native control semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LanProtocol {
+pub(crate) enum LanProtocol {
     Miot,
     MiotLegacyShared,
     LegacyMcn02,

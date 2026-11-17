@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-pub struct PropertyBinding {
-    pub siid: u32,
-    pub piid: u32,
+pub(crate) struct PropertyBinding {
+    pub(crate) siid: u32,
+    pub(crate) piid: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

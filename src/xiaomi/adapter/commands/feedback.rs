@@ -82,5 +82,4 @@ impl LightFeedback {
 }
 
 #[cfg(test)]
-#[path = "tests/feedback.rs"]
 mod tests;

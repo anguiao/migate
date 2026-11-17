@@ -47,10 +47,6 @@ use subscriptions::subscriptions;
 
 const BATTERY_CHANNEL: &str = "battery";
 
-#[cfg(test)]
-#[path = "tests/work_access.rs"]
-mod test_access;
-
 /// One captured source runtime and its logical sink. A repaired action keeps
 /// the member universe captured at its first frame; the group itself uses the
 /// same pair.

@@ -180,7 +180,7 @@ impl ActionBinding {
 /// Which digit of the shared `fan_speed_idx` belongs to this fan.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SharedFanChannel {
+pub(crate) enum SharedFanChannel {
     Blow,
     Ventilation,
 }

@@ -57,7 +57,7 @@ pub(super) struct HaKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PathPriority {
+pub(crate) enum PathPriority {
     LocalFirst,
     CloudFirst,
 }

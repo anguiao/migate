@@ -6,9 +6,9 @@ use super::{
 use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct EventBinding {
-    pub siid: u32,
-    pub eiid: u32,
+pub(crate) struct EventBinding {
+    pub(crate) siid: u32,
+    pub(crate) eiid: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

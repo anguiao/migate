@@ -143,6 +143,3 @@ async fn send_owned(
         changed.await;
     }
 }
-
-#[cfg(test)]
-mod tests;

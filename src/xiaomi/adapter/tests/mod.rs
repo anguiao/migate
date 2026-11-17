@@ -58,3 +58,7 @@ mod sensors;
 
 mod curtain;
 mod states;
+
+pub(crate) use super::model::{
+    CommandProperty, LanStatus, SharedFanSpeedStatus, SharedFeedbackStatus,
+};

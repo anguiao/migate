@@ -29,15 +29,14 @@ mod state;
 mod tasks;
 mod work;
 
-pub use model::{
-    AdapterError, AdapterStatus, ChannelCommands, CommandProperty, CommandStatus, CommandStep,
-    CommandTarget, DeviceStatus, DiagnosticObservation, FunctionStatus, GatewayStatus, LanProtocol,
-    LanState, LanStatus, NativeValueObservation, ObservedPropertyStatus, PathKind, PendingDevice,
-    RecoveryStatus, RoutingStatus, SharedFanSpeedStatus, SharedFeedbackStatus, StepReceipt,
-    SubscriptionBinding, SubscriptionStatus, TopologyReady,
+pub use model::{AdapterError, AdapterStatus, TopologyReady};
+pub(crate) use model::{
+    ChannelCommands, CommandStatus, CommandTarget, DeviceStatus, DiagnosticObservation,
+    FunctionStatus, GatewayStatus, LanProtocol, LanState, ObservedPropertyStatus, PathKind,
+    PendingDevice, RecoveryStatus, RoutingStatus, StepReceipt,
 };
 pub use publication::SourceHandle;
-pub use routing::PathPriority;
+pub(crate) use routing::PathPriority;
 pub use runner::XiaomiAdapter;
 
 #[cfg(test)]

@@ -16,27 +16,26 @@ mod step_command;
 mod thermostat;
 
 pub(crate) use air_conditioner::AirConditionerValue;
-pub use air_conditioner::{
+pub(crate) use air_conditioner::{
     AirConditionerFanSpeed, AirConditionerMode, AirConditionerSnapshot, AirConditionerTarget,
 };
+use air_conditioner_command::AirConditionerAction;
 pub(crate) use air_conditioner_command::AirConditionerStep;
-pub use air_conditioner_command::{
-    AirConditionerAction, AirConditionerCommand, AirConditionerRequest,
-};
-pub use command::{
+pub(crate) use air_conditioner_command::{AirConditionerCommand, AirConditionerRequest};
+pub(crate) use command::{
     ActionToken, CommandReceiver, CommandRequest, DeviceRequest, LightAction,
     LightActionDiagnostics, LightDimension, LightRequest,
 };
-pub use curtain_command::{CurtainAction, CurtainCommand, CurtainRequest};
+pub(crate) use curtain_command::{CurtainAction, CurtainCommand, CurtainRequest};
 pub(crate) use fan_command::FanStep;
-pub use fan_command::{FanAction, FanCommand, FanRequest};
+pub(crate) use fan_command::{FanAction, FanCommand, FanRequest};
 pub(crate) use heater::HeaterValue;
-pub use heater::{HeaterMode, HeaterSnapshot};
+pub(crate) use heater::{HeaterMode, HeaterSnapshot};
 pub(crate) use heater_command::HeaterStep;
-pub use heater_command::{HeaterCommand, HeaterRequest};
-pub use light_command::{LightColorTarget, LightTarget};
+pub(crate) use heater_command::{HeaterCommand, HeaterRequest};
+pub(crate) use light_command::{LightColorTarget, LightTarget};
 pub(crate) use model::mired_span;
-pub use model::{
+pub(crate) use model::{
     AmbientTemperature, Availability, BatterySnapshot, Capability, Command, CommandError,
     CurtainMotion, CurtainSnapshot, DeviceKey, FanSnapshot, FunctionDescription, FunctionKind,
     FunctionSnapshot, FunctionState, LightMode, LightPatch, LightProfile, LightProfileKind,
@@ -45,8 +44,8 @@ pub use model::{
 };
 pub(crate) use model::{CurtainValue, FanValue, FunctionKey};
 pub use registry::DeviceRegistry;
-pub use state::{Function, PhysicalDevice};
-pub use thermostat::TemperatureGrid;
+pub(crate) use state::{Function, PhysicalDevice};
+pub(crate) use thermostat::TemperatureGrid;
 
 #[cfg(test)]
 mod tests;

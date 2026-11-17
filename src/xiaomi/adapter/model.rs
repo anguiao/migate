@@ -85,20 +85,20 @@ impl From<CatalogError> for AdapterError {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum GatewayStatus {
+pub(crate) enum GatewayStatus {
     Discovering,
     Connecting(String),
     Connected(String),
     Unavailable(String),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingDevice {
-    pub did: String,
-    pub name: String,
-    pub reason: String,
+pub(crate) struct PendingDevice {
+    pub(crate) did: String,
+    pub(crate) name: String,
+    pub(crate) reason: String,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PathKind {
+pub(crate) enum PathKind {
     Local,
     Direct,
     Cloud,
@@ -113,17 +113,17 @@ impl fmt::Display for PathKind {
     }
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum RecoveryStatus {
+pub(crate) enum RecoveryStatus {
     #[default]
     None,
     Scheduled(i64),
     Running,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RoutingStatus {
-    pub priority: super::routing::PathPriority,
-    pub local_connected: bool,
-    pub last_switch_reason: Option<String>,
+pub(crate) struct RoutingStatus {
+    pub(crate) priority: super::routing::PathPriority,
+    pub(crate) local_connected: bool,
+    pub(crate) last_switch_reason: Option<String>,
 }
 impl Default for RoutingStatus {
     fn default() -> Self {
@@ -135,7 +135,7 @@ impl Default for RoutingStatus {
     }
 }
 #[derive(Clone, Debug, PartialEq)]
-pub enum CommandTarget {
+pub(crate) enum CommandTarget {
     Power(bool),
     Light(crate::device::LightTarget),
     Curtain(crate::device::CurtainCommand),
@@ -183,12 +183,12 @@ impl fmt::Display for CommandTarget {
 }
 /// A planned property write and its path once submitted.
 #[derive(Clone, Debug, PartialEq)]
-pub struct CommandProperty {
-    pub binding: PropertyBinding,
-    pub value: serde_json::Value,
-    pub path: Option<PathKind>,
+pub(crate) struct CommandProperty {
+    pub(crate) binding: PropertyBinding,
+    pub(crate) value: serde_json::Value,
+    pub(crate) path: Option<PathKind>,
     /// A real native operation description for an action/legacy step.
-    pub native: Option<String>,
+    pub(crate) native: Option<String>,
 }
 impl From<(PropertyBinding, serde_json::Value)> for CommandProperty {
     fn from((binding, value): (PropertyBinding, serde_json::Value)) -> Self {
@@ -202,26 +202,26 @@ impl From<(PropertyBinding, serde_json::Value)> for CommandProperty {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CommandStatus {
-    pub id: u64,
-    pub binding: PropertyBinding,
-    pub target: CommandTarget,
-    pub properties: Vec<CommandProperty>,
-    pub actual_path: Option<PathKind>,
-    pub result: Option<Result<(), CommandError>>,
-    pub steps: Vec<CommandStep>,
+pub(crate) struct CommandStatus {
+    pub(crate) id: u64,
+    pub(crate) binding: PropertyBinding,
+    pub(crate) target: CommandTarget,
+    pub(crate) properties: Vec<CommandProperty>,
+    pub(crate) actual_path: Option<PathKind>,
+    pub(crate) result: Option<Result<(), CommandError>>,
+    pub(crate) steps: Vec<CommandStep>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CommandStep {
-    pub binding: PropertyBinding,
-    pub path: PathKind,
-    pub receipt: StepReceipt,
-    pub native: Option<String>,
+pub(crate) struct CommandStep {
+    pub(crate) binding: PropertyBinding,
+    pub(crate) path: PathKind,
+    pub(crate) receipt: StepReceipt,
+    pub(crate) native: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum StepReceipt {
+pub(crate) enum StepReceipt {
     Awaiting,
     Accepted,
     Rejected(String),
@@ -284,14 +284,14 @@ impl CommandStatus {
     }
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChannelCommands {
-    pub light_actions: Option<crate::device::LightActionDiagnostics>,
-    pub channel: String,
-    pub inflight: Option<CommandStatus>,
-    pub last: Option<CommandStatus>,
+pub(crate) struct ChannelCommands {
+    pub(crate) light_actions: Option<crate::device::LightActionDiagnostics>,
+    pub(crate) channel: String,
+    pub(crate) inflight: Option<CommandStatus>,
+    pub(crate) last: Option<CommandStatus>,
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum SubscriptionBinding {
+pub(crate) enum SubscriptionBinding {
     Property(PropertyBinding),
     Event(EventBinding),
 }
@@ -309,57 +309,57 @@ impl fmt::Display for SubscriptionBinding {
     }
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct SubscriptionStatus {
-    pub binding: SubscriptionBinding,
-    pub source: PathKind,
-    pub ready: bool,
-    pub problem: Option<String>,
+pub(crate) struct SubscriptionStatus {
+    pub(crate) binding: SubscriptionBinding,
+    pub(crate) source: PathKind,
+    pub(crate) ready: bool,
+    pub(crate) problem: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct NativeModeObservation {
-    pub value: Option<u32>,
-    pub source_time: Option<i64>,
-    pub received_at: Option<i64>,
+pub(crate) struct NativeModeObservation {
+    pub(crate) value: Option<u32>,
+    pub(crate) source_time: Option<i64>,
+    pub(crate) received_at: Option<i64>,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct NativeValueObservation {
-    pub value: serde_json::Value,
-    pub source_time: Option<i64>,
-    pub received_at: i64,
-    pub reason: Option<String>,
+pub(super) struct NativeValueObservation {
+    pub(super) value: serde_json::Value,
+    pub(super) source_time: Option<i64>,
+    pub(super) received_at: i64,
+    pub(super) reason: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct ObservedPropertyStatus {
-    pub name: &'static str,
-    pub binding: PropertyBinding,
-    pub observation_source: Option<PathKind>,
-    pub native_mode: Option<NativeModeObservation>,
-    pub read_problem: Option<String>,
-    pub source_detail: Option<String>,
-    pub subscriptions: Vec<SubscriptionStatus>,
+pub(crate) struct ObservedPropertyStatus {
+    pub(crate) name: &'static str,
+    pub(crate) binding: PropertyBinding,
+    pub(crate) observation_source: Option<PathKind>,
+    pub(crate) native_mode: Option<NativeModeObservation>,
+    pub(crate) read_problem: Option<String>,
+    pub(crate) source_detail: Option<String>,
+    pub(crate) subscriptions: Vec<SubscriptionStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
-pub struct LowSpeedStatus {
+pub(crate) struct LowSpeedStatus {
     /// Real operation candidates, never the hub.
-    pub candidates: Vec<PathKind>,
-    pub selected: Option<PathKind>,
+    pub(crate) candidates: Vec<PathKind>,
+    pub(crate) selected: Option<PathKind>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FunctionStatus {
-    pub function: String,
-    pub selected_read: Option<PathKind>,
+pub(crate) struct FunctionStatus {
+    pub(crate) function: String,
+    pub(crate) selected_read: Option<PathKind>,
     /// Present only for a fan that owns a shared low-speed operation.
-    pub low_speed: Option<LowSpeedStatus>,
-    pub notification_source: Option<PathKind>,
-    pub sync_limited_reason: Option<String>,
-    pub read_problem: Option<String>,
-    pub observation_source: Option<PathKind>,
-    pub subscriptions: Vec<SubscriptionStatus>,
-    pub properties: Vec<ObservedPropertyStatus>,
+    pub(crate) low_speed: Option<LowSpeedStatus>,
+    pub(crate) notification_source: Option<PathKind>,
+    pub(crate) sync_limited_reason: Option<String>,
+    pub(crate) read_problem: Option<String>,
+    pub(crate) observation_source: Option<PathKind>,
+    pub(crate) subscriptions: Vec<SubscriptionStatus>,
+    pub(crate) properties: Vec<ObservedPropertyStatus>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum LanState {
+pub(crate) enum LanState {
     Ineligible,
     MissingCredentials,
     InvalidCredentials,
@@ -367,85 +367,85 @@ pub enum LanState {
     Ready,
     Failed,
 }
-pub use crate::xiaomi::capability::LanProtocol;
+pub(crate) use crate::xiaomi::capability::LanProtocol;
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LanStatus {
-    pub protocol: LanProtocol,
-    pub state: LanState,
-    pub address: Option<std::net::Ipv4Addr>,
-    pub problem: Option<String>,
-    pub recovery: RecoveryStatus,
+pub(crate) struct LanStatus {
+    pub(crate) protocol: LanProtocol,
+    pub(crate) state: LanState,
+    pub(crate) address: Option<std::net::Ipv4Addr>,
+    pub(crate) problem: Option<String>,
+    pub(crate) recovery: RecoveryStatus,
 }
 /// One raw diagnostic input with its real source and observation order.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DiagnosticObservation {
-    pub value: serde_json::Value,
-    pub source: Option<PathKind>,
-    pub source_time: Option<i64>,
-    pub received_at: Option<i64>,
-    pub reason: Option<String>,
+pub(crate) struct DiagnosticObservation {
+    pub(crate) value: serde_json::Value,
+    pub(crate) source: Option<PathKind>,
+    pub(crate) source_time: Option<i64>,
+    pub(crate) received_at: Option<i64>,
+    pub(crate) reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SharedFanSpeedStatus {
-    pub function: String,
-    pub channel: crate::xiaomi::capability::SharedFanChannel,
+pub(crate) struct SharedFanSpeedStatus {
+    pub(crate) function: String,
+    pub(crate) channel: crate::xiaomi::capability::SharedFanChannel,
     /// Logical level 1 = low, 2 = high; `None` is explicitly unknown.
-    pub level: Option<u8>,
-    pub reason: Option<String>,
-    pub source_time: Option<i64>,
-    pub received_at: Option<i64>,
+    pub(crate) level: Option<u8>,
+    pub(crate) reason: Option<String>,
+    pub(crate) source_time: Option<i64>,
+    pub(crate) received_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SharedFeedbackStatus {
+pub(crate) struct SharedFeedbackStatus {
     /// Current eligible read candidates, independent of the standard path.
-    pub candidates: Vec<PathKind>,
+    pub(crate) candidates: Vec<PathKind>,
     /// Current selected read path for the shared group; `None` when both
     /// direct and cloud are currently unavailable.
-    pub selected_read: Option<PathKind>,
+    pub(crate) selected_read: Option<PathKind>,
     /// Last successful observation source, retained when the current path is
     /// already unavailable or a later read failed.
-    pub source: Option<PathKind>,
-    pub pending: bool,
-    pub read_problem: Option<String>,
-    pub native_mode: Option<DiagnosticObservation>,
-    pub fan_speed_index: Option<DiagnosticObservation>,
-    pub temperature: Option<DiagnosticObservation>,
-    pub fans: Vec<SharedFanSpeedStatus>,
+    pub(crate) source: Option<PathKind>,
+    pub(crate) pending: bool,
+    pub(crate) read_problem: Option<String>,
+    pub(crate) native_mode: Option<DiagnosticObservation>,
+    pub(crate) fan_speed_index: Option<DiagnosticObservation>,
+    pub(crate) temperature: Option<DiagnosticObservation>,
+    pub(crate) fans: Vec<SharedFanSpeedStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct DeviceStatus {
-    pub did: String,
-    pub lan: Option<LanStatus>,
-    pub direct_unavailable_reason: Option<String>,
-    pub read_only: bool,
-    pub usable_control_paths: Vec<PathKind>,
-    pub selected_control: Option<PathKind>,
-    pub usable_read_paths: Vec<PathKind>,
-    pub selected_read: Option<PathKind>,
+pub(crate) struct DeviceStatus {
+    pub(crate) did: String,
+    pub(crate) lan: Option<LanStatus>,
+    pub(crate) direct_unavailable_reason: Option<String>,
+    pub(crate) read_only: bool,
+    pub(crate) usable_control_paths: Vec<PathKind>,
+    pub(crate) selected_control: Option<PathKind>,
+    pub(crate) usable_read_paths: Vec<PathKind>,
+    pub(crate) selected_read: Option<PathKind>,
     /// `None` means the source provides no reliable physical on/off signal.
-    pub physical_online: Option<bool>,
-    pub notification_source: Option<PathKind>,
-    pub unavailable_reason: Option<String>,
-    pub sync_limited_reason: Option<String>,
-    pub battery_problem: Option<String>,
-    pub last_switch_reason: Option<String>,
-    pub standard_mode: Option<DiagnosticObservation>,
-    pub shared_feedback: Option<SharedFeedbackStatus>,
-    pub commands: Vec<ChannelCommands>,
-    pub functions: Vec<FunctionStatus>,
+    pub(crate) physical_online: Option<bool>,
+    pub(crate) notification_source: Option<PathKind>,
+    pub(crate) unavailable_reason: Option<String>,
+    pub(crate) sync_limited_reason: Option<String>,
+    pub(crate) battery_problem: Option<String>,
+    pub(crate) last_switch_reason: Option<String>,
+    pub(crate) standard_mode: Option<DiagnosticObservation>,
+    pub(crate) shared_feedback: Option<SharedFeedbackStatus>,
+    pub(crate) commands: Vec<ChannelCommands>,
+    pub(crate) functions: Vec<FunctionStatus>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdapterStatus {
-    pub auth: AuthReport,
-    pub certificate_status: Option<crate::xiaomi::certificate::CertificateStatus>,
-    pub gateway: GatewayStatus,
-    pub catalog_problem: Option<String>,
-    pub pending: Vec<PendingDevice>,
-    pub routing: RoutingStatus,
-    pub devices: Vec<DeviceStatus>,
+    pub(crate) auth: AuthReport,
+    pub(crate) certificate_status: Option<crate::xiaomi::certificate::CertificateStatus>,
+    pub(crate) gateway: GatewayStatus,
+    pub(crate) catalog_problem: Option<String>,
+    pub(crate) pending: Vec<PendingDevice>,
+    pub(crate) routing: RoutingStatus,
+    pub(crate) devices: Vec<DeviceStatus>,
 }
 #[derive(Default)]
 pub(super) struct Ready {

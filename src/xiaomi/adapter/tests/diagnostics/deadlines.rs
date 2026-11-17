@@ -423,6 +423,13 @@ fn mqtt_expiry_records_notification_loss_while_mijia_http_remains_usable() {
 #[test]
 fn virtual_group_reports_the_expired_member_path_in_a_mixed_notification_summary() {
     let (rig, listener, cloud) = with_cloud_rig(repair_rig(0, true));
+    // Keep the cloud standby unready while asserting the expiry history;
+    // a later member handover legitimately replaces the group's last reason.
+    cloud
+        .state
+        .borrow_mut()
+        .hold
+        .insert("device/member-a/up/properties_changed/4/2".into());
     let (_release, certificate) = flume::bounded(1);
     rig.cloud.lock().unwrap().cert_gate = Some(certificate);
     block_on(rig.run(|c| async move {

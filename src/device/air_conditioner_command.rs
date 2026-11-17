@@ -18,6 +18,10 @@ pub enum AirConditionerCommand {
     Temperature(i16),
     Speed(AirConditionerFanSpeed),
     Swing(bool),
+    #[allow(
+        dead_code,
+        reason = "The domain supports explicit combined targets; current Matter and terminal callers submit individual commands"
+    )]
     Combined(AirConditionerTarget),
 }
 

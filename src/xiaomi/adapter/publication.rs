@@ -102,7 +102,7 @@ impl SourceHandle {
     }
 
     /// Capture current diagnostics without waiting for the publication callback.
-    pub fn diagnostics(&self) -> super::AdapterStatus {
+    pub(crate) fn diagnostics(&self) -> super::AdapterStatus {
         self.0.diagnostics()
     }
 

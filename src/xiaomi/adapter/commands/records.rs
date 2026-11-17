@@ -20,8 +20,8 @@ use std::{
 /// Diagnostics retain one current and one completed operation per channel, never a history.
 #[derive(Default)]
 pub(in crate::xiaomi::adapter) struct Commands {
-    pub(super) next: Cell<u64>,
-    pub(super) records: RefCell<BTreeMap<(String, String), ChannelCommands>>,
+    next: Cell<u64>,
+    records: RefCell<BTreeMap<(String, String), ChannelCommands>>,
     pub(in crate::xiaomi::adapter) changed: Event,
 }
 impl Commands {
@@ -112,13 +112,13 @@ impl Commands {
     }
 }
 pub(in crate::xiaomi::adapter) struct CommandOperation {
-    pub(super) commands: Rc<Commands>,
-    pub(super) did: String,
+    commands: Rc<Commands>,
+    did: String,
     pub(super) channel: String,
     pub(super) status: RefCell<CommandStatus>,
-    pub(super) queued_at: Instant,
-    pub(super) sent_at: Cell<Option<Instant>>,
-    pub(super) pending_step: RefCell<Option<CommandProperty>>,
+    queued_at: Instant,
+    sent_at: Cell<Option<Instant>>,
+    pending_step: RefCell<Option<CommandProperty>>,
 }
 impl CommandOperation {
     pub(super) fn pending_step(
@@ -316,3 +316,6 @@ impl CommandOperation {
         self.commands.changed.notify(usize::MAX);
     }
 }
+
+#[cfg(test)]
+mod tests;

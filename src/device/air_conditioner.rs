@@ -190,5 +190,4 @@ impl AirConditionerConstraints {
 }
 
 #[cfg(test)]
-#[path = "tests/air_conditioner.rs"]
 mod tests;

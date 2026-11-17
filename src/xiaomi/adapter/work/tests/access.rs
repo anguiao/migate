@@ -4,8 +4,8 @@
 //! `work.rs`; these helpers keep private preparation state out of the public
 //! surface while existing scenarios keep asserting the same facts.
 
-use super::DeviceWork;
-use crate::xiaomi::capability::PropertyBinding;
+use super::super::DeviceWork;
+use crate::xiaomi::{adapter::notifications::NotificationSource, capability::PropertyBinding};
 
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn bindings(&self) -> Vec<PropertyBinding> {
@@ -22,18 +22,11 @@ impl DeviceWork {
         }
     }
     pub(in crate::xiaomi::adapter) fn test_observer_is_local(&self) -> bool {
-        matches!(
-            self.observer(),
-            Some(super::super::notifications::NotificationSource::Local(_))
-        )
+        matches!(self.observer(), Some(NotificationSource::Local(_)))
     }
     pub(in crate::xiaomi::adapter) fn test_observer_is_cloud(&self) -> bool {
-        matches!(
-            self.observer(),
-            Some(super::super::notifications::NotificationSource::Cloud(_))
-        )
+        matches!(self.observer(), Some(NotificationSource::Cloud(_)))
     }
-    #[cfg(test)]
     pub(in crate::xiaomi::adapter) fn test_notify(&self, binding: PropertyBinding, value: bool) {
         self.notify_value_at(
             binding,
@@ -103,9 +96,7 @@ impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn test_retire_cloud_preparation(&self) {
         let handle = self.attachments.cloud.borrow().connection.clone().unwrap();
         self.attachments
-            .prepare_mut(&super::super::notifications::NotificationSource::Cloud(
-                handle,
-            ))
+            .prepare_mut(&NotificationSource::Cloud(handle))
             .unwrap()
             .invalidate();
     }

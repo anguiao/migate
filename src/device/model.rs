@@ -690,5 +690,4 @@ impl FunctionKey {
 }
 
 #[cfg(test)]
-#[path = "tests/model_access.rs"]
-mod model_access;
+mod tests;

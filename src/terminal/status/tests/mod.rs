@@ -601,7 +601,7 @@ fn a_notification_limited_read_only_channel_is_reported_without_claiming_physica
 
 #[test]
 fn direct_status_identifies_running_and_scheduled_recovery() {
-    use crate::xiaomi::adapter::{LanState, LanStatus};
+    use crate::xiaomi::adapter::{LanState, tests::LanStatus};
     let mut device = DeviceStatus {
         did: "fan".into(),
         lan: Some(LanStatus {
@@ -692,22 +692,25 @@ fn command_properties(
         serde_json::Value,
     )>,
     path: Option<PathKind>,
-) -> Vec<crate::xiaomi::adapter::CommandProperty> {
+) -> Vec<crate::xiaomi::adapter::tests::CommandProperty> {
     properties
         .into_iter()
-        .map(|(binding, value)| crate::xiaomi::adapter::CommandProperty {
-            binding,
-            value,
-            path,
-            native: None,
-        })
+        .map(
+            |(binding, value)| crate::xiaomi::adapter::tests::CommandProperty {
+                binding,
+                value,
+                path,
+                native: None,
+            },
+        )
         .collect()
 }
 
 #[test]
 fn bath_diagnostics_show_standard_mode_and_legacy_group_separately() {
     use crate::xiaomi::adapter::{
-        DiagnosticObservation, SharedFanSpeedStatus, SharedFeedbackStatus,
+        DiagnosticObservation,
+        tests::{SharedFanSpeedStatus, SharedFeedbackStatus},
     };
     use crate::xiaomi::capability::SharedFanChannel;
     use serde_json::json;
