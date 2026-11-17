@@ -685,3 +685,93 @@ fn stale_battery_read_success_and_failure_preserve_the_newer_notification() {
         .await;
     }));
 }
+
+#[test]
+fn successful_local_battery_subscription_preserves_the_cloud_subscription_error() {
+    let (rig, listener, cloud) = with_cloud_sensors(&["sensor"]);
+    let path = "device/sensor/up/properties_changed/2/1003";
+    cloud
+        .state
+        .borrow_mut()
+        .reject
+        .insert(path.into(), SubscribeReasonCode::Unspecified);
+    {
+        let mut values = rig.cloud.lock().unwrap();
+        values
+            .raw_values
+            .insert(("sensor".into(), 3, 1001), json!(21.0));
+        values
+            .raw_values
+            .insert(("sensor".into(), 3, 1008), json!(45.0));
+        values
+            .raw_values
+            .insert(("sensor".into(), 2, 1003), json!(55));
+    }
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            until(|| {
+                cloud.count(path) == 4 && work(&c.context, "sensor").battery_problem().is_some()
+            })
+            .await;
+            c.announce();
+            let control = &c;
+            let local = sensor_peer(21.0, 45.0);
+            local.value("sensor", BATTERY, json!(55));
+            local.state.borrow_mut().sub_reject.insert((
+                "sensor".into(),
+                BATTERY.siid,
+                BATTERY.piid,
+            ));
+            c.peer(local, |peer| async move {
+                until(|| {
+                    peer.count("subscribe", "sensor", BATTERY.siid) == 4
+                        && work(&control.context, "sensor").test_local_exhausted()
+                })
+                .await;
+                let status = battery_status(&control.context, "sensor");
+                let problem = status.battery_problem.as_ref().unwrap();
+                assert!(
+                    problem.contains("sensor subscribe property 2.1003"),
+                    "{problem}"
+                );
+                assert!(
+                    problem.contains("sensor cloud subscribe property 2.1003"),
+                    "{problem}"
+                );
+                let text = control
+                    .terminal()
+                    .handle_line("status sensor")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(text.contains("sensor subscribe property 2.1003"), "{text}");
+                assert!(
+                    text.contains("sensor cloud subscribe property 2.1003"),
+                    "{text}"
+                );
+                peer.state.borrow_mut().sub_reject.clear();
+                peer.list_changed(&["sensor"]);
+                until(|| {
+                    let work = work(&control.context, "sensor");
+                    work.subscription_status("battery")
+                        .iter()
+                        .any(|status| status.source == PathKind::Local && status.ready)
+                })
+                .await;
+                let status = battery_status(&control.context, "sensor");
+                assert!(
+                    status
+                        .battery_problem
+                        .as_deref()
+                        .is_some_and(|problem| problem.contains("cloud subscribe")),
+                    "{status:?}"
+                );
+                assert!(!control.context.diagnostics().pending.iter().any(
+                        |pending| pending.did == "sensor" && pending.reason.contains("2.1003")
+                    ));
+            })
+            .await;
+        })
+        .await;
+    }));
+}

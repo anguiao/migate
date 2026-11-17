@@ -24,18 +24,6 @@ impl Context {
         self.notification_handle_at(self.clock.unix_now())
             .is_some_and(|current| current.same_connection(handle))
     }
-    pub(in crate::xiaomi::adapter) fn notification_source(
-        &self,
-        did: &str,
-        id: &str,
-    ) -> Option<NotificationSource> {
-        self.device_routes(did)
-            .functions
-            .get(id)?
-            .notification
-            .desired
-            .clone()
-    }
     pub(in crate::xiaomi::adapter) fn source_valid_for(
         &self,
         did: &str,
@@ -70,8 +58,10 @@ pub(super) async fn selections(context: Rc<Context>) -> Result<(), AdapterError>
             .values()
             .filter_map(|slot| slot.admitted.clone())
             .collect::<Vec<_>>();
+        let mut routes = context.device_routes_for(works.iter().map(|work| work.key.id.as_str()));
         for work in works {
-            reconcile_source(&context, work);
+            let device_routes = routes.remove(&work.key.id).unwrap();
+            reconcile_source(&context, work, device_routes);
         }
         if let Some(session) = context.notifications.borrow().clone() {
             reconcile_online(&context, session);
@@ -79,17 +69,28 @@ pub(super) async fn selections(context: Rc<Context>) -> Result<(), AdapterError>
         listener.await;
     }
 }
-fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
+fn reconcile_source(
+    context: &Rc<Context>,
+    work: Rc<DeviceWork>,
+    routes: super::super::routing::DeviceRoutes,
+) {
     let did = work.key.id.clone();
     if work.life.is_closed() {
         return;
     }
-    let routes = context.device_routes(&did);
     work.reconcile_state_reads(&routes);
     let retry = work.take_subscription_retry();
     let mut keep_local = false;
     let mut keep_cloud = false;
     for id in work.channels() {
+        // A valid standby retains its own preparation and diagnostics across a
+        // priority handover; only loss of access withdraws its subscriptions.
+        for source in routes.functions[&id].notification.sources() {
+            match source {
+                NotificationSource::Local(_) => keep_local = true,
+                NotificationSource::Cloud(_) => keep_cloud = true,
+            }
+        }
         if let Some(old) = work.function_observer(&id)
             && !routes.functions[&id].notification.valid(&old)
         {
@@ -101,42 +102,12 @@ fn reconcile_source(context: &Rc<Context>, work: Rc<DeviceWork>) {
         }
         let desired = routes.functions[&id].notification.desired.clone();
         if let Some(desired) = desired {
-            keep_local |= matches!(desired, NotificationSource::Local(_));
-            keep_cloud |= matches!(desired, NotificationSource::Cloud(_));
             let active = work.function_observer(&id);
             let same = active.as_ref().is_some_and(|active| active.same(&desired));
             if !same && work.source_ready(&id, &desired) {
                 activate(context, &work, &id, desired.clone());
             } else if !same || retry {
                 prepare_source(context, work.clone(), desired);
-            }
-        }
-        if let Some(active) = work.function_observer(&id) {
-            keep_local |= matches!(active, NotificationSource::Local(_));
-            keep_cloud |= matches!(active, NotificationSource::Cloud(_));
-        }
-        if let Some((binding, true)) = work
-            .native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| function.id() == id)
-            .and_then(crate::xiaomi::capability::ParsedFunction::relay_mode)
-        {
-            if let Ok(handle) = &routes.hub_push {
-                let source = NotificationSource::Local(handle.clone());
-                keep_local |= routes.functions[&id].notification.valid(&source)
-                    && work.source_binding_ready(&source, binding);
-            }
-            if let Some(handle) = context
-                .notifications
-                .borrow()
-                .as_ref()
-                .map(|session| session.handle.clone())
-            {
-                let source = NotificationSource::Cloud(handle);
-                keep_cloud |= routes.functions[&id].notification.valid(&source)
-                    && work.source_binding_ready(&source, binding);
             }
         }
     }
@@ -154,7 +125,9 @@ fn prepare_source(context: &Rc<Context>, work: Rc<DeviceWork>, source: Notificat
             work.request_local_subscriptions();
         }
         NotificationSource::Cloud(handle) => {
-            if let Some(preparation) = work.begin_cloud_preparation(&handle) {
+            if let Some(preparation) =
+                work.begin_preparation(&NotificationSource::Cloud(handle.clone()))
+            {
                 let session = context.notifications.borrow().as_ref().unwrap().clone();
                 session.tasks.spawn(prepare_properties(
                     context.clone(),

@@ -82,7 +82,6 @@ pub(super) struct DeviceWork {
     pub(super) refresh_changed: Rc<Event>,
     pub(super) light_frames: RefCell<LightFrames>,
     committed_battery_issue: RefCell<Option<String>>,
-    battery_subscription_problem: RefCell<Option<String>>,
     battery_read_problem: RefCell<Option<String>>,
     configuration_changed: Rc<Event>,
 }
@@ -113,7 +112,6 @@ impl DeviceWork {
             refresh_changed,
             light_frames: RefCell::new(LightFrames::default()),
             committed_battery_issue: RefCell::new(battery_issue),
-            battery_subscription_problem: RefCell::new(None),
             battery_read_problem: RefCell::new(None),
             configuration_changed,
         }

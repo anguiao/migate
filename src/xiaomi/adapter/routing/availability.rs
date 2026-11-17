@@ -46,6 +46,9 @@ impl Context {
     }
     pub(in crate::xiaomi::adapter) fn update_device_availability(&self, did: &str) {
         let routes = self.device_routes(did);
+        self.apply_device_availability(did, &routes);
+    }
+    fn apply_device_availability(&self, did: &str, routes: &DeviceRoutes) {
         let available = routes.available;
         let (work, blocked) = {
             let live = self.directory.borrow();
@@ -108,8 +111,9 @@ impl Context {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
+        let routes = self.device_routes_for(dids.iter().map(String::as_str));
         for did in dids {
-            self.update_device_availability(&did);
+            self.apply_device_availability(&did, &routes[&did]);
         }
         self.refresh_all_group_states();
     }

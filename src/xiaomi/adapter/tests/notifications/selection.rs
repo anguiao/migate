@@ -604,3 +604,72 @@ fn changed_cloud_online_conditions_reopen_local_windows_but_same_values_do_not()
         .await;
     }));
 }
+
+#[test]
+fn property_and_event_subscriptions_remain_ready_on_both_valid_sources() {
+    let (rig, listener, cloud) = with_cloud_rig(Rig::profile_light(
+        "xiaomi.motion.pir1",
+        serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/miot/xiaomi-pir1.json"
+        ))
+        .unwrap(),
+    ));
+    block_on(rig.run(|c| async move {
+        future::or(cloud.run(&listener), async {
+            until(|| {
+                c.context.directory.borrow().devices["one"]
+                    .admitted
+                    .as_ref()
+                    .unwrap()
+                    .function_observer("motion:2:1024")
+                    .is_some_and(|source| source.kind() == PathKind::Cloud)
+            })
+            .await;
+            c.announce();
+            let local = Rc::new(Peer::default());
+            local.value(
+                "one",
+                crate::xiaomi::capability::PropertyBinding {
+                    siid: 2,
+                    piid: 1024,
+                },
+                json!(300),
+            );
+            let control = &c;
+            let cloud = &cloud;
+            c.peer(local, |local| async move {
+                let work = control.context.directory.borrow().devices["one"]
+                    .admitted
+                    .clone()
+                    .unwrap();
+                until(|| {
+                    work.function_observer("motion:2:1024")
+                        .is_some_and(|source| source.kind() == PathKind::Local)
+                })
+                .await;
+                let subscriptions = work.subscription_status("motion:2:1024");
+                assert!(subscriptions.iter().any(|status| matches!(
+                    status.binding,
+                    super::super::super::model::SubscriptionBinding::Event(_)
+                )));
+                assert!(
+                    subscriptions.iter().all(|status| status.ready),
+                    "{subscriptions:?}"
+                );
+                let local_count = local.count("subscribe", "one", 2);
+                let cloud_path = "device/one/up/event_occured/2/1008";
+                let cloud_count = cloud.count(cloud_path);
+                control.context.hub.borrow_mut().degrade();
+                control.context.changed.notify(usize::MAX);
+                until(|| cloud_active(control, "one")).await;
+                control.context.hub.borrow_mut().restore_priority();
+                control.context.changed.notify(usize::MAX);
+                until(|| local_active(control, "one")).await;
+                assert_eq!(local.count("subscribe", "one", 2), local_count);
+                assert_eq!(cloud.count(cloud_path), cloud_count);
+            })
+            .await;
+        })
+        .await;
+    }));
+}

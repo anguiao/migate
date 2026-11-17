@@ -5,6 +5,7 @@ mod deadlines;
 mod event_scope;
 mod history;
 mod publishing;
+mod subscriptions;
 
 fn recorded(c: &Control, did: &str) -> Option<String> {
     c.context.directory.borrow().devices[did]

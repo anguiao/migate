@@ -285,6 +285,18 @@ impl Context {
         Core::new(self, self.clock.unix_now()).device(did)
     }
 
+    /// Share immutable global inputs within this batch, then release all owner
+    /// borrows before callers apply transitions or notify consumers.
+    pub(in crate::xiaomi::adapter) fn device_routes_for<'a>(
+        &self,
+        dids: impl IntoIterator<Item = &'a str>,
+    ) -> BTreeMap<String, DeviceRoutes> {
+        let facts = Core::new(self, self.clock.unix_now());
+        dids.into_iter()
+            .map(|did| (did.to_owned(), facts.device(did)))
+            .collect()
+    }
+
     pub(in crate::xiaomi::adapter) fn routing_summaries_at(
         &self,
         now: i64,

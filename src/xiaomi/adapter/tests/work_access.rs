@@ -101,6 +101,12 @@ impl DeviceWork {
     /// Reproduce a real preparation cancellation while a queued handshake is
     /// still outstanding: advance its receipt generation and release `running`.
     pub(in crate::xiaomi::adapter) fn test_retire_cloud_preparation(&self) {
-        self.retire_cloud_preparation();
+        let handle = self.attachments.cloud.borrow().connection.clone().unwrap();
+        self.attachments
+            .prepare_mut(&super::super::notifications::NotificationSource::Cloud(
+                handle,
+            ))
+            .unwrap()
+            .invalidate();
     }
 }

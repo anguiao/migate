@@ -1,4 +1,3 @@
-use super::attachment::Prepare;
 use super::*;
 
 impl DeviceWork {
@@ -125,95 +124,94 @@ impl DeviceWork {
     pub(super) async fn local_preparation_request(&self) -> (SessionHandle, u64) {
         loop {
             let listener = self.attachments.changed.listen();
-            let request = {
+            let connection = {
                 let mut local = self.attachments.local.borrow_mut();
-                let connection = local.connection.clone();
-                if let Some(connection) = connection
-                    && local.requested
-                    && let Some(generation) = local.prepare.begin()
-                {
+                local.requested.then(|| {
                     local.requested = false;
-                    Some((connection, generation))
-                } else {
-                    None
-                }
+                    local.connection.as_ref().unwrap().clone()
+                })
             };
-            if let Some(request) = request {
-                return request;
+            if let Some(connection) = connection
+                && let Some(generation) =
+                    self.begin_preparation(&NotificationSource::Local(connection.clone()))
+            {
+                return (connection, generation);
             }
             listener.await;
         }
     }
-    pub(super) fn local_current(&self, handle: &SessionHandle, generation: u64) -> bool {
+    pub(in crate::xiaomi::adapter) fn begin_preparation(
+        &self,
+        source: &NotificationSource,
+    ) -> Option<u64> {
+        if self.life.is_closed() {
+            return None;
+        }
+        self.attachments.prepare_mut(source)?.begin()
+    }
+    pub(in crate::xiaomi::adapter) fn preparation_current(
+        &self,
+        source: &NotificationSource,
+        generation: u64,
+    ) -> bool {
         !self.life.is_closed()
             && self
                 .attachments
-                .local
-                .borrow()
-                .connection
-                .as_ref()
-                .is_some_and(|current| {
-                    current.same_connection(handle)
-                        && self.attachments.local.borrow().prepare.generation == generation
-                })
+                .prepare(source)
+                .is_some_and(|prepare| prepare.generation == generation)
     }
-    pub(super) fn local_pending(
+    pub(in crate::xiaomi::adapter) fn pending_subscriptions(
         &self,
-        handle: &SessionHandle,
+        source: &NotificationSource,
         generation: u64,
     ) -> Option<Vec<SubscriptionBinding>> {
-        let local = self.attachments.local.borrow();
-        let current = local
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && local.prepare.generation == generation
-            && !self.life.is_closed();
-        current.then(|| local.prepare.missing(&self.subscriptions()))
+        let prepare = self.attachments.prepare(source)?;
+        (!self.life.is_closed() && prepare.generation == generation)
+            .then(|| prepare.missing(&self.subscriptions()))
     }
-    pub(in crate::xiaomi::adapter) fn local_subscribed(
-        &self,
-        handle: &SessionHandle,
-        generation: u64,
-        binding: SubscriptionBinding,
-    ) -> bool {
-        let mut local = self.attachments.local.borrow_mut();
-        if local
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && local.prepare.generation == generation
-            && !self.life.is_closed()
-        {
-            if self.battery_binding().map(SubscriptionBinding::Property) == Some(binding) {
-                self.set_battery_subscription_problem(None);
-            }
-            local.prepare.subscribed(binding);
-            true
-        } else {
-            false
-        }
-    }
-    pub(in crate::xiaomi::adapter) fn subscription_failed(
+    pub(in crate::xiaomi::adapter) fn subscription_result(
         &self,
         source: &NotificationSource,
         generation: u64,
         binding: SubscriptionBinding,
-        problem: String,
-    ) {
-        let record = |prepare: &mut Prepare| {
-            if prepare.generation == generation {
+        result: Result<(), String>,
+    ) -> bool {
+        let Some(mut prepare) = self.attachments.prepare_mut(source) else {
+            return false;
+        };
+        if self.life.is_closed() || prepare.generation != generation {
+            return false;
+        }
+        match result {
+            Ok(()) => prepare.subscribed(binding),
+            Err(problem) => {
                 prepare.problems.insert(binding, problem);
             }
-        };
-        match source {
-            NotificationSource::Local(handle) if self.local_attached(handle) => {
-                record(&mut self.attachments.local.borrow_mut().prepare)
-            }
-            NotificationSource::Cloud(handle) if self.cloud_attached(handle) => {
-                record(&mut self.attachments.cloud.borrow_mut().prepare)
-            }
-            _ => {}
+        }
+        true
+    }
+    pub(in crate::xiaomi::adapter) fn finish_preparation(
+        &self,
+        source: &NotificationSource,
+        generation: u64,
+    ) {
+        if let Some(mut prepare) = self.attachments.prepare_mut(source)
+            && !self.life.is_closed()
+            && prepare.generation == generation
+        {
+            prepare.finish();
+        }
+    }
+    pub(in crate::xiaomi::adapter) fn abandon_preparation(
+        &self,
+        source: &NotificationSource,
+        generation: u64,
+    ) {
+        if let Some(mut prepare) = self.attachments.prepare_mut(source)
+            && !self.life.is_closed()
+            && prepare.generation == generation
+        {
+            prepare.running = false;
         }
     }
     pub(in crate::xiaomi::adapter) fn function_subscription_problem(
@@ -235,135 +233,6 @@ impl DeviceWork {
             );
         }
         (!problems.is_empty()).then(|| problems.join("; "))
-    }
-    pub(in crate::xiaomi::adapter) fn local_finished(
-        &self,
-        handle: &SessionHandle,
-        generation: u64,
-    ) {
-        let battery = self.battery_binding();
-        let mut local = self.attachments.local.borrow_mut();
-        if local
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && local.prepare.generation == generation
-            && let Some(problem) = local.prepare.finish(battery)
-        {
-            self.set_battery_subscription_problem(Some(problem));
-        }
-    }
-    pub(super) fn local_abandoned(&self, handle: &SessionHandle, generation: u64) {
-        let mut local = self.attachments.local.borrow_mut();
-        if local
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && local.prepare.generation == generation
-        {
-            local.prepare.running = false;
-        }
-    }
-    pub(in crate::xiaomi::adapter) fn begin_cloud_preparation(
-        &self,
-        handle: &NotificationHandle,
-    ) -> Option<u64> {
-        let mut cloud = self.attachments.cloud.borrow_mut();
-        if !cloud
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            || self.life.is_closed()
-        {
-            return None;
-        }
-        cloud.prepare.begin()
-    }
-    pub(in crate::xiaomi::adapter) fn cloud_current(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-    ) -> bool {
-        !self.life.is_closed()
-            && self
-                .attachments
-                .cloud
-                .borrow()
-                .connection
-                .as_ref()
-                .is_some_and(|current| {
-                    current.same_connection(handle)
-                        && self.attachments.cloud.borrow().prepare.generation == generation
-                })
-    }
-    pub(in crate::xiaomi::adapter) fn cloud_pending(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-    ) -> Option<Vec<SubscriptionBinding>> {
-        let cloud = self.attachments.cloud.borrow();
-        let current = cloud
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && cloud.prepare.generation == generation
-            && !self.life.is_closed();
-        current.then(|| cloud.prepare.missing(&self.subscriptions()))
-    }
-    pub(in crate::xiaomi::adapter) fn cloud_subscribed(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-        binding: SubscriptionBinding,
-    ) -> bool {
-        let mut cloud = self.attachments.cloud.borrow_mut();
-        if cloud
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && cloud.prepare.generation == generation
-            && !self.life.is_closed()
-        {
-            if self.battery_binding().map(SubscriptionBinding::Property) == Some(binding) {
-                self.set_battery_subscription_problem(None);
-            }
-            cloud.prepare.subscribed(binding);
-            true
-        } else {
-            false
-        }
-    }
-    pub(in crate::xiaomi::adapter) fn cloud_finished(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-    ) {
-        let battery = self.battery_binding();
-        let mut cloud = self.attachments.cloud.borrow_mut();
-        if cloud
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && cloud.prepare.generation == generation
-            && let Some(problem) = cloud.prepare.finish(battery)
-        {
-            self.set_battery_subscription_problem(Some(problem));
-        }
-    }
-    pub(in crate::xiaomi::adapter) fn cloud_abandoned(
-        &self,
-        handle: &NotificationHandle,
-        generation: u64,
-    ) {
-        let mut cloud = self.attachments.cloud.borrow_mut();
-        if cloud
-            .connection
-            .as_ref()
-            .is_some_and(|current| current.same_connection(handle))
-            && cloud.prepare.generation == generation
-        {
-            cloud.prepare.running = false;
-        }
     }
     pub(in crate::xiaomi::adapter) fn source_ready(
         &self,
@@ -397,27 +266,13 @@ impl DeviceWork {
         source: &NotificationSource,
         bindings: &[SubscriptionBinding],
     ) -> bool {
-        match source {
-            NotificationSource::Local(handle) => {
-                let local = self.attachments.local.borrow();
-                !self.life.is_closed()
-                    && local
-                        .connection
-                        .as_ref()
-                        .is_some_and(|current| current.same_connection(handle))
-                    && local.prepare.ready(bindings)
-            }
-            NotificationSource::Cloud(handle) => {
-                let cloud = self.attachments.cloud.borrow();
-                !self.life.is_closed()
-                    && cloud
-                        .connection
-                        .as_ref()
-                        .is_some_and(|current| current.same_connection(handle))
-                    && cloud.prepare.ready(bindings)
-            }
-        }
+        !self.life.is_closed()
+            && self
+                .attachments
+                .prepare(source)
+                .is_some_and(|prepare| prepare.ready(bindings))
     }
+
     fn subscription_problems(&self) -> Vec<String> {
         let required = self
             .required_subscriptions()
@@ -444,8 +299,14 @@ impl DeviceWork {
         if let Some(issue) = self.committed_battery_issue.borrow().as_ref() {
             values.push(issue.clone());
         }
-        if let Some(problem) = self.battery_subscription_problem.borrow().clone() {
-            values.push(problem);
+        if let Some(binding) = self.battery_binding() {
+            let local = self.attachments.local.borrow();
+            let cloud = self.attachments.cloud.borrow();
+            values.extend(
+                [&local.prepare, &cloud.prepare]
+                    .into_iter()
+                    .filter_map(|prepare| prepare.problems.get(&binding.into()).cloned()),
+            );
         }
         if let Some(problem) = self.battery_read_problem.borrow().clone() {
             values.push(problem);
@@ -454,12 +315,6 @@ impl DeviceWork {
     }
     pub(in crate::xiaomi::adapter) fn set_committed_battery_issue(&self, issue: Option<&str>) {
         *self.committed_battery_issue.borrow_mut() = issue.map(str::to_owned);
-    }
-    pub(in crate::xiaomi::adapter) fn set_battery_subscription_problem(
-        &self,
-        problem: Option<String>,
-    ) {
-        *self.battery_subscription_problem.borrow_mut() = problem;
     }
     pub(in crate::xiaomi::adapter) fn set_battery_read_problem(&self, problem: Option<String>) {
         *self.battery_read_problem.borrow_mut() = problem;
@@ -495,22 +350,24 @@ pub(super) async fn subscriptions(
     context: &Rc<Context>,
 ) -> Result<(), AdapterError> {
     let did = work.key.id.clone();
+    let source = NotificationSource::Local(handle.clone());
     loop {
         let (connection, preparation) = work.local_preparation_request().await;
         if !connection.same_connection(handle) {
-            work.local_abandoned(handle, preparation);
+            work.abandon_preparation(&source, preparation);
             continue;
         }
-        if !context.current_local(handle) || !work.local_current(handle, preparation) {
-            work.local_abandoned(handle, preparation);
+        if !context.current_local(handle) || !work.preparation_current(&source, preparation) {
+            work.abandon_preparation(&source, preparation);
             continue;
         }
         context
             .clock
             .wait_until(context.clock.now() + Duration::from_millis(10))
             .await;
-        let current = || context.current_local(handle) && work.local_current(handle, preparation);
-        let Some(mut pending) = work.local_pending(handle, preparation) else {
+        let current =
+            || context.current_local(handle) && work.preparation_current(&source, preparation);
+        let Some(mut pending) = work.pending_subscriptions(&source, preparation) else {
             continue;
         };
         'attempts: for attempt in 0..4 {
@@ -522,12 +379,20 @@ pub(super) async fn subscriptions(
                 let receipt_work = work.clone();
                 let receipt_context = context.clone();
                 let receipt_handle = handle.clone();
+                let receipt_source = source.clone();
                 let on_result = move |result: Result<(), crate::xiaomi::central::CentralError>| {
-                    if result.is_ok()
-                        && receipt_context.current_local(&receipt_handle)
-                        && receipt_work.local_subscribed(&receipt_handle, preparation, binding)
+                    if receipt_context.current_local(&receipt_handle)
+                        && receipt_work.subscription_result(
+                            &receipt_source,
+                            preparation,
+                            binding,
+                            result.map_err(|error| {
+                                format!("{} subscribe {binding}: {error}", receipt_work.key.id)
+                            }),
+                        )
                     {
                         receipt_context.changed.notify(usize::MAX);
+                        receipt_work.report(&receipt_context);
                     }
                 };
                 let result = match binding {
@@ -543,20 +408,11 @@ pub(super) async fn subscriptions(
                 }
                 match result {
                     Ok(()) => {}
-                    Err(error) => {
-                        let message = format!("{did} subscribe {binding}: {error}");
-                        work.subscription_failed(
-                            &NotificationSource::Local(handle.clone()),
-                            preparation,
-                            binding,
-                            message,
-                        );
-                        failed.push(binding);
-                    }
+                    Err(_) => failed.push(binding),
                 }
             }
             if failed.is_empty() || attempt == 3 {
-                work.local_finished(handle, preparation);
+                work.finish_preparation(&source, preparation);
                 work.report(context);
                 break;
             }
@@ -566,7 +422,7 @@ pub(super) async fn subscriptions(
                 .wait_until(context.clock.now() + Duration::from_millis(100))
                 .await;
         }
-        work.local_abandoned(handle, preparation);
+        work.abandon_preparation(&source, preparation);
         context.changed.notify(usize::MAX);
     }
 }

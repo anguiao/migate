@@ -1,4 +1,5 @@
 use super::*;
+use std::cell::{Ref, RefMut};
 
 /// Native connection receipts and active subscriptions share one authority.
 #[derive(Default)]
@@ -12,6 +13,50 @@ pub(super) struct NativeAttachments {
 }
 
 impl NativeAttachments {
+    pub(super) fn prepare(&self, source: &NotificationSource) -> Option<Ref<'_, Prepare>> {
+        match source {
+            NotificationSource::Local(handle) => Ref::filter_map(self.local.borrow(), |local| {
+                local
+                    .connection
+                    .as_ref()
+                    .filter(|current| current.same_connection(handle))
+                    .map(|_| &local.prepare)
+            })
+            .ok(),
+            NotificationSource::Cloud(handle) => Ref::filter_map(self.cloud.borrow(), |cloud| {
+                cloud
+                    .connection
+                    .as_ref()
+                    .filter(|current| current.same_connection(handle))
+                    .map(|_| &cloud.prepare)
+            })
+            .ok(),
+        }
+    }
+    pub(super) fn prepare_mut(&self, source: &NotificationSource) -> Option<RefMut<'_, Prepare>> {
+        match source {
+            NotificationSource::Local(handle) => {
+                RefMut::filter_map(self.local.borrow_mut(), |local| {
+                    local
+                        .connection
+                        .as_ref()
+                        .is_some_and(|current| current.same_connection(handle))
+                        .then_some(&mut local.prepare)
+                })
+                .ok()
+            }
+            NotificationSource::Cloud(handle) => {
+                RefMut::filter_map(self.cloud.borrow_mut(), |cloud| {
+                    cloud
+                        .connection
+                        .as_ref()
+                        .is_some_and(|current| current.same_connection(handle))
+                        .then_some(&mut cloud.prepare)
+                })
+                .ok()
+            }
+        }
+    }
     pub(super) fn retire(&self, did: &str, property_subscriptions: bool) {
         let local = self.local.borrow_mut().connection.take();
         if let Some(local) = local {
@@ -69,11 +114,9 @@ impl Prepare {
         self.subscribed.insert(binding);
         self.problems.remove(&binding);
     }
-    /// Keep optional battery failures separate from required source readiness.
-    pub(super) fn finish(&mut self, battery: Option<PropertyBinding>) -> Option<String> {
+    pub(super) fn finish(&mut self) {
         self.running = false;
         self.exhausted = !self.problems.is_empty();
-        battery.and_then(|binding| self.problems.get(&binding.into()).cloned())
     }
     pub(super) fn ready(&self, bindings: &[SubscriptionBinding]) -> bool {
         bindings
@@ -201,7 +244,7 @@ impl DeviceWork {
             drop(previous.unsubscribe_properties(&self.key.id));
             drop(previous.unsubscribe_events(&self.key.id));
         }
-        self.local_source_retired();
+        self.source_retired(PathKind::Local);
         true
     }
     /// Withdraw only this local attachment. A cloud observer remains valid.
@@ -217,7 +260,7 @@ impl DeviceWork {
         local.connection.take();
         local.reset_prepare();
         drop(local);
-        self.local_source_retired();
+        self.source_retired(PathKind::Local);
         true
     }
     pub(in crate::xiaomi::adapter) fn local_attached(&self, handle: &SessionHandle) -> bool {
@@ -242,7 +285,7 @@ impl DeviceWork {
         cloud.connection.replace(handle);
         cloud.reset_prepare();
         drop(cloud);
-        self.cloud_source_retired();
+        self.source_retired(PathKind::Cloud);
         true
     }
     /// Withdraw only this cloud attachment. A local observer remains valid.
@@ -258,7 +301,7 @@ impl DeviceWork {
         cloud.connection.take();
         cloud.reset_prepare();
         drop(cloud);
-        self.cloud_source_retired();
+        self.source_retired(PathKind::Cloud);
         true
     }
     pub(in crate::xiaomi::adapter) fn cloud_attached(&self, handle: &NotificationHandle) -> bool {
@@ -314,38 +357,24 @@ impl DeviceWork {
         }
     }
     pub(in crate::xiaomi::adapter) fn retire_online(&self) {
-        let mut cloud = self.attachments.cloud.borrow_mut();
-        if cloud.online.take().is_some() {
-            drop(
-                cloud
-                    .connection
-                    .as_ref()
-                    .unwrap()
-                    .unsubscribe_online(&self.key.id),
-            );
+        let handle = {
+            let mut cloud = self.attachments.cloud.borrow_mut();
+            cloud
+                .online
+                .take()
+                .map(|_| cloud.connection.as_ref().unwrap().clone())
+        };
+        if let Some(handle) = handle {
+            drop(handle.unsubscribe_online(&self.key.id));
         }
     }
-    pub(super) fn local_source_retired(&self) {
+    fn source_retired(&self, kind: PathKind) {
         let ids = self
             .attachments
             .active
             .borrow()
             .iter()
-            .filter(|(_, source)| matches!(source, NotificationSource::Local(_)))
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        for id in ids {
-            self.revoke_observer(&id);
-        }
-        self.attachments.changed.notify(usize::MAX);
-    }
-    pub(super) fn cloud_source_retired(&self) {
-        let ids = self
-            .attachments
-            .active
-            .borrow()
-            .iter()
-            .filter(|(_, source)| matches!(source, NotificationSource::Cloud(_)))
+            .filter(|(_, source)| source.kind() == kind)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         for id in ids {
@@ -363,27 +392,38 @@ impl DeviceWork {
         cloud.connection.is_some()
             && (!cloud.prepare.subscribed.is_empty() || cloud.prepare.running)
     }
-    pub(super) fn retire_local_preparation(&self) {
-        self.attachments.local.borrow_mut().invalidate_prepare();
+    fn retire_preparation(&self, source: &NotificationSource) {
+        if matches!(source, NotificationSource::Local(_)) {
+            self.attachments.local.borrow_mut().requested = false;
+        }
+        if let Some(mut prepare) = self.attachments.prepare_mut(source) {
+            prepare.invalidate();
+        }
     }
-    pub(super) fn retire_cloud_preparation(&self) {
-        self.attachments.cloud.borrow_mut().prepare.invalidate();
+    fn retire_notifications(&self, source: NotificationSource) {
+        self.retire_preparation(&source);
+        match source {
+            NotificationSource::Local(handle) => {
+                drop(handle.unsubscribe_properties(&self.key.id));
+                drop(handle.unsubscribe_events(&self.key.id));
+            }
+            NotificationSource::Cloud(handle) => {
+                drop(handle.unsubscribe_properties(&self.key.id));
+                drop(handle.unsubscribe_events(&self.key.id));
+            }
+        }
     }
     pub(in crate::xiaomi::adapter) fn retire_local_notifications(&self) {
         let handle = self.attachments.local.borrow().connection.clone();
         if let Some(handle) = handle {
-            drop(handle.unsubscribe_properties(&self.key.id));
-            drop(handle.unsubscribe_events(&self.key.id));
+            self.retire_notifications(NotificationSource::Local(handle));
         }
-        self.retire_local_preparation();
     }
     pub(in crate::xiaomi::adapter) fn retire_cloud_notifications(&self) {
         let handle = self.attachments.cloud.borrow().connection.clone();
         if let Some(handle) = handle {
-            drop(handle.unsubscribe_properties(&self.key.id));
-            drop(handle.unsubscribe_events(&self.key.id));
+            self.retire_notifications(NotificationSource::Cloud(handle));
         }
-        self.retire_cloud_preparation();
     }
     pub(in crate::xiaomi::adapter) fn local_exhausted(&self) -> bool {
         self.attachments.local.borrow().prepare.exhausted

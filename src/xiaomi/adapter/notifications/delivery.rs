@@ -16,6 +16,7 @@ impl Context {
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone());
+        let routes = self.device_routes(did);
         if let Some(work) = &work
             && let Some(function) = work.native.device().functions().iter().find(|function| {
                 function
@@ -25,13 +26,14 @@ impl Context {
         {
             let id = function.id();
             let active = work.function_observer(id);
-            let desired = self.notification_source(did, id);
+            let notification = &routes.functions[id].notification;
+            let desired = &notification.desired;
             let selected = active.as_ref().is_some_and(|active| active.same(source))
                 || desired.as_ref().is_some_and(|desired| desired.same(source))
                 || active.is_none() && desired.is_none();
             if function.relay_mode().unwrap().1
                 && selected
-                && self.source_valid_for(did, id, source)
+                && routes.functions[id].notification.valid(source)
                 && work.source_binding_ready(source, binding)
                 && work
                     .observe_relay_mode(
@@ -61,7 +63,7 @@ impl Context {
                 function.relay_mode().is_some() && function.power() == Some(binding)
             })
             && let Some(value) = value.as_bool()
-            && self.source_valid_for(did, function.id(), source)
+            && routes.functions[function.id()].notification.valid(source)
             && work
                 .function_observer(function.id())
                 .is_some_and(|active| active.same(source))
@@ -86,7 +88,7 @@ impl Context {
         {
             if !cached_report
                 && trigger.accepts(value)
-                && self.accept_state_notification(work, id, source)
+                && self.accept_state_notification(work, id, source, &routes)
             {
                 work.refresh_property(id, power);
             }
@@ -100,7 +102,7 @@ impl Context {
                 .iter()
                 .find(|function| work.is_standard_mode_binding(function.id(), binding))
         {
-            if self.accept_state_notification(work, function.id(), source)
+            if self.accept_state_notification(work, function.id(), source, &routes)
                 && let Some(valid) = work.observe_standard_mode(
                     function,
                     binding,
@@ -134,7 +136,7 @@ impl Context {
             })
         {
             if function.air_conditioner().unwrap().mcn04().is_some() {
-                if self.accept_state_notification(work, function.id(), source) {
+                if self.accept_state_notification(work, function.id(), source, &routes) {
                     let _ = work.observe_mcn04(
                         function,
                         binding,
@@ -155,7 +157,7 @@ impl Context {
                 return;
             }
             if let Ok(value) = DeviceWork::decode_air_conditioner(function, binding, value)
-                && self.accept_state_notification(work, function.id(), source)
+                && self.accept_state_notification(work, function.id(), source, &routes)
             {
                 work.observe_air_conditioner(
                     function,
@@ -182,7 +184,7 @@ impl Context {
             })
         {
             if let Ok(value) = DeviceWork::decode_heater(function, binding, value)
-                && self.accept_state_notification(work, function.id(), source)
+                && self.accept_state_notification(work, function.id(), source, &routes)
             {
                 let applied = work.observe_heater(
                     function,
@@ -215,7 +217,7 @@ impl Context {
             })
         {
             if let Ok(value) = DeviceWork::decode_fan(function, binding, value)
-                && self.accept_state_notification(work, function.id(), source)
+                && self.accept_state_notification(work, function.id(), source, &routes)
             {
                 let applied = work.observe_fan(
                     function,
@@ -248,7 +250,7 @@ impl Context {
             })
         {
             if let Ok(value) = DeviceWork::decode_curtain(function, binding, value)
-                && self.accept_state_notification(work, function.id(), source)
+                && self.accept_state_notification(work, function.id(), source, &routes)
             {
                 work.observe_curtain(
                     function,
@@ -277,7 +279,7 @@ impl Context {
             })
         {
             if let Ok(active) = function.state().unwrap().read_value(value)
-                && self.accept_state_notification(work, function.id(), source)
+                && self.accept_state_notification(work, function.id(), source, &routes)
             {
                 work.observe_state(
                     function,
@@ -300,7 +302,7 @@ impl Context {
         }
         if let Some(work) = work
             && let Some(id) = work.binding_channel(binding)
-            && self.source_valid_for(did, id, source)
+            && routes.functions[id].notification.valid(source)
             && work
                 .function_observer(id)
                 .is_some_and(|active| active.same(source))
@@ -324,9 +326,11 @@ impl Context {
         work: &DeviceWork,
         id: &str,
         source: &NotificationSource,
+        routes: &super::super::routing::DeviceRoutes,
     ) -> bool {
         let did = &work.key.id;
-        if !self.source_valid_for(did, id, source) {
+        let notification = &routes.functions[id].notification;
+        if !notification.valid(source) {
             return false;
         }
         if work
@@ -335,8 +339,9 @@ impl Context {
         {
             return true;
         }
-        if self
-            .notification_source(did, id)
+        if notification
+            .desired
+            .as_ref()
             .is_some_and(|desired| desired.same(source))
             && work.source_ready(id, source)
         {
@@ -374,9 +379,10 @@ impl Context {
             .devices
             .get(did)
             .and_then(|slot| slot.admitted.clone());
+        let routes = self.device_routes(did);
         if let Some(work) = work
             && let Some(function) = work.event_function(binding)
-            && self.accept_state_notification(&work, function.id(), source)
+            && self.accept_state_notification(&work, function.id(), source, &routes)
         {
             work.observe_state(
                 function,

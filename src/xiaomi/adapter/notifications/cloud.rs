@@ -189,13 +189,14 @@ pub(super) async fn prepare_properties(
     preparation: u64,
 ) -> Result<(), AdapterError> {
     let did = work.key.id.clone();
+    let source = NotificationSource::Cloud(handle.clone());
     let current = || {
-        work.cloud_current(&handle, preparation)
+        work.preparation_current(&source, preparation)
             && context.current_notifications(&handle)
             && context.cloud_observation_candidate(&did, false).is_ok()
     };
-    let Some(mut pending) = work.cloud_pending(&handle, preparation) else {
-        work.cloud_abandoned(&handle, preparation);
+    let Some(mut pending) = work.pending_subscriptions(&source, preparation) else {
+        work.abandon_preparation(&source, preparation);
         return Ok(());
     };
     'attempts: for attempt in 0..4 {
@@ -213,12 +214,21 @@ pub(super) async fn prepare_properties(
             let receipt_work = work.clone();
             let receipt_context = context.clone();
             let receipt_handle = handle.clone();
+            let receipt_source = source.clone();
             let on_result = move |result: Result<(), NotificationError>| {
-                if result.is_ok()
+                if !matches!(result, Err(NotificationError::Unauthorized))
                     && receipt_context.current_notifications(&receipt_handle)
-                    && receipt_work.cloud_subscribed(&receipt_handle, preparation, binding)
+                    && receipt_work.subscription_result(
+                        &receipt_source,
+                        preparation,
+                        binding,
+                        result.map_err(|error| {
+                            format!("{} cloud subscribe {binding}: {error}", receipt_work.key.id)
+                        }),
+                    )
                 {
                     receipt_context.changed.notify(usize::MAX);
+                    receipt_work.report(&receipt_context);
                 }
             };
             let result = match binding {
@@ -249,20 +259,11 @@ pub(super) async fn prepare_properties(
                     )?;
                     break 'attempts;
                 }
-                Err(error) => {
-                    let message = format!("{did} cloud subscribe {binding}: {error}");
-                    work.subscription_failed(
-                        &NotificationSource::Cloud(handle.clone()),
-                        preparation,
-                        binding,
-                        message,
-                    );
-                    failed.push(binding);
-                }
+                Err(_) => failed.push(binding),
             }
         }
         if failed.is_empty() || attempt == 3 {
-            work.cloud_finished(&handle, preparation);
+            work.finish_preparation(&source, preparation);
             work.report(&context);
             break;
         }
@@ -272,7 +273,7 @@ pub(super) async fn prepare_properties(
             .wait_until(context.clock.now() + Duration::from_secs(1))
             .await;
     }
-    work.cloud_abandoned(&handle, preparation);
+    work.abandon_preparation(&source, preparation);
     context.changed.notify(usize::MAX);
     Ok(())
 }

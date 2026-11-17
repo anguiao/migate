@@ -12,11 +12,11 @@ pub(in crate::xiaomi::adapter) struct NotificationRoutes {
 }
 
 impl NotificationRoutes {
+    pub(in crate::xiaomi::adapter) fn sources(&self) -> impl Iterator<Item = &NotificationSource> {
+        self.local.iter().chain(self.cloud.iter())
+    }
     pub(in crate::xiaomi::adapter) fn valid(&self, source: &NotificationSource) -> bool {
-        self.local
-            .iter()
-            .chain(self.cloud.iter())
-            .any(|candidate| candidate.same(source))
+        self.sources().any(|candidate| candidate.same(source))
     }
 }
 
