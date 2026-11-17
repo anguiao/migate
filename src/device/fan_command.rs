@@ -3,7 +3,10 @@ use std::{sync::Arc, time::Instant};
 use super::{
     Command, CommandError, CommandReceiver, DeviceRequest, Function, FunctionKind,
     FunctionSnapshot,
-    step_command::{StepCommand, StepCoordinator, StepEntry},
+    state::RuntimeState,
+    step_command::{
+        self, StepAction, StepCommand, StepCoordinator, StepEntry, StepRequest, StepSubmission,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +33,14 @@ pub(crate) enum FanStep {
 }
 
 impl StepCommand for FanCommand {
+    const MISSING_WRITE: &'static str = "fan request has no settled write";
+
+    fn coordinator(state: &RuntimeState) -> Option<&StepCoordinator<Self>> {
+        state.fan().map(|runtime| &runtime.commands)
+    }
+    fn coordinator_mut(state: &mut RuntimeState) -> Option<&mut StepCoordinator<Self>> {
+        state.fan_mut().map(|runtime| &mut runtime.commands)
+    }
     fn supersedes(self, previous: Self) -> bool {
         self.is_speed() && previous.is_speed()
     }
@@ -50,9 +61,7 @@ impl StepCommand for FanCommand {
     }
 }
 
-pub(super) type FanCoordinator = StepCoordinator<FanCommand>;
-
-pub struct FanAction(Arc<StepEntry<FanCommand>>);
+pub struct FanAction(StepAction<FanCommand>);
 impl FanAction {
     /// A successful result means all required writes were accepted.
     pub async fn accepted(&self) -> Result<FunctionSnapshot, CommandError> {
@@ -63,26 +72,10 @@ impl FanAction {
 impl Function {
     pub(crate) fn pending_fan_commands(&self) -> Vec<FanCommand> {
         let state = self.0.state.lock().unwrap();
-        let Some(commands) = state.fan_commands() else {
-            return Vec::new();
-        };
-        commands.pending_commands()
+        state
+            .fan()
+            .map_or_else(Vec::new, |runtime| runtime.commands.pending_commands())
     }
-    fn submit_fan_locked(
-        &self,
-        state: &mut super::state::RuntimeState,
-        command: FanCommand,
-    ) -> Result<FanAction, CommandError> {
-        let commands = state.fan_commands().ok_or(CommandError::Unsupported)?;
-        if commands.is_closed() {
-            return Err(CommandError::Cancelled);
-        }
-        self.snapshot_locked(state).availability.command_result()?;
-        let action = FanAction(state.fan_commands_mut().unwrap().submit(command));
-        self.0.submitted.notify(usize::MAX);
-        Ok(action)
-    }
-
     /// Queue a fan operation without changing the observed device state.
     pub fn begin_fan(&self, command: FanCommand) -> Result<super::FanAction, CommandError> {
         if let (FanCommand::Speed(speed), FunctionKind::Fan { speed_count, .. }) =
@@ -104,144 +97,79 @@ impl Function {
         {
             return Err(CommandError::Unsupported);
         }
-        let mut state = self.0.state.lock().unwrap();
-        self.submit_fan_locked(&mut state, command)
+        step_command::submit(self, |_| Ok(command)).map(FanAction)
     }
 
     pub(super) async fn execute_fan_power(
         &self,
         command: Command,
     ) -> Result<FunctionSnapshot, CommandError> {
-        let action = self.begin_fan_power(command)?;
-        let _submission = PowerSubmission {
-            function: self.clone(),
-            entry: action.0.clone(),
-        };
+        let action = step_command::submit::<FanCommand>(self, |state| {
+            Ok(FanCommand::Power(match command {
+                Command::On => true,
+                Command::Off => false,
+                Command::Toggle => !state
+                    .fan()
+                    .unwrap()
+                    .snapshot
+                    .power
+                    .value
+                    .ok_or(CommandError::UnknownState)?,
+            }))
+        })?;
+        let _submission = StepSubmission::new(self.clone(), action.0.clone());
         action.accepted().await
-    }
-    fn begin_fan_power(&self, command: Command) -> Result<FanAction, CommandError> {
-        if command == Command::On {
-            return self.begin_fan(FanCommand::Power(true));
-        }
-        if command == Command::Off {
-            return self.begin_fan(FanCommand::Power(false));
-        }
-        let mut state = self.0.state.lock().unwrap();
-        let commands = state.fan_commands().ok_or(CommandError::Unsupported)?;
-        if commands.is_closed() {
-            return Err(CommandError::Cancelled);
-        }
-        self.snapshot_locked(&state).availability.command_result()?;
-        let target = match command {
-            Command::On | Command::Off => unreachable!(),
-            Command::Toggle => !state.fan_power().ok_or(CommandError::UnknownState)?,
-        };
-        self.submit_fan_locked(&mut state, FanCommand::Power(target))
-    }
-}
-
-struct PowerSubmission {
-    function: Function,
-    entry: Arc<StepEntry<FanCommand>>,
-}
-impl Drop for PowerSubmission {
-    fn drop(&mut self) {
-        let mut state = self.function.0.state.lock().unwrap();
-        let commands = state.fan_commands_mut().unwrap();
-        commands.cancel_pending(&self.entry);
     }
 }
 
 impl CommandReceiver {
     pub(super) async fn next_fan_operation(&mut self) -> Option<DeviceRequest> {
-        let flight = self
-            .function
-            .0
-            .state
-            .lock()
-            .unwrap()
-            .fan_commands()
-            .unwrap()
-            .flight();
-        if let Some(flight) = flight {
-            flight.wait_gate().await;
-            let mut state = self.function.0.state.lock().unwrap();
-            let commands = state.fan_commands_mut().unwrap();
-            commands.release_flight(&flight);
-        }
-        loop {
-            let listener = self.function.0.submitted.listen();
-            {
-                let mut state = self.function.0.state.lock().unwrap();
-                let commands = state.fan_commands_mut().unwrap();
-                if let Some(entry) = commands.take_next() {
-                    return Some(DeviceRequest::Fan(FanRequest {
-                        command: entry.command,
-                        function: self.function.clone(),
-                        entry,
-                    }));
-                }
-                if commands.is_closed() {
-                    return None;
-                }
-            }
-            listener.await;
-        }
+        let request = step_command::next::<FanCommand>(&self.function).await?;
+        Some(DeviceRequest::Fan(FanRequest {
+            command: request.entry.command,
+            request,
+        }))
     }
 }
 
 /// Owns every step of one operation until the original receipt settles.
 pub struct FanRequest {
     pub command: FanCommand,
-    function: Function,
-    entry: Arc<StepEntry<FanCommand>>,
+    request: StepRequest<FanCommand>,
 }
 impl FanRequest {
     pub(crate) fn unsent_low_failure(&self) -> Option<CommandError> {
-        self.entry.preceding.as_ref()?.unsent_failure()
+        self.request.entry.preceding.as_ref()?.unsent_failure()
     }
     pub(crate) fn queued_at(&self) -> Instant {
-        self.entry.queued_at()
+        self.request.queued_at()
     }
     pub(crate) fn needs_power_on(&self) -> bool {
-        let state = self.function.0.state.lock().unwrap();
-        state.fan_commands().unwrap().needs_power_on()
+        let state = self.request.function.0.state.lock().unwrap();
+        state.fan().unwrap().power_confirmation.needs_power_on()
     }
     pub(crate) fn current_result(&self) -> Result<(), CommandError> {
-        self.entry.current_result()
+        self.request.current_result()
     }
     pub(crate) fn mark_sent(&self, step: FanStep) -> Result<(), CommandError> {
-        let mut state = self.function.0.state.lock().unwrap();
-        self.entry.mark_sent()?;
+        let mut state = self.request.function.0.state.lock().unwrap();
+        self.request.mark_sent()?;
         if step == FanStep::Power(false) {
-            state.fan_commands_mut().unwrap().power_off_sent();
+            state.fan_mut().unwrap().power_confirmation.power_off_sent();
         }
         Ok(())
     }
     pub(crate) fn step_accepted(&self) -> Result<(), CommandError> {
-        let _state = self.function.0.state.lock().unwrap();
-        self.entry.step_accepted()
+        let _state = self.request.function.0.state.lock().unwrap();
+        self.request.step_accepted()
     }
     pub(crate) fn accept(self) -> Result<FunctionSnapshot, CommandError> {
-        let state = self.function.0.state.lock().unwrap();
-        self.entry.accept(
-            || self.function.snapshot_locked(&state),
-            "fan request has no settled write",
-        )
+        self.request.accept()
     }
     pub(crate) fn accept_unchanged(self) -> Result<FunctionSnapshot, CommandError> {
-        let state = self.function.0.state.lock().unwrap();
-        self.entry
-            .accept_unchanged(|| self.function.snapshot_locked(&state))
+        self.request.accept_unchanged()
     }
     pub(crate) fn reject(self, error: CommandError) {
-        let _state = self.function.0.state.lock().unwrap();
-        self.entry.reject(error);
-    }
-}
-impl Drop for FanRequest {
-    fn drop(&mut self) {
-        let _state = self.function.0.state.lock().unwrap();
-        self.entry.cancel();
+        self.request.reject(error);
     }
 }

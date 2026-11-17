@@ -15,7 +15,7 @@ impl DeviceWork {
         let id = function.id();
         let physical = self.physical().function(id).unwrap();
         if matches!(origin, Origin::Cache) {
-            physical.observe_cached_heater(value, observation.source_time, observation.received_at);
+            physical.observe_heater(value, observation.source_time, observation.received_at);
             self.resolve_initial(id, binding);
         } else {
             if matches!(value, crate::device::HeaterValue::Power(true))

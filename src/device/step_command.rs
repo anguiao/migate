@@ -7,10 +7,14 @@ use std::{
     time::Instant,
 };
 
-use super::{CommandError, FunctionSnapshot, command::Completion};
+use super::{CommandError, Function, FunctionSnapshot, command::Completion, state::RuntimeState};
 
 /// Defines which queued operations a new operation can replace or interrupt.
 pub(super) trait StepCommand: Copy {
+    const MISSING_WRITE: &'static str;
+
+    fn coordinator(state: &RuntimeState) -> Option<&StepCoordinator<Self>>;
+    fn coordinator_mut(state: &mut RuntimeState) -> Option<&mut StepCoordinator<Self>>;
     fn supersedes(self, previous: Self) -> bool;
     fn interrupts(self, previous: Self) -> bool;
     fn follow(self, _previous: &Arc<StepEntry<Self>>) -> Option<Arc<StepEntry<Self>>> {
@@ -145,7 +149,6 @@ impl<C> StepEntry<C> {
 pub(super) struct StepCoordinator<C> {
     pending: VecDeque<Arc<StepEntry<C>>>,
     flight: Option<Arc<StepEntry<C>>>,
-    confirmed_power_on: bool,
     closed: bool,
 }
 impl<C> Default for StepCoordinator<C> {
@@ -153,7 +156,6 @@ impl<C> Default for StepCoordinator<C> {
         Self {
             pending: VecDeque::new(),
             flight: None,
-            confirmed_power_on: false,
             closed: false,
         }
     }
@@ -251,20 +253,6 @@ impl<C: StepCommand> StepCoordinator<C> {
         self.closed
     }
 
-    pub(super) fn observe_power(&mut self, power: bool, fresh: bool) {
-        if fresh || !power {
-            self.confirmed_power_on = power;
-        }
-    }
-
-    pub(super) fn needs_power_on(&self) -> bool {
-        !self.confirmed_power_on
-    }
-
-    pub(super) fn power_off_sent(&mut self) {
-        self.confirmed_power_on = false;
-    }
-
     pub(super) fn unavailable(&mut self, error: CommandError) {
         for entry in self.pending.drain(..) {
             entry.invalidate(error.clone(), false);
@@ -277,5 +265,123 @@ impl<C: StepCommand> StepCoordinator<C> {
     pub(super) fn close(&mut self, error: CommandError) {
         self.closed = true;
         self.unavailable(error);
+    }
+}
+
+/// The acceptance of one queued operation, independent of the device's steps.
+pub(super) struct StepAction<C>(pub(super) Arc<StepEntry<C>>);
+impl<C> StepAction<C> {
+    pub(super) async fn accepted(&self) -> Result<FunctionSnapshot, CommandError> {
+        self.0.accepted().await
+    }
+}
+
+/// Resolve a device command at the common admission boundary.
+pub(super) fn submit<C: StepCommand>(
+    function: &Function,
+    resolve: impl FnOnce(&RuntimeState) -> Result<C, CommandError>,
+) -> Result<StepAction<C>, CommandError> {
+    let mut state = function.0.state.lock().unwrap();
+    let commands = C::coordinator(&state).ok_or(CommandError::Unsupported)?;
+    if commands.is_closed() {
+        return Err(CommandError::Cancelled);
+    }
+    function
+        .snapshot_locked(&state)
+        .availability
+        .command_result()?;
+    let command = resolve(&state)?;
+    let action = StepAction(C::coordinator_mut(&mut state).unwrap().submit(command));
+    function.0.submitted.notify(usize::MAX);
+    Ok(action)
+}
+
+/// Wait for the original sent receipt before taking the next operation.
+pub(super) async fn next<C: StepCommand>(function: &Function) -> Option<StepRequest<C>> {
+    let flight = C::coordinator(&function.0.state.lock().unwrap())
+        .unwrap()
+        .flight();
+    if let Some(flight) = flight {
+        flight.wait_gate().await;
+        C::coordinator_mut(&mut function.0.state.lock().unwrap())
+            .unwrap()
+            .release_flight(&flight);
+    }
+    loop {
+        let listener = function.0.submitted.listen();
+        {
+            let mut state = function.0.state.lock().unwrap();
+            let commands = C::coordinator_mut(&mut state).unwrap();
+            if let Some(entry) = commands.take_next() {
+                return Some(StepRequest {
+                    function: function.clone(),
+                    entry,
+                });
+            }
+            if commands.is_closed() {
+                return None;
+            }
+        }
+        listener.await;
+    }
+}
+
+/// Owns the common receipt and cancellation of one operation.
+pub(super) struct StepRequest<C: StepCommand> {
+    pub(super) function: Function,
+    pub(super) entry: Arc<StepEntry<C>>,
+}
+impl<C: StepCommand> StepRequest<C> {
+    pub(super) fn queued_at(&self) -> Instant {
+        self.entry.queued_at()
+    }
+    pub(super) fn current_result(&self) -> Result<(), CommandError> {
+        self.entry.current_result()
+    }
+    // The caller holds the function state lock for the complete device step.
+    pub(super) fn mark_sent(&self) -> Result<(), CommandError> {
+        self.entry.mark_sent()
+    }
+    pub(super) fn step_accepted(&self) -> Result<(), CommandError> {
+        self.entry.step_accepted()
+    }
+    pub(super) fn accept(&self) -> Result<FunctionSnapshot, CommandError> {
+        let state = self.function.0.state.lock().unwrap();
+        self.entry
+            .accept(|| self.function.snapshot_locked(&state), C::MISSING_WRITE)
+    }
+    pub(super) fn accept_unchanged(&self) -> Result<FunctionSnapshot, CommandError> {
+        let state = self.function.0.state.lock().unwrap();
+        self.entry
+            .accept_unchanged(|| self.function.snapshot_locked(&state))
+    }
+    pub(super) fn reject(&self, error: CommandError) {
+        let _state = self.function.0.state.lock().unwrap();
+        self.entry.reject(error);
+    }
+}
+impl<C: StepCommand> Drop for StepRequest<C> {
+    fn drop(&mut self) {
+        let _state = self.function.0.state.lock().unwrap();
+        self.entry.cancel();
+    }
+}
+
+/// A dropped power caller withdraws an operation only while it is still queued.
+pub(super) struct StepSubmission<C: StepCommand> {
+    function: Function,
+    entry: Arc<StepEntry<C>>,
+}
+impl<C: StepCommand> StepSubmission<C> {
+    pub(super) fn new(function: Function, entry: Arc<StepEntry<C>>) -> Self {
+        Self { function, entry }
+    }
+}
+impl<C: StepCommand> Drop for StepSubmission<C> {
+    fn drop(&mut self) {
+        let mut state = self.function.0.state.lock().unwrap();
+        C::coordinator_mut(&mut state)
+            .unwrap()
+            .cancel_pending(&self.entry);
     }
 }

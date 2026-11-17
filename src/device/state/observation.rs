@@ -166,7 +166,7 @@ impl Function {
             runtime.constraints_current = false;
         }
         runtime.mode_revision = runtime.mode_revision.wrapping_add(1);
-        runtime.thermostat.commands.power_off_sent();
+        runtime.power_confirmation.power_off_sent();
     }
     pub(crate) fn observe_cached_air_conditioner(
         &self,
@@ -183,31 +183,16 @@ impl Function {
         source_time: Option<i64>,
         received_at: i64,
     ) {
-        self.apply_heater_observation(value, source_time, received_at, true);
-    }
-    pub(crate) fn observe_cached_heater(
-        &self,
-        value: crate::device::HeaterValue,
-        source_time: Option<i64>,
-        received_at: i64,
-    ) {
-        self.apply_heater_observation(value, source_time, received_at, false);
-    }
-    fn apply_heater_observation(
-        &self,
-        value: crate::device::HeaterValue,
-        source_time: Option<i64>,
-        received_at: i64,
-        fresh: bool,
-    ) {
         let mut state = self.0.state.lock().unwrap();
-        let core = &mut state.heater_mut().expect("heater function").thermostat;
+        let runtime = state.heater_mut().expect("heater function");
+        let core = &mut runtime.thermostat;
         let changed = match value {
             crate::device::HeaterValue::Power(power) => {
-                core.observe_power(power, fresh, source_time, received_at)
+                core.power.update(power, source_time, received_at)
             }
             crate::device::HeaterValue::Temperature(temperature) => {
-                core.observe_target_temperature(temperature, source_time, received_at)
+                core.target_temperature
+                    .update(temperature, source_time, received_at)
             }
         };
         if changed {
@@ -225,31 +210,19 @@ impl Function {
         let mut state = self.0.state.lock().unwrap();
         let runtime = state.heater_mut().expect("heater function");
         let changed = runtime
-            .thermostat
-            .observe_invalid_current_temperature(source_time, received_at);
+            .current_temperature
+            .invalidate(source_time, received_at);
         if changed {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
         changed
     }
-    pub(crate) fn heater_source_changed(&self) {
-        let mut state = self.0.state.lock().unwrap();
-        state
-            .heater_mut()
-            .expect("heater function")
-            .thermostat
-            .commands
-            .power_off_sent();
-    }
     /// Update the built-in heating temperature source without changing its last reading.
     pub(crate) fn set_heater_temperature_source_available(&self, available: bool) {
         let mut state = self.0.state.lock().unwrap();
         let runtime = state.heater_mut().expect("heater function");
-        if runtime
-            .thermostat
-            .set_temperature_source_available(available)
-        {
+        if runtime.current_temperature.set_available(available) {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
         }
@@ -270,8 +243,8 @@ impl Function {
         let mut state = self.0.state.lock().unwrap();
         let runtime = state.heater_mut().expect("heater function");
         if runtime
-            .thermostat
-            .observe_current_temperature(value, source_time, received_at)
+            .current_temperature
+            .observe(value, source_time, received_at)
         {
             state.revision = state.revision.wrapping_add(1);
             self.0.changed.notify(usize::MAX);
@@ -293,10 +266,11 @@ impl Function {
         for &value in values {
             match value {
                 crate::device::AirConditionerValue::Power(power) => {
-                    changed |=
-                        runtime
-                            .thermostat
-                            .observe_power(power, fresh, source_time, received_at);
+                    runtime.power_confirmation.observe(power, fresh);
+                    changed |= runtime
+                        .thermostat
+                        .power
+                        .update(power, source_time, received_at);
                 }
                 crate::device::AirConditionerValue::Mode(mode) => {
                     if fresh {
@@ -304,12 +278,10 @@ impl Function {
                         runtime.planning_mode = None;
                         runtime.observed_mode = Some(mode);
                     }
-                    changed |= runtime
-                        .thermostat
-                        .observe_mode(mode, source_time, received_at);
+                    changed |= runtime.mode.update(mode, source_time, received_at);
                 }
                 crate::device::AirConditionerValue::Temperature(temperature) => {
-                    changed |= runtime.thermostat.observe_target_temperature(
+                    changed |= runtime.thermostat.target_temperature.update(
                         temperature,
                         source_time,
                         received_at,
@@ -349,7 +321,7 @@ impl Function {
         };
         let changed = match value {
             crate::device::FanValue::Power(value) => {
-                fan.commands.observe_power(value, fresh);
+                fan.power_confirmation.observe(value, fresh);
                 fan.snapshot.power.update(value, source_time, received_at)
             }
             crate::device::FanValue::Speed(value) => {

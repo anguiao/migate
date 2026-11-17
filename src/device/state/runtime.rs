@@ -60,19 +60,38 @@ pub(super) struct LightRuntime {
     snapshot: LightSnapshot,
 }
 
-pub(super) struct FanRuntime {
-    pub(super) snapshot: device::FanSnapshot,
-    pub(super) commands: device::fan_command::FanCoordinator,
+/// Planning may use a fresh on observation, while cached off remains conservative.
+#[derive(Default)]
+pub(in crate::device) struct PowerConfirmation(bool);
+impl PowerConfirmation {
+    pub(in crate::device) fn observe(&mut self, power: bool, fresh: bool) {
+        if fresh || !power {
+            self.0 = power;
+        }
+    }
+    pub(in crate::device) fn needs_power_on(&self) -> bool {
+        !self.0
+    }
+    pub(in crate::device) fn power_off_sent(&mut self) {
+        self.0 = false;
+    }
+}
+
+pub(in crate::device) struct FanRuntime {
+    pub(in crate::device) snapshot: device::FanSnapshot,
+    pub(in crate::device) commands: device::step_command::StepCoordinator<device::FanCommand>,
+    pub(in crate::device) power_confirmation: PowerConfirmation,
 }
 
 pub(in crate::device) struct HeaterRuntime {
-    pub(in crate::device) thermostat:
-        device::thermostat::ThermostatRuntime<device::HeaterCommand, device::HeaterMode>,
+    pub(in crate::device) thermostat: device::thermostat::ThermostatObservation,
+    pub(super) current_temperature: device::thermostat::TemperatureSourceRuntime,
+    pub(in crate::device) commands: device::step_command::StepCoordinator<device::HeaterCommand>,
 }
 impl HeaterRuntime {
     fn snapshot(&self) -> device::HeaterSnapshot {
-        let observation = &self.thermostat.observation;
-        let current = observation.current_temperature;
+        let observation = &self.thermostat;
+        let current = self.current_temperature;
         device::HeaterSnapshot {
             power: observation.power,
             temperature: observation.target_temperature,
@@ -83,10 +102,11 @@ impl HeaterRuntime {
 }
 
 pub(in crate::device) struct AirConditionerRuntime {
-    pub(in crate::device) thermostat: device::thermostat::ThermostatRuntime<
-        device::AirConditionerCommand,
-        device::AirConditionerMode,
-    >,
+    pub(in crate::device) thermostat: device::thermostat::ThermostatObservation,
+    pub(in crate::device) commands:
+        device::step_command::StepCoordinator<device::AirConditionerCommand>,
+    pub(in crate::device) power_confirmation: PowerConfirmation,
+    pub(super) mode: device::model::PropertyObservation<device::AirConditionerMode>,
     pub(super) speed: device::model::PropertyObservation<device::AirConditionerFanSpeed>,
     pub(super) swing: device::model::PropertyObservation<bool>,
     pub(super) ambient_source: Option<AmbientSource>,
@@ -99,10 +119,10 @@ pub(in crate::device) struct AirConditionerRuntime {
 }
 impl AirConditionerRuntime {
     fn snapshot(&self) -> device::AirConditionerSnapshot {
-        let observation = &self.thermostat.observation;
+        let observation = &self.thermostat;
         device::AirConditionerSnapshot {
             power: observation.power,
-            mode: observation.mode,
+            mode: self.mode,
             temperature: observation.target_temperature,
             speed: self.speed,
             swing: self.swing,
@@ -166,11 +186,15 @@ impl RuntimeValue {
             })),
             FunctionKind::Fan { .. } => Self::Fan(Box::new(FanRuntime {
                 snapshot: device::FanSnapshot::default(),
-                commands: device::fan_command::FanCoordinator::default(),
+                commands: device::step_command::StepCoordinator::default(),
+                power_confirmation: PowerConfirmation::default(),
             })),
             FunctionKind::AirConditioner { .. } => {
                 Self::AirConditioner(Box::new(AirConditionerRuntime {
-                    thermostat: device::thermostat::ThermostatRuntime::default(),
+                    thermostat: device::thermostat::ThermostatObservation::default(),
+                    commands: device::step_command::StepCoordinator::default(),
+                    power_confirmation: PowerConfirmation::default(),
+                    mode: device::model::PropertyObservation::default(),
                     speed: device::model::PropertyObservation::default(),
                     swing: device::model::PropertyObservation::default(),
                     ambient_source: None,
@@ -183,7 +207,9 @@ impl RuntimeValue {
                 }))
             }
             FunctionKind::Heater { .. } => Self::Heater(Box::new(HeaterRuntime {
-                thermostat: device::thermostat::ThermostatRuntime::default(),
+                thermostat: device::thermostat::ThermostatObservation::default(),
+                current_temperature: device::thermostat::TemperatureSourceRuntime::default(),
+                commands: device::step_command::StepCoordinator::default(),
             })),
             FunctionKind::Temperature(_) => Self::Temperature(MeasurementRuntime::new(true)),
             FunctionKind::Humidity(_) => Self::Humidity(MeasurementRuntime::new(false)),
@@ -351,32 +377,21 @@ impl RuntimeState {
     pub(super) fn temperature_source(&self) -> Option<TemperatureSourceState> {
         match &self.value {
             RuntimeValue::Temperature(measurement) => measurement.temperature_source,
-            RuntimeValue::Heater(heater) => {
-                Some(heater.thermostat.observation.current_temperature.source)
-            }
+            RuntimeValue::Heater(heater) => Some(heater.current_temperature.source),
             _ => None,
         }
     }
 
-    pub(in crate::device) fn fan_commands(&self) -> Option<&device::fan_command::FanCoordinator> {
+    pub(in crate::device) fn fan(&self) -> Option<&FanRuntime> {
         match &self.value {
-            RuntimeValue::Fan(fan) => Some(&fan.commands),
+            RuntimeValue::Fan(fan) => Some(fan),
             _ => None,
         }
     }
 
-    pub(in crate::device) fn fan_commands_mut(
-        &mut self,
-    ) -> Option<&mut device::fan_command::FanCoordinator> {
+    pub(in crate::device) fn fan_mut(&mut self) -> Option<&mut FanRuntime> {
         match &mut self.value {
-            RuntimeValue::Fan(fan) => Some(&mut fan.commands),
-            _ => None,
-        }
-    }
-
-    pub(in crate::device) fn fan_power(&self) -> Option<bool> {
-        match &self.value {
-            RuntimeValue::Fan(fan) => fan.snapshot.power.value,
+            RuntimeValue::Fan(fan) => Some(fan),
             _ => None,
         }
     }

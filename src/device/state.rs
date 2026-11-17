@@ -198,11 +198,11 @@ impl PhysicalDevice {
                         let changed = state.update_curtain_projection(|p| p.clear_pending_target());
                         function.notify_curtain_projection(changed);
                     }
-                    if let Some(commands) = state.fan_commands_mut() {
-                        commands.unavailable(error.clone());
+                    if let Some(runtime) = state.fan_mut() {
+                        runtime.commands.unavailable(error.clone());
                     }
                     if let Some(runtime) = state.heater_mut() {
-                        runtime.thermostat.commands.unavailable(error.clone());
+                        runtime.commands.unavailable(error.clone());
                     }
                     if let Some(runtime) = state.air_conditioner_mut() {
                         runtime.planning_mode = None;
@@ -210,7 +210,7 @@ impl PhysicalDevice {
                         if runtime.dynamic_constraints {
                             runtime.constraints_current = false;
                         }
-                        runtime.thermostat.commands.unavailable(error.clone());
+                        runtime.commands.unavailable(error.clone());
                     }
                     if light {
                         function.notify_light_actions();
@@ -257,22 +257,16 @@ impl PhysicalDevice {
                 let changed = state.update_curtain_projection(|p| p.clear_pending_target());
                 function.notify_curtain_projection(changed);
             }
-            if let Some(commands) = state.fan_commands_mut() {
-                commands.unavailable(super::CommandError::Cancelled);
+            if let Some(runtime) = state.fan_mut() {
+                runtime.commands.unavailable(super::CommandError::Cancelled);
             }
             if let Some(runtime) = state.heater_mut() {
-                runtime
-                    .thermostat
-                    .commands
-                    .unavailable(super::CommandError::Cancelled);
+                runtime.commands.unavailable(super::CommandError::Cancelled);
             }
             if let Some(runtime) = state.air_conditioner_mut() {
                 runtime.planning_mode = None;
                 runtime.observed_mode = None;
-                runtime
-                    .thermostat
-                    .commands
-                    .unavailable(super::CommandError::Cancelled);
+                runtime.commands.unavailable(super::CommandError::Cancelled);
             }
         }
     }
@@ -387,22 +381,16 @@ impl Function {
         if let Some(commands) = state.curtain_commands_mut() {
             commands.close(super::CommandError::Cancelled);
         }
-        if let Some(commands) = state.fan_commands_mut() {
-            commands.close(super::CommandError::Cancelled);
+        if let Some(runtime) = state.fan_mut() {
+            runtime.commands.close(super::CommandError::Cancelled);
         }
         if let Some(runtime) = state.heater_mut() {
-            runtime
-                .thermostat
-                .commands
-                .close(super::CommandError::Cancelled);
+            runtime.commands.close(super::CommandError::Cancelled);
         }
         if let Some(runtime) = state.air_conditioner_mut() {
             runtime.planning_mode = None;
             runtime.observed_mode = None;
-            runtime
-                .thermostat
-                .commands
-                .close(super::CommandError::Cancelled);
+            runtime.commands.close(super::CommandError::Cancelled);
         }
         if light {
             self.notify_light_actions();

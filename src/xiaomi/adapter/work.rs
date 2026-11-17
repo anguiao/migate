@@ -282,12 +282,7 @@ impl DeviceWork {
                     .unwrap()
                     .air_conditioner_source_changed();
             }
-            if function.heater().is_some() {
-                self.physical()
-                    .function(id)
-                    .unwrap()
-                    .heater_source_changed();
-            }
+
             for binding in function.observation_bindings() {
                 self.refresh.borrow_mut().request_baseline(id, binding);
             }
