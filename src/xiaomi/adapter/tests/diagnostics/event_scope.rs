@@ -286,7 +286,7 @@ fn metadata_and_native_installations_only_process_native_routing_changes() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .raw
@@ -317,7 +317,7 @@ fn metadata_and_native_installations_only_process_native_routing_changes() {
             .devices
             .get_mut("one")
             .unwrap()
-            .candidate = Some(changed.raw.recognize(false).unwrap());
+            .latest_description = Some(changed.raw.recognize(false).unwrap());
         let plan = c.publication.plan().unwrap().unwrap();
         assert!(
             plan.operations
@@ -358,7 +358,7 @@ fn logical_only_physical_group_replacement_preserves_pending_group_history() {
             .devices
             .get_mut("member-a")
             .unwrap()
-            .candidate =
+            .latest_description =
             Some(SourceFixture::new("member-a", "devcea.light.ls2307", narrowed).into());
         pending_offline(&c, "group-1");
         pending_offline(&c, "member-b");
@@ -468,7 +468,7 @@ fn removal_releases_the_baseline_without_processing_other_device_history() {
         cloud_ready(&c, &["one", "two"]).await;
         let other = recorded(&c, "two");
         let original = c.context.directory.borrow().devices["one"]
-            .candidate
+            .latest_description
             .clone()
             .unwrap();
         c.context
@@ -477,7 +477,7 @@ fn removal_releases_the_baseline_without_processing_other_device_history() {
             .devices
             .get_mut("one")
             .unwrap()
-            .candidate
+            .latest_description
             .as_mut()
             .unwrap()
             .native = None;
@@ -504,7 +504,7 @@ fn removal_releases_the_baseline_without_processing_other_device_history() {
             .devices
             .get_mut("one")
             .unwrap()
-            .candidate = Some(original);
+            .latest_description = Some(original);
         let plan = c.publication.plan().unwrap().unwrap();
         assert!(
             plan.operations.iter().any(

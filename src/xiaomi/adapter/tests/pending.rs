@@ -30,7 +30,7 @@ fn assert_reasons(status: &AdapterStatus, did: &str, reasons: &[&str]) {
 }
 
 fn version_exhausted_rig() -> Rig {
-    let rig = Rig::new(true, &["one"]);
+    let mut rig = Rig::new(true, &["one"]);
     let mut configuration = rig.store.devices().load_configuration().unwrap();
     configuration.devices[0].configuration_version = u32::MAX;
     configuration.devices[0].label = "Saved outlet name".into();
@@ -38,6 +38,9 @@ fn version_exhausted_rig() -> Rig {
         .devices()
         .commit_configuration(&configuration, &[])
         .unwrap();
+    let (source, ready) = rig.reopen_adapter();
+    rig.source = source;
+    rig.ready = ready;
     rig
 }
 
@@ -89,7 +92,7 @@ fn pending_description_subscriptions_and_reads_recover_independently() {
                 control.context.request_sync();
                 until(|| {
                     control.context.directory.borrow().devices["one"]
-                        .blocked
+                        .description_problem()
                         .as_ref()
                         .is_some_and(|reason| reason.contains("503"))
                 })
@@ -250,7 +253,7 @@ fn pending_first_description_keeps_the_confirmed_home_catalog_name() {
                 .devices
                 .get("one")
                 .is_some_and(|slot| {
-                    slot.blocked
+                    slot.description_problem()
                         .as_ref()
                         .is_some_and(|reason| reason.contains("503"))
                 })
@@ -266,7 +269,7 @@ fn pending_first_description_keeps_the_confirmed_home_catalog_name() {
 
 #[test]
 fn pending_first_plan_keeps_the_description_name_without_an_installed_instance() {
-    let rig = Rig::new(true, &["one"]);
+    let mut rig = Rig::new(true, &["one"]);
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.members.push("multi".into());
@@ -286,6 +289,9 @@ fn pending_first_plan_keeps_the_description_name_without_an_installed_instance()
         .devices()
         .commit_configuration(&configuration, &[])
         .unwrap();
+    let (source, ready) = rig.reopen_adapter();
+    rig.source = source;
+    rig.ready = ready;
     block_on(rig.run(|c| async move {
         until(|| c.publication.failure().is_some()).await;
         let status = c.context.diagnostics();
@@ -332,7 +338,7 @@ fn pending_successful_unchanged_planning_clears_only_its_previous_failure() {
         &["description read failed"],
     );
     let description = rig.source.context.directory.borrow().devices["one"]
-        .candidate
+        .latest_description
         .clone()
         .unwrap();
     rig.source
@@ -340,7 +346,6 @@ fn pending_successful_unchanged_planning_clears_only_its_previous_failure() {
         .directory
         .borrow_mut()
         .accept_description("one", description);
-    rig.source.context.clear_description_problem("one");
     assert!(rig.source.context.diagnostics().pending.is_empty());
 }
 
@@ -388,7 +393,7 @@ fn pending_removed_device_version_overflow_survives_without_a_slot_until_readmis
                 .devices
                 .get("one")
                 .is_some_and(|slot| {
-                    slot.confirmed && slot.candidate.is_some() && slot.admitted.is_none()
+                    slot.confirmed && slot.latest_description.is_some() && slot.admitted.is_none()
                 })
         })
         .await;

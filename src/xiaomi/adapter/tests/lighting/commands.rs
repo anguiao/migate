@@ -484,7 +484,7 @@ fn a_new_light_instance_waits_for_the_original_http_receipt() {
             .devices
             .get_mut("one")
             .unwrap()
-            .candidate
+            .latest_description
             .as_mut()
             .unwrap()
             .native = Some(changed);

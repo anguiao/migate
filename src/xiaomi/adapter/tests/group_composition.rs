@@ -53,6 +53,60 @@ fn group_rig(members: &[(&str, &str, Value)], physical: bool) -> Rig {
 }
 
 #[test]
+fn group_install_uses_the_latest_confirmed_name_after_a_held_description_load() {
+    let rig = group_rig(&[("member-a", "example.rgb", generic_rgb())], false);
+    let (release, held) = flume::unbounded();
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.catalog_groups[0]["name"] = json!("Original group");
+        cloud
+            .instance_gates
+            .insert(group_instance()["type"].as_str().unwrap().into(), held);
+    }
+    block_on(rig.run(|c| async move {
+        c.announce();
+        until(|| {
+            c.context
+                .directory
+                .borrow()
+                .devices
+                .get("group-1")
+                .is_some_and(|slot| slot.loading.is_some())
+        })
+        .await;
+        c.cloud.lock().unwrap().catalog_groups[0]["name"] = json!("Current group");
+        c.context.request_sync();
+        until(|| {
+            c.context
+                .directory
+                .borrow()
+                .group("group-1")
+                .is_some_and(|group| group.name.as_deref() == Some("Current group"))
+        })
+        .await;
+        release.send(()).unwrap();
+        let key = DeviceKey::new("xiaomi", "group-1");
+        until(|| {
+            c.publication
+                .current()
+                .configuration
+                .device(&key)
+                .is_some_and(|device| device.native.is_some())
+        })
+        .await;
+        assert_eq!(
+            c.publication
+                .current()
+                .configuration
+                .device(&key)
+                .unwrap()
+                .label,
+            "Current group"
+        );
+    }));
+}
+
+#[test]
 fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry() {
     let instance = generic_rgb();
     let rig = group_rig(
@@ -78,17 +132,16 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
             cloud
                 .catalog_instances
                 .insert(urn.into(), json!({"type": urn, "services": [{}]}));
-            cloud.catalog_groups = vec![group_record(
-                "group-record",
-                "group-1",
-                &["member-a"],
-                false,
-            )];
+            cloud.members.push("two".into());
+            cloud.catalog_groups = vec![
+                group_record("group-record", "group-1", &["member-a"], false),
+                group_record("new-record", "new-group", &["member-b"], false),
+            ];
         }
         c.context.request_sync();
         until(|| {
             c.context.directory.borrow().devices["member-a"]
-                .blocked
+                .description_problem()
                 .is_some()
         })
         .await;
@@ -104,7 +157,32 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
                 })
         })
         .await;
+        until(|| {
+            let directory = c.context.directory.borrow();
+            ["two", "new-group"].iter().all(|did| {
+                directory
+                    .devices
+                    .get(*did)
+                    .is_some_and(|slot| slot.latest_description.is_some())
+            })
+        })
+        .await;
+        // Unrelated B and a newly confirmed group wait for configured A.
         assert_eq!(c.store.devices().load_configuration().unwrap(), before);
+        assert!(
+            !c.publication
+                .current()
+                .derived
+                .published
+                .contains(&DeviceKey::new("xiaomi", "two"))
+        );
+        assert!(
+            !c.publication
+                .current()
+                .derived
+                .groups
+                .contains_key("new-group")
+        );
         assert_eq!(c.context.graph.borrow().rules, rules);
         assert!(Rc::ptr_eq(
             &old_member,
@@ -129,6 +207,16 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
                 .iter()
                 .any(|raw| raw.key.id == "member-a" && raw.instance_type == urn)
                 && c.context.graph.borrow().rules["group-1"].members.len() == 1
+                && c.publication
+                    .current()
+                    .derived
+                    .published
+                    .contains(&DeviceKey::new("xiaomi", "two"))
+                && c.publication
+                    .current()
+                    .derived
+                    .groups
+                    .contains_key("new-group")
         })
         .await;
         let after = c.store.devices().load_configuration().unwrap();
@@ -141,7 +229,15 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
                 .instance,
             revised
         );
-        assert_eq!(after.groups[0].members, ["member-a"]);
+        assert_eq!(
+            after
+                .groups
+                .iter()
+                .find(|group| group.group_did == "group-1")
+                .unwrap()
+                .members,
+            ["member-a"]
+        );
         assert_eq!(
             after
                 .device(&DeviceKey::new("xiaomi", "member-a"))
@@ -177,9 +273,26 @@ fn missing_group_instance_type_retains_the_committed_relation_until_restored() {
             let mut relation = group_record("group-record", "group-1", &["member-a"], false);
             relation["spec_type"] = Value::Null;
             cloud.catalog_groups = vec![relation];
+            cloud.members.push("two".into());
         }
         c.context.request_sync();
-        until(|| c.context.directory.borrow().devices["group-1"].description_target_missing).await;
+        until(|| {
+            c.context
+                .directory
+                .borrow()
+                .group("group-1")
+                .is_some_and(|group| group.instance_type.is_none())
+        })
+        .await;
+        until(|| {
+            c.context
+                .directory
+                .borrow()
+                .devices
+                .get("two")
+                .is_some_and(|slot| slot.latest_description.is_some())
+        })
+        .await;
         assert_eq!(c.store.devices().load_configuration().unwrap(), before);
         assert_eq!(c.context.graph.borrow().rules["group-1"].members.len(), 2);
         c.cloud.lock().unwrap().catalog_groups = vec![group_record(
@@ -189,7 +302,15 @@ fn missing_group_instance_type_retains_the_committed_relation_until_restored() {
             false,
         )];
         c.context.request_sync();
-        until(|| c.context.graph.borrow().rules["group-1"].members.len() == 1).await;
+        until(|| {
+            c.context.graph.borrow().rules["group-1"].members.len() == 1
+                && c.publication
+                    .current()
+                    .derived
+                    .published
+                    .contains(&DeviceKey::new("xiaomi", "two"))
+        })
+        .await;
     }));
 }
 

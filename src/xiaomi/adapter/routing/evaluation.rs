@@ -123,12 +123,7 @@ impl Core<'_> {
         );
         let mut functions = BTreeMap::new();
         if let Some(work) = work {
-            let profile = slot
-                .unwrap()
-                .committed
-                .as_ref()
-                .and_then(|source| source.native.as_ref())
-                .and_then(|native| native.legacy_profile());
+            let profile = work.native.legacy_profile();
             for id in work.channels() {
                 let function = work
                     .native

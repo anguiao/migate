@@ -41,29 +41,9 @@ impl Context {
         token: &super::routing::CloudPath,
         active: &[ConfirmedGroup],
     ) -> Result<(), AdapterError> {
-        let wanted = active
-            .iter()
-            .map(|group| group.membership.group_did.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        let stale = self
-            .directory
-            .borrow()
-            .devices
-            .iter()
-            .filter(|(did, slot)| slot.group && !wanted.contains(*did))
-            .map(|(did, _)| did.clone())
-            .collect::<Vec<_>>();
-        for did in stale {
-            self.remove_group(&did)?;
-        }
         for group in active {
             let did = &group.membership.group_did;
-            let existing = self
-                .directory
-                .borrow()
-                .devices
-                .get(did)
-                .is_some_and(|slot| slot.group);
+            let existing = self.directory.borrow().devices.contains_key(did);
             let needs_local = group.membership.is_physical
                 && (!existing
                     || self.graph.borrow().groups.get(did).is_none_or(|known| {
@@ -71,12 +51,9 @@ impl Context {
                             || known.model != group.model
                             || known.instance_type != group.instance_type
                     }));
-            let (recovered_target, retired) = self.directory.borrow_mut().confirm_group(group);
+            let retired = self.directory.borrow_mut().confirm_group(group);
             if let Some(life) = retired {
                 life.close();
-            }
-            if recovered_target {
-                self.clear_description_problem(did);
             }
             if needs_local {
                 let access = self
@@ -89,10 +66,7 @@ impl Context {
                 }
             }
             let Some(instance_type) = group.instance_type.clone() else {
-                self.pending_description(
-                    did,
-                    "native group description has no instance type".into(),
-                );
+                self.status_changed.notify(usize::MAX);
                 continue;
             };
             if !self.directory.borrow().devices[did].needs_description() {
@@ -111,7 +85,6 @@ impl Context {
             let model = group.model.clone();
             let record_did = group.record_did.clone();
             let group_did = did.clone();
-            let name = group.name.clone();
             let scope = group.scope.clone();
             let captured_scope = scope.clone();
             self.tasks.spawn(async move {
@@ -168,6 +141,13 @@ impl Context {
                 }
                 match result {
                     Ok(instance) => {
+                        let name = context
+                            .directory
+                            .borrow()
+                            .group(&group_did)
+                            .expect("a current group load retains its confirmed relation")
+                            .name
+                            .clone();
                         match RawDescription::new(
                             DeviceKey::new("xiaomi", group_did.clone()),
                             model,
@@ -183,7 +163,6 @@ impl Context {
                                     .directory
                                     .borrow_mut()
                                     .accept_description(&group_did, description);
-                                context.clear_description_problem(&group_did);
                                 context.stage();
                             }
                             Err(error) => {

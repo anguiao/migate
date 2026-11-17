@@ -531,7 +531,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
                 access.model = downgraded.model().into();
                 access.instance_type = downgraded.instance_type().into();
             }
-            slot.candidate = Some(downgraded.clone().into());
+            slot.latest_description = Some(downgraded.clone().into());
         }
 
         // A failed save keeps the committed repair plan.
@@ -617,7 +617,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
                 access.model = recovered.model().into();
                 access.instance_type = recovered.instance_type().into();
             }
-            slot.candidate = Some(recovered.into());
+            slot.latest_description = Some(recovered.into());
         }
         c.context.reconcile("member-a").unwrap();
         wait_for(

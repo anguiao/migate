@@ -73,13 +73,15 @@ impl Directory {
         let membership_changed = self
             .devices
             .iter()
-            .filter(|(_, slot)| !slot.group)
+            .filter(|(did, _)| self.group(did).is_none())
             .map(|(did, _)| did)
             .ne(members.iter());
         let removed = self
             .devices
             .iter()
-            .filter(|(did, slot)| scope_changed || (!slot.group && !members.contains(*did)))
+            .filter(|(did, _)| {
+                scope_changed || (self.group(did).is_none() && !members.contains(*did))
+            })
             .map(|(did, _)| did.clone())
             .collect();
         if self.scope.as_ref() != Some(&scope) {
@@ -100,14 +102,10 @@ impl Directory {
         catalog: Option<&CloudDeviceCatalog>,
     ) {
         for did in members {
-            self.devices.entry(did.clone()).or_default();
-        }
-        for (did, slot) in &mut self.devices {
-            if !slot.group {
-                slot.confirmed = true;
-                slot.cloud_access = infos.remove(did);
-                slot.cloud_forbidden = false;
-            }
+            let slot = self.devices.entry(did.clone()).or_default();
+            slot.confirmed = true;
+            slot.cloud_access = infos.remove(did);
+            slot.cloud_forbidden = false;
         }
         if let Some(catalog) = catalog {
             for record in &catalog.devices {
@@ -168,6 +166,27 @@ impl Directory {
         &self.split_devices
     }
 
+    pub(super) fn group(&self, did: &str) -> Option<&ConfirmedGroup> {
+        self.relations
+            .get(did)
+            .filter(|group| self.scope.as_ref() == Some(&group.scope))
+    }
+
+    pub(super) fn description_target(&self, did: &str) -> Option<(String, String)> {
+        if let Some(group) = self.group(did) {
+            group
+                .instance_type
+                .as_ref()
+                .map(|urn| (group.model.clone(), urn.clone()))
+        } else {
+            self.devices
+                .get(did)?
+                .cloud_access
+                .as_ref()
+                .map(|access| (access.model.clone(), access.instance_type.clone()))
+        }
+    }
+
     pub(super) fn confirmed_groups(&self) -> Vec<ConfirmedGroup> {
         self.relations.snapshot()
     }
@@ -193,19 +212,14 @@ impl Directory {
     }
 
     /// Confirm access metadata without replacing the committed group graph.
-    pub(super) fn confirm_group(&mut self, group: &ConfirmedGroup) -> (bool, Option<Rc<Lifetime>>) {
+    pub(super) fn confirm_group(&mut self, group: &ConfirmedGroup) -> Option<Rc<Lifetime>> {
         let did = &group.membership.group_did;
         let slot = self.devices.entry(did.clone()).or_default();
-        let recovered_target =
-            slot.group && slot.description_target_missing && group.instance_type.is_some();
         slot.confirmed = true;
         // A retained relation with a read error cannot restore revoked access.
         if group.error.is_none() {
             slot.cloud_forbidden = false;
         }
-        slot.group = true;
-        slot.catalog_name = group.name.clone();
-        slot.description_target_missing = group.instance_type.is_none();
         slot.cloud_access = group
             .instance_type
             .as_ref()
@@ -220,14 +234,13 @@ impl Directory {
             .instance_type
             .as_ref()
             .map(|urn| (group.model.clone(), urn.clone()));
-        (recovered_target, slot.retarget_loading(&target))
+        slot.retarget_loading(&target)
     }
 
     pub(super) fn accept_description(&mut self, did: &str, description: SourceDescription) {
         if let Some(slot) = self.devices.get_mut(did) {
-            slot.candidate = Some(description);
-            slot.blocked = None;
-            slot.recompute_failed = false;
+            slot.latest_description = Some(description);
+            slot.description_problems.clear();
         }
     }
 
@@ -290,19 +303,11 @@ impl Directory {
 /// One entry owns all preparation and admission state for a current home member.
 #[derive(Default)]
 pub(super) struct DeviceSlot {
-    /// This slot is a native group source. Executable group rules live only in
-    /// the installed committed graph.
-    pub(super) group: bool,
     pub(super) lan: super::lan::LanSlot,
-    /// Latest complete source fact, retained while its commit is pending.
-    pub(super) candidate: Option<SourceDescription>,
-    /// Source fact paired with the installed configuration.
-    pub(super) committed: Option<SourceDescription>,
-    /// Startup recognition failed; unchanged directory facts cannot clear its
-    /// diagnostic. Only a newly recognized description resolves it.
-    pub(super) recompute_failed: bool,
-    /// A confirmed group record lacked the target instance type.
-    pub(super) description_target_missing: bool,
+    /// Latest complete source fact and its recognition result, retained while
+    /// a replacement description or its configuration commit is pending.
+    pub(super) latest_description: Option<SourceDescription>,
+    pub(super) description_problems: Vec<DescriptionProblem>,
     pub(super) confirmed: bool,
     /// A name from the account catalog, retained only after home membership is confirmed.
     pub(super) catalog_name: Option<String>,
@@ -313,16 +318,57 @@ pub(super) struct DeviceSlot {
     /// The one in-flight directory load and the model/URN target it may
     /// apply. `None` target is a genuine first read without metadata facts.
     pub(super) loading: Option<Loading>,
-    pub(super) blocked: Option<String>,
     pub(super) last_switch_reason: Option<String>,
     pub(super) routing_selection: Option<super::routing::Selection>,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DescriptionOperation {
+    Load,
+    RecognizeStored,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct DescriptionProblem {
+    pub(super) operation: DescriptionOperation,
+    pub(super) target: Option<(String, String)>,
+    pub(super) reason: String,
+}
+
+impl std::fmt::Display for DescriptionProblem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let operation = match self.operation {
+            DescriptionOperation::Load => "read description",
+            DescriptionOperation::RecognizeStored => "recognize stored description",
+        };
+        match &self.target {
+            Some((model, urn)) => write!(formatter, "{operation} {model} ({urn}): {}", self.reason),
+            None => write!(formatter, "{operation}: {}", self.reason),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Loading {
     pub(super) life: Rc<Lifetime>,
     pub(super) target: Option<(String, String)>,
 }
 impl DeviceSlot {
+    pub(super) fn description_failed(&mut self, problem: DescriptionProblem) {
+        self.description_problems
+            .retain(|old| old.operation != problem.operation);
+        self.description_problems.push(problem);
+    }
+
+    pub(super) fn description_problem(&self) -> Option<String> {
+        (!self.description_problems.is_empty()).then(|| {
+            self.description_problems
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
+
     /// Retire a load aimed at an older target; online changes keep it.
     pub(super) fn retarget_loading(
         &mut self,
@@ -367,7 +413,7 @@ impl DeviceSlot {
         if self.loading.is_some() {
             return false;
         }
-        let Some(source) = &self.candidate else {
+        let Some(source) = &self.latest_description else {
             return true;
         };
         self.cloud_access.as_ref().is_some_and(|access| {

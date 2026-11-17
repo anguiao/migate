@@ -25,7 +25,11 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
             source.model, source.instance_type
         ));
     }
-    if let Some(record) = current.configuration.device(&key) {
+    if let Some(record) = current
+        .configuration
+        .device(&key)
+        .filter(|_| view.accessible_descriptions.contains(&key))
+    {
         lines.push(format!(
             "  Matter: {}; endpoint {}; configuration version {}.",
             if current.derived.published.contains(&key) {
@@ -109,12 +113,10 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
     }
     // The terminal lists every confirmed membership from the effective
     // relations, including groups that are currently unpublished.
-    for relation in current
-        .derived
-        .groups
-        .values()
-        .filter(|relation| relation.members.iter().any(|member| member == did))
-    {
+    for relation in current.derived.groups.values().filter(|relation| {
+        view.accessible_groups.contains(&relation.group_did)
+            && relation.members.iter().any(|member| member == did)
+    }) {
         let group_key = DeviceKey::new("xiaomi", &relation.group_did);
         let state = if current.derived.published.contains(&group_key) {
             "published".to_string()
@@ -131,7 +133,12 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
             }
         ));
     }
-    if let Some(group) = current.derived.groups.get(did) {
+    if let Some(group) = current
+        .derived
+        .groups
+        .get(did)
+        .filter(|_| view.accessible_groups.contains(did))
+    {
         lines.push(format!(
             "  Native group ({}): members {}.",
             if group.is_physical {

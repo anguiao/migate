@@ -22,11 +22,14 @@ impl<'a> Context<'a> {
     pub(super) fn view(&self) -> View {
         let current = self.app.current();
         let configurable_devices = self.app.configurable_devices(&current);
+        let accessible_descriptions = self.app.accessible_descriptions(&current);
+        let accessible_groups = self.app.accessible_groups(&current);
         View {
             current,
             pending: self.app.pending(),
             failure: self.app.failure(),
-            accessible_descriptions: self.app.accessible_descriptions(),
+            accessible_descriptions,
+            accessible_groups,
             configurable_devices,
         }
     }
@@ -39,29 +42,34 @@ pub(super) struct View {
     pub(super) failure: Option<String>,
     pub(super) accessible_descriptions: std::collections::BTreeSet<DeviceKey>,
     pub(super) configurable_devices: std::collections::BTreeSet<DeviceKey>,
+    pub(super) accessible_groups: std::collections::BTreeSet<String>,
 }
 
 impl View {
     pub(super) fn contains_did(&self, did: &str) -> bool {
         let configuration = &self.current.configuration;
         let key = DeviceKey::new("xiaomi", did);
-        configuration.device(&key).is_some()
-            || configuration
+        self.accessible_descriptions.contains(&key)
+            && (configuration
                 .descriptions
                 .iter()
                 .any(|source| source.key == key)
+                || configuration
+                    .split_devices
+                    .iter()
+                    .any(|split| split.did == did))
             || configuration.groups.iter().any(|group| {
-                group.group_did == did
-                    || group.record_did == did
-                    || group.members.iter().any(|member| member == did)
+                self.accessible_groups.contains(&group.group_did)
+                    && (group.group_did == did
+                        || group.record_did == did
+                        || group.members.iter().any(|member| member == did))
             })
-            || configuration
-                .split_devices
-                .iter()
-                .any(|split| split.did == did)
     }
 
     pub(super) fn get(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
+        if !self.accessible_descriptions.contains(key) {
+            return None;
+        }
         self.current
             .entries
             .iter()
@@ -70,7 +78,11 @@ impl View {
     }
 
     pub(super) fn list(&self) -> Vec<PhysicalDevice> {
-        self.current.devices()
+        self.current
+            .devices()
+            .into_iter()
+            .filter(|device| self.accessible_descriptions.contains(device.key()))
+            .collect()
     }
 
     pub(super) fn render_status(&self, status: &AuthStatus, diagnostics: &AdapterStatus) -> String {

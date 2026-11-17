@@ -46,7 +46,7 @@ fn startup_revocation_overlay_keeps_committed_versions_for_the_removal_plan() {
     app.apply(prepared).unwrap();
     assert!(app.frozen().is_empty());
     let saved = store.devices().load_configuration().unwrap();
-    assert_eq!(saved, app.current().configuration);
+    assert_eq!(saved, *app.current().configuration);
     assert_eq!(store.devices().load_revocations().unwrap().len(), 1);
     assert_eq!(
         store.matter().get(subscription).unwrap().unwrap(),
@@ -98,4 +98,33 @@ fn failed_device_withdrawal_omits_the_retired_source_from_restored_reports() {
         store.matter().get(subscription).unwrap().unwrap(),
         b"same home"
     );
+}
+
+#[test]
+fn descriptions_from_the_previous_home_are_not_visible_for_the_same_did() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let source = AppSource::new(&store, Some(outlet()));
+    let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+    source.scope(crate::configuration::Scope {
+        uid: app
+            .current()
+            .configuration
+            .scope
+            .as_ref()
+            .unwrap()
+            .uid
+            .clone(),
+        home_id: "other-home".into(),
+    });
+    source.describe(outlet());
+    assert!(app.accessible_descriptions(&app.current()).is_empty());
+    let status = status(&store);
+    let terminal = Context::committed(app, &status);
+    let list = block_on(terminal.handle_line("list")).unwrap().unwrap();
+    assert!(!list.contains("Test Outlet"), "{list}");
+    let detail = block_on(terminal.handle_line("status test-outlet"))
+        .unwrap()
+        .unwrap();
+    assert!(detail.starts_with("Unknown device DID."), "{detail}");
 }

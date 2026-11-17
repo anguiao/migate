@@ -78,7 +78,7 @@ fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replaceme
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate = Some(candidate.into());
+                .latest_description = Some(candidate.into());
             control.context.reconcile("one").unwrap();
             let replacement = loop {
                 let current = control

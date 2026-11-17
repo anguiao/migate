@@ -108,7 +108,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
             let first = old.begin_light_action(brightness(60.0), false).unwrap();
             until(|| peer.count("rpcReq", "one", 0) == 1).await;
             let candidate = control.context.directory.borrow().devices["one"]
-                .candidate
+                .latest_description
                 .clone();
             let access = control.context.hub.borrow().access("one").cloned();
             let cloud_access = control.context.directory.borrow().devices["one"]
@@ -116,7 +116,7 @@ fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
                 .clone();
             control.context.remove("one").unwrap();
             let slot = super::super::super::directory::DeviceSlot {
-                candidate,
+                latest_description: candidate,
                 cloud_access,
                 // A genuine fresh confirmation clears the durable tombstone.
                 confirmed: true,

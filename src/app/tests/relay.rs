@@ -100,7 +100,7 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
                 .await
                 .contains("Mapping failed")
         );
-        assert_eq!(app.current().configuration, configuration);
+        assert_eq!(*app.current().configuration, configuration);
         assert_eq!(store.devices().load_configuration().unwrap(), configuration);
         assert!(!app.pending());
         assert!(app.plan().unwrap().is_none());
@@ -159,7 +159,7 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
             "{list}"
         );
         let reopened = Store::open(directory.path()).unwrap();
-        assert_eq!(reopened.devices().load_configuration().unwrap(), after);
+        assert_eq!(reopened.devices().load_configuration().unwrap(), *after);
         assert!(
             query("map-type panel relay:2 light")
                 .await

@@ -287,7 +287,7 @@ fn failed_membership_keeps_relation_while_offline_own_source_clears_state() {
                 .devices
                 .get("group-1")
                 .expect("retained relation keeps the group slot");
-            assert!(slot.group);
+            assert!(live.group("group-1").is_some());
             assert!(
                 c.context
                     .directory

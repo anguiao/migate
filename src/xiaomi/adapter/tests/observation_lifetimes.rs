@@ -159,7 +159,7 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(changed);
@@ -210,7 +210,7 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(duplicate);
@@ -326,7 +326,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                     .devices
                     .get_mut("one")
                     .unwrap()
-                    .candidate
+                    .latest_description
                     .as_mut()
                     .unwrap()
                     .native = Some(narrowed);
@@ -347,7 +347,7 @@ fn a_suback_from_a_previous_native_instance_cannot_restore_subscription_readines
                     .devices
                     .get_mut("one")
                     .unwrap()
-                    .candidate
+                    .latest_description
                     .as_mut()
                     .unwrap()
                     .native = Some(original);

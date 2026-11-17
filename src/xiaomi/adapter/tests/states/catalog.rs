@@ -77,7 +77,7 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
                 .get(new_urn)
                 .is_some_and(|reads| *reads >= 1)
         );
-        assert_eq!(c.store.devices().load_configuration().unwrap(), before);
+        assert_eq!(c.store.devices().load_configuration().unwrap(), *before);
         assert!(
             c.context
                 .registry

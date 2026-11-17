@@ -173,8 +173,7 @@ impl AppSource {
                 };
                 let slot = DeviceSlot {
                     admitted: Some(work),
-                    committed: Some(candidate.clone()),
-                    candidate: Some(candidate),
+                    latest_description: Some(candidate),
                     ..Default::default()
                 };
                 live.devices.insert(device.key.id, slot);
@@ -193,7 +192,7 @@ impl AppSource {
     pub(crate) fn confirm_all(&self) {
         for (did, slot) in &mut self.handle.0.directory.borrow_mut().devices {
             slot.confirmed = true;
-            let raw = &slot.committed.as_ref().unwrap().raw;
+            let raw = &slot.latest_description.as_ref().unwrap().raw;
             slot.cloud_access = Some(crate::xiaomi::mijia::CloudDeviceInfo {
                 did: did.clone(),
                 model: raw.model.clone(),
@@ -242,7 +241,7 @@ impl AppSource {
             .or_default();
         let mut native = native_for(&description);
         native.raw.name = Some(description.label().to_owned());
-        slot.candidate = Some(native.into());
+        slot.latest_description = Some(native.into());
         slot.confirmed = true;
     }
 
@@ -250,7 +249,7 @@ impl AppSource {
         let mut live = self.handle.0.directory.borrow_mut();
         let slot = live.devices.get_mut(&key.id).unwrap();
         let native = slot.admitted.as_ref().unwrap().native.clone();
-        slot.candidate.as_mut().unwrap().native = Some(native);
-        slot.candidate.as_mut().unwrap().raw.name = Some(name.to_owned());
+        slot.latest_description.as_mut().unwrap().native = Some(native);
+        slot.latest_description.as_mut().unwrap().raw.name = Some(name.to_owned());
     }
 }

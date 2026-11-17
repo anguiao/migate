@@ -113,7 +113,7 @@ fn changed_battery_diagnostic_reuses_runtime_and_is_visible_immediately() {
                 .devices
                 .get_mut("sensor")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(native);

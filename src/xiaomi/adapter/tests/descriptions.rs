@@ -86,7 +86,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         let (restored, _) = c.reopen_adapter();
         assert!(
             restored.context.directory.borrow().devices["one"]
-                .candidate
+                .latest_description
                 .as_ref()
                 .unwrap()
                 .raw
@@ -96,7 +96,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
         assert!(restored.context.registry.list().is_empty());
         assert_eq!(
             restored.context.directory.borrow().devices["one"]
-                .candidate
+                .latest_description
                 .as_ref()
                 .unwrap()
                 .raw
@@ -175,7 +175,7 @@ fn a_native_replacement_clears_its_previous_subscription_failure() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(replacement);
@@ -249,7 +249,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(changed);
@@ -319,7 +319,7 @@ fn a_supported_range_change_keeps_identity_filters_old_reads_and_uses_the_new_in
 
 #[test]
 fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
-    let rig = Rig::new(true, &["one"]);
+    let mut rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().members = vec!["one".into(), "multi".into()];
     let mut configuration = rig.store.devices().load_configuration().unwrap();
     let historical = super::support::device_with_key(rig.data[0].device(), "history");
@@ -333,6 +333,9 @@ fn endpoint_exhaustion_is_pending_and_does_not_stop_cached_devices() {
         .devices()
         .commit_configuration(&configuration, &[])
         .unwrap();
+    let (source, ready) = rig.reopen_adapter();
+    rig.source = source;
+    rig.ready = ready;
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());

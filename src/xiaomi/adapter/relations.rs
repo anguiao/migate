@@ -47,6 +47,10 @@ pub(super) struct Relations {
 }
 
 impl Relations {
+    pub(super) fn get(&self, did: &str) -> Option<&ConfirmedGroup> {
+        self.groups.get(did)
+    }
+
     pub(super) fn snapshot(&self) -> Vec<ConfirmedGroup> {
         self.groups.values().cloned().collect()
     }

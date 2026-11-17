@@ -69,10 +69,9 @@ impl Context {
         let live = self.directory.borrow();
         live.devices
             .get(did)?
-            .committed
+            .admitted
             .as_ref()?
             .native
-            .as_ref()?
             .legacy_profile()
             .map(|profile| profile.mapping())
     }
@@ -135,29 +134,31 @@ impl Context {
             let Some(work) = &slot.admitted else {
                 return Ok(());
             };
-            let Some(source) = &slot.committed else {
-                return Ok(());
-            };
-            let native = source.native.as_ref();
+            let native = &work.native;
+            let configuration = self.configuration.borrow();
+            let committed = configuration
+                .device(&work.key)
+                .and_then(|device| device.native.as_ref())
+                .expect("an installed source has committed metadata");
             if self.lan_scope_invalid.get()
-                || slot.group
+                || configuration.scope != live.scope
+                || live.group(did).is_some()
                 || work.life.is_closed()
-                || native.and_then(|native| native.direct_protocol()).is_none()
+                || native.direct_protocol().is_none()
                 || slot
                     .cloud_access
                     .as_ref()
-                    .is_some_and(|info| info.model != source.raw.model)
+                    .is_some_and(|info| info.model != committed.model())
             {
                 None
             } else {
-                let model = &source.raw.model;
-                let native = native.unwrap();
+                let model = committed.model();
                 let legacy = native.legacy_profile();
                 let binding = native.direct_probe_binding();
                 let cloud = slot
                     .cloud_access
                     .as_ref()
-                    .filter(|info| info.model == *model)
+                    .filter(|info| info.model == model)
                     .map(|info| info.lan.clone());
                 binding.map(|binding| {
                     (
@@ -168,7 +169,7 @@ impl Context {
                             mapping: legacy.map(|profile| profile.mapping()),
                         },
                         cloud,
-                        model.clone(),
+                        model.to_owned(),
                     )
                 })
             }

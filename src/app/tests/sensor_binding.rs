@@ -128,7 +128,7 @@ fn terminal_binding_persists_without_changing_published_endpoints() {
         );
         assert_eq!(
             store.devices().load_configuration().unwrap(),
-            app.current().configuration
+            *app.current().configuration
         );
         let repeated = terminal
             .handle_line("bind-sensor ac air-conditioner:3 sensor temperature:3:1001")

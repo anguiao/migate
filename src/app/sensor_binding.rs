@@ -19,7 +19,7 @@ impl App {
         }
         self.validate_binding_function(&current, &target, true)?;
         self.validate_binding_function(&current, &source, false)?;
-        let mut configuration = current.configuration.clone();
+        let mut configuration = (*current.configuration).clone();
         configuration.temperature_bindings.insert(target, source);
         self.commit_temperature_bindings(&current, configuration)?;
         Ok(true)
@@ -61,7 +61,7 @@ impl App {
             }
             return Ok(false);
         }
-        let mut configuration = current.configuration.clone();
+        let mut configuration = (*current.configuration).clone();
         configuration.temperature_bindings.remove(target);
         self.commit_temperature_bindings(&current, configuration)?;
         Ok(true)
@@ -77,8 +77,8 @@ impl App {
             .commit_configuration(&configuration, &[])
             .map_err(|error| error.to_string())?;
         activate_temperature_bindings(&configuration, &current.entries);
-        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-            configuration,
+        self.replace_current(EffectiveConfiguration {
+            configuration: Rc::new(configuration),
             derived: current.derived.clone(),
             entries: current.entries.clone(),
             published: current.published.clone(),

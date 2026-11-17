@@ -8,7 +8,7 @@
 //! runtime, so native subscriptions and observations are never rebuilt.
 
 use super::{
-    directory::{DeviceSlot, Directory},
+    directory::{DescriptionOperation, DeviceSlot, Directory},
     model::AdapterError,
     state::{Context, LogicalSink},
     work::DeviceWork,
@@ -16,8 +16,8 @@ use super::{
 use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
-        CommittedConfiguration, GroupRelation, OperationKind, Plan, Scope, SourceDevice,
-        SourceFacts,
+        CommittedConfiguration, GroupRelation, OperationKind, Plan, PlanOperation, Scope,
+        SourceDevice, SourceFacts,
     },
     device::{Availability, CommandReceiver, DeviceKey, FunctionKey, PhysicalDevice, RelayMode},
 };
@@ -60,10 +60,7 @@ impl Directory {
         let work = slot.admitted.as_deref()?;
         (self.scope.as_ref() == Some(scope)
             && key.source == "xiaomi"
-            && slot
-                .committed
-                .as_ref()
-                .is_some_and(|source| source.raw.key == *key)
+            && work.key == *key
             && !work.life.is_closed())
         .then_some((slot, work))
     }
@@ -76,6 +73,28 @@ impl DeviceSlot {
 }
 
 impl SourceHandle {
+    pub(crate) fn configuration(&self) -> Rc<CommittedConfiguration> {
+        self.0.configuration.borrow().clone()
+    }
+
+    pub(crate) fn set_configuration(&self, configuration: Rc<CommittedConfiguration>) {
+        *self.0.configuration.borrow_mut() = configuration;
+    }
+
+    pub(crate) fn accessible_groups(&self, scope: &Option<Scope>) -> BTreeSet<String> {
+        let directory = self.0.directory.borrow();
+        directory
+            .confirmed_groups()
+            .into_iter()
+            .filter(|group| scope.as_ref() == Some(&group.scope) && directory.scope == *scope)
+            .map(|group| group.membership.group_did)
+            .collect()
+    }
+
+    pub(crate) fn has_scope(&self) -> bool {
+        self.0.directory.borrow().scope.is_some()
+    }
+
     /// Capture current diagnostics without waiting for the publication callback.
     pub fn diagnostics(&self) -> super::AdapterStatus {
         self.0.diagnostics()
@@ -108,11 +127,30 @@ impl SourceHandle {
         }
     }
 
-    pub(crate) fn accessible_descriptions(&self) -> std::collections::BTreeSet<DeviceKey> {
-        let live = self.0.directory.borrow();
-        live.devices
-            .values()
-            .filter_map(|slot| slot.committed.as_ref().map(|source| source.raw.key.clone()))
+    /// Retained selected-home sources, including descriptions with no runtime.
+    pub(crate) fn accessible_descriptions(
+        &self,
+        configuration: &CommittedConfiguration,
+    ) -> BTreeSet<DeviceKey> {
+        let directory = self.0.directory.borrow();
+        if directory.scope != configuration.scope {
+            return BTreeSet::new();
+        }
+        directory
+            .devices
+            .iter()
+            .filter(|(_, slot)| {
+                slot.admitted
+                    .as_ref()
+                    .is_none_or(|work| !work.life.is_closed())
+            })
+            .map(|(did, _)| DeviceKey::new("xiaomi", did))
+            .chain(
+                directory
+                    .split_devices()
+                    .iter()
+                    .map(|split| DeviceKey::new("xiaomi", &split.did)),
+            )
             .collect()
     }
 
@@ -173,46 +211,53 @@ impl SourceHandle {
 
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
-    pub(crate) fn snapshot(&self) -> SourceFacts {
-        let live = self.0.directory.borrow();
-        let scope = live.scope.clone();
-        // A directory target that has not produced its matching description
-        // cannot be combined with other new facts. Keep the committed graph
-        // until the complete input is available, while still honoring removed slots.
-        let waiting = live.devices.values().any(|slot| {
-            slot.committed.is_some()
-                && (slot.description_target_missing
-                    || slot.cloud_access.as_ref().is_some_and(|access| {
-                        slot.candidate.as_ref().is_none_or(|source| {
-                            access.model != source.raw.model
-                                || access.instance_type != source.raw.instance_type
+    pub(crate) fn snapshot(&self, current: &CommittedConfiguration) -> SourceFacts {
+        let directory = self.0.directory.borrow();
+        let scope = directory.scope.clone();
+        let same_scope = current.scope == scope;
+        // A configured target awaiting a complete matching description holds
+        // the whole batch. Withdrawn sources are absent and never held back.
+        let waiting = same_scope
+            && current.descriptions.iter().any(|committed| {
+                let did = &committed.key.id;
+                let Some(slot) = directory.devices.get(did) else {
+                    return false;
+                };
+                directory
+                    .group(did)
+                    .is_some_and(|group| group.instance_type.is_none())
+                    || directory
+                        .description_target(did)
+                        .as_ref()
+                        .is_some_and(|(model, urn)| {
+                            slot.latest_description.as_ref().is_none_or(|description| {
+                                description.raw.model != *model
+                                    || description.raw.instance_type != *urn
+                            })
                         })
-                    }))
+            });
+        let committed = waiting.then(|| {
+            current
+                .source_descriptions()
+                .map(|description| (description.raw.key.id.clone(), description))
+                .collect::<BTreeMap<_, _>>()
         });
-        let mut devices = Vec::new();
-        for slot in live.devices.values() {
-            let description = if waiting {
-                &slot.committed
-            } else {
-                &slot.candidate
-            };
-            if let Some(description) = description {
-                devices.push(SourceDevice {
-                    description: description.clone(),
-                    fresh: slot.confirmed,
-                });
-            }
-        }
-        // A startup recognition error belongs to the source diagnostic, not
-        // the confirmed relation retained with its last valid description.
-        let problems = live
+        let devices = directory
             .devices
             .iter()
-            .filter(|(_, slot)| !slot.recompute_failed)
-            .filter_map(|(did, slot)| slot.blocked.clone().map(|problem| (did.clone(), problem)))
-            .collect::<BTreeMap<_, _>>();
+            .filter_map(|(did, slot)| {
+                let description = match &committed {
+                    Some(committed) => committed.get(did),
+                    None => slot.latest_description.as_ref(),
+                }?;
+                Some(SourceDevice {
+                    description: description.clone(),
+                    fresh: slot.confirmed,
+                })
+            })
+            .collect();
         let mut relay_modes = BTreeMap::new();
-        for work in live
+        for work in directory
             .devices
             .values()
             .filter_map(|slot| slot.admitted.as_ref())
@@ -223,51 +268,54 @@ impl SourceHandle {
                 }
             }
         }
-        drop(live);
-        let mut relations: Vec<GroupRelation> = self
-            .0
-            .directory
-            .borrow()
+        let relations = directory
             .confirmed_groups()
             .into_iter()
             .filter(|group| scope.as_ref() == Some(&group.scope))
-            .map(|group| {
+            .filter_map(|group| {
+                let did = &group.membership.group_did;
+                if waiting && group.active {
+                    return current
+                        .groups
+                        .iter()
+                        .find(|relation| &relation.group_did == did)
+                        .cloned();
+                }
+                if waiting
+                    && !current
+                        .groups
+                        .iter()
+                        .any(|relation| &relation.group_did == did)
+                {
+                    return None;
+                }
                 let errors = group
                     .error
                     .into_iter()
-                    .chain(problems.get(&group.membership.group_did).cloned())
+                    .chain(directory.devices.get(did).into_iter().flat_map(|slot| {
+                        slot.description_problems
+                            .iter()
+                            .filter(|problem| problem.operation == DescriptionOperation::Load)
+                            .map(ToString::to_string)
+                    }))
                     .collect::<Vec<_>>();
-                let error = (!errors.is_empty()).then(|| errors.join("; "));
-                GroupRelation {
+                Some(GroupRelation {
                     group_did: group.membership.group_did,
                     record_did: group.record_did,
                     model: group.model,
                     instance_type: group.instance_type,
                     is_physical: group.membership.is_physical,
                     active: group.active,
-                    error,
+                    error: (!errors.is_empty()).then(|| errors.join("; ")),
                     members: group.membership.members,
-                }
+                })
             })
             .collect();
-        if waiting {
-            let graph = self.0.graph.borrow();
-            relations = relations
-                .into_iter()
-                .filter_map(|relation| {
-                    if !relation.active {
-                        Some(relation)
-                    } else {
-                        graph.groups.get(&relation.group_did).cloned()
-                    }
-                })
-                .collect();
-        }
         SourceFacts {
             scope,
             devices,
             relations,
-            split_devices: self.0.directory.borrow().split_devices().to_vec(),
+            split_devices: directory.split_devices().to_vec(),
             relay_modes,
         }
     }
@@ -373,10 +421,15 @@ impl SourceHandle {
     /// and group, then start consumers, work, refreshes and group
     /// recomputation. The caller guarantees that no await happens between
     /// prepare, commit and install.
-    pub(crate) fn install(&self, plan: &Plan, prepared: PreparedSources) -> Vec<Rc<SourceEntry>> {
+    pub(crate) fn install(
+        &self,
+        configuration: &CommittedConfiguration,
+        derived: &Rc<crate::configuration::DerivedConfiguration>,
+        operations: &[PlanOperation],
+        prepared: PreparedSources,
+    ) -> Vec<Rc<SourceEntry>> {
         self.planned();
-        let mut routing_affected = plan
-            .operations
+        let mut routing_affected = operations
             .iter()
             .filter(|operation| {
                 matches!(
@@ -395,8 +448,8 @@ impl SourceHandle {
             graph
                 .rules
                 .keys()
-                .chain(plan.derived.rules.keys())
-                .filter(|did| graph.rules.get(*did) != plan.derived.rules.get(*did))
+                .chain(derived.rules.keys())
+                .filter(|did| graph.rules.get(*did) != derived.rules.get(*did))
                 .cloned()
                 .collect::<BTreeSet<_>>()
         };
@@ -452,14 +505,15 @@ impl SourceHandle {
         }
         // Reused entries receive committed metadata without preparing resources
         // or refreshing their unchanged native feedback.
-        for operation in &plan.operations {
+        for operation in operations {
             if operation.kind == OperationKind::Removed {
                 continue;
             }
-            let device = plan.configuration.device(&operation.key).unwrap();
-            let mut live = self.0.directory.borrow_mut();
-            let slot = live.devices.get_mut(&operation.key.id).unwrap();
-            let work = slot.admitted.as_ref().unwrap();
+            let device = configuration.device(&operation.key).unwrap();
+            let work = self.0.directory.borrow().devices[&operation.key.id]
+                .admitted
+                .clone()
+                .unwrap();
             work.physical().set_label(device.label.clone());
             work.set_committed_battery_issue(
                 device
@@ -467,24 +521,10 @@ impl SourceHandle {
                     .as_ref()
                     .and_then(|native| native.device().battery_issue()),
             );
-            slot.group = plan.derived.groups.contains_key(&operation.key.id);
-        }
-        {
-            let mut live = self.0.directory.borrow_mut();
-            for slot in live.devices.values_mut() {
-                slot.committed = None;
-            }
-            for description in plan.configuration.source_descriptions() {
-                let slot = live
-                    .devices
-                    .get_mut(&description.raw.key.id)
-                    .expect("committed source retains its slot");
-                slot.committed = Some(description);
-            }
         }
         // Install every instance and the graph before starting consumers or
         // deriving group feedback. Each group is recomputed once per commit.
-        *self.0.graph.borrow_mut() = plan.derived.clone();
+        *self.0.graph.borrow_mut() = derived.clone();
         for source in started {
             let did = &source.key.id;
             self.0
@@ -496,7 +536,7 @@ impl SourceHandle {
             source.work.report(&self.0);
         }
         if changed {
-            for did in plan.derived.rules.keys() {
+            for did in derived.rules.keys() {
                 self.0.update_device_availability(did);
             }
             self.0.refresh_all_group_states();
@@ -517,7 +557,7 @@ impl SourceHandle {
                 None,
             );
         }
-        let entries = self.entries(&plan.configuration);
+        let entries = self.entries(configuration);
         self.0.changed.notify(usize::MAX);
         entries
     }
@@ -588,7 +628,7 @@ impl Context {
             .borrow()
             .devices
             .get(did)
-            .map(|slot| (slot.admitted.clone(), slot.candidate.is_some()))
+            .map(|slot| (slot.admitted.clone(), slot.latest_description.is_some()))
             .unwrap_or_default();
         if let Some(work) = &admitted {
             let sink = work.current_sink();

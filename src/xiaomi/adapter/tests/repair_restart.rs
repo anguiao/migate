@@ -154,7 +154,7 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
                 access.model = native.model().into();
                 access.instance_type = native.instance_type().into();
             }
-            member.candidate = Some(native.into());
+            member.latest_description = Some(native.into());
         }
         c.context.reconcile("member-a").unwrap();
         c.context.stage();
@@ -178,7 +178,7 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
         );
         assert!(
             restored.context.directory.borrow().devices["member-a"]
-                .blocked
+                .description_problem()
                 .is_none(),
             "the valid committed native description is not blocked on restart"
         );

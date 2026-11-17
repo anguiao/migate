@@ -38,7 +38,7 @@ pub(super) fn render(
             continue;
         }
         let key = DeviceKey::new("xiaomi", &relation.group_did);
-        if view.get(&key).is_some() {
+        if !view.accessible_groups.contains(&relation.group_did) || view.get(&key).is_some() {
             continue;
         }
         lines.push(format!(

@@ -53,7 +53,7 @@ impl Context {
         let (work, blocked) = {
             let live = self.directory.borrow();
             let slot = &live.devices[did];
-            (slot.admitted.clone(), slot.blocked.clone())
+            (slot.admitted.clone(), slot.description_problem())
         };
         let Some(work) = work else {
             return;

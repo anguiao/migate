@@ -30,7 +30,7 @@ fn logical_only_group_change_reuses_the_native_runtime() {
         {
             let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("member-a").unwrap();
-            slot.candidate = Some(confirmed.into());
+            slot.latest_description = Some(confirmed.into());
         }
         c.context.reconcile("member-a").unwrap();
         until(|| {
@@ -142,7 +142,7 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
             {
                 let mut live = control.context.directory.borrow_mut();
                 let slot = live.devices.get_mut("member-a").unwrap();
-                slot.candidate = Some(confirmed.into());
+                slot.latest_description = Some(confirmed.into());
             }
             control.context.reconcile("member-a").unwrap();
             until(|| {
@@ -208,7 +208,7 @@ async fn revoke_and_readmit(c: &Control, id: &str) -> crate::device::Function {
     {
         let mut live = c.context.directory.borrow_mut();
         let slot = live.devices.get_mut("one").unwrap();
-        slot.candidate.as_mut().unwrap().native = Some(native);
+        slot.latest_description.as_mut().unwrap().native = Some(native);
         slot.confirmed = true;
         slot.cloud_access = cloud_access;
     }

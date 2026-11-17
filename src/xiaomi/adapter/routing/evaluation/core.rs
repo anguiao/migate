@@ -270,18 +270,13 @@ impl<'a> Core<'a> {
 
     fn direct(&self, slot: Option<&DeviceSlot>, retired: bool) -> Result<Client, Unavailable> {
         let slot = slot.ok_or(Unavailable::Fact("device description unavailable"))?;
-        slot.admitted.as_ref().ok_or(Unavailable::Fact(
+        let work = slot.admitted.as_ref().ok_or(Unavailable::Fact(
             "device description or binding unavailable",
         ))?;
         if self.scope_invalid || retired {
             return Err(Unavailable::Fact("device source retired or scope revoked"));
         }
-        if slot
-            .committed
-            .as_ref()
-            .and_then(|source| source.native.as_ref())
-            .is_none_or(|native| native.direct_protocol().is_none())
-        {
+        if work.native.direct_protocol().is_none() {
             return Err(Unavailable::Fact("device model not supported"));
         }
         slot.lan
@@ -320,7 +315,7 @@ impl<'a> Core<'a> {
         let slot = self.directory.devices.get(did);
         let work = slot.and_then(|slot| slot.admitted.as_ref());
         let native = work.map(|work| &work.native).or_else(|| {
-            slot.and_then(|slot| slot.candidate.as_ref())
+            slot.and_then(|slot| slot.latest_description.as_ref())
                 .and_then(|source| source.native.as_ref())
         });
         let read_only = native.is_some_and(|native| native.device().is_read_only());

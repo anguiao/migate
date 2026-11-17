@@ -223,7 +223,7 @@ pub(super) async fn run(
                 .iter()
                 .filter(|did| {
                     !aliases.contains(did.as_str())
-                        && (live.devices.get(*did).is_some_and(|slot| !slot.group)
+                        && (live.devices.contains_key(*did) && live.group(did).is_none()
                             || catalog.is_some())
                 })
                 .cloned()
@@ -234,7 +234,8 @@ pub(super) async fn run(
             live.devices
                 .iter()
                 .filter(|(did, slot)| {
-                    members.contains(*did) && (slot.admitted.is_some() || slot.candidate.is_some())
+                    members.contains(*did)
+                        && (slot.admitted.is_some() || slot.latest_description.is_some())
                 })
                 .map(|(did, _)| did.clone())
                 .collect::<Vec<_>>()
@@ -314,7 +315,9 @@ pub(super) async fn run(
             // visible to group membership, but cannot be described until its
             // directory record establishes whether it is a split alias.
             let known = context.directory.borrow().devices[&did].admitted.is_some()
-                || context.directory.borrow().devices[&did].candidate.is_some();
+                || context.directory.borrow().devices[&did]
+                    .latest_description
+                    .is_some();
             if !known
                 && catalog.as_ref().is_none_or(|(catalog, _)| {
                     !catalog.devices.iter().any(|record| record.did == did)
@@ -326,7 +329,7 @@ pub(super) async fn run(
             // relation, never through the ordinary home description path.
             let group_like = {
                 let live = context.directory.borrow();
-                live.devices[&did].group
+                live.group(&did).is_some()
                     || crate::xiaomi::capability::is_light_group(
                         &crate::device::DeviceKey::new("xiaomi", &did),
                         live.devices[&did]
@@ -457,15 +460,17 @@ pub(super) async fn run(
                 }
                 match result {
                     Ok(description) => {
-                        let matches_target = target.as_ref().is_none_or(|(model, urn)| {
-                            *model == description.raw.model && *urn == description.raw.instance_type
-                        });
+                        let matches_target = description.raw.key
+                            == crate::device::DeviceKey::new("xiaomi", &did)
+                            && target.as_ref().is_none_or(|(model, urn)| {
+                                *model == description.raw.model
+                                    && *urn == description.raw.instance_type
+                            });
                         if matches_target {
                             current
                                 .directory
                                 .borrow_mut()
                                 .accept_description(&did, description);
-                            current.clear_description_problem(&did);
                             current.stage();
                             // The new latest fact must enter the next
                             // directory pass so its access facts are read
@@ -511,10 +516,8 @@ pub(super) async fn run(
                     .borrow_mut()
                     .confirm_catalog(catalog, &scope, &catalog_members);
             for did in &update.withdrawn {
-                if !catalog_members.contains(did)
-                    && context.directory.borrow().devices.contains_key(did)
-                {
-                    context.remove(did)?;
+                if context.directory.borrow().devices.contains_key(did) {
+                    context.remove_group(did)?;
                 }
             }
             for (did, reason) in &update.errors {

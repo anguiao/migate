@@ -103,9 +103,15 @@ pub(super) fn view(registry: &DeviceRegistry, store: &DeviceStore) -> Result<Vie
             Rc::new(SourceEntry::for_test(native, physical))
         })
         .collect();
+    let accessible_groups = configuration
+        .groups
+        .iter()
+        .map(|group| group.group_did.clone())
+        .collect();
     Ok(View {
+        accessible_groups,
         current: Rc::new(EffectiveConfiguration {
-            configuration,
+            configuration: Rc::new(configuration),
             derived: derived.into(),
             entries,
             published: registry.clone(),

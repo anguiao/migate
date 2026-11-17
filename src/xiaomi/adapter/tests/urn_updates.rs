@@ -130,7 +130,7 @@ fn a_failed_description_update_preserves_cloud_online_notifications() {
             c.context.request_sync();
             until(|| {
                 c.context.directory.borrow().devices["one"]
-                    .blocked
+                    .description_problem()
                     .is_some()
             })
             .await;
@@ -214,7 +214,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
             .await;
             until(|| {
                 c.context.directory.borrow().devices["one"]
-                    .blocked
+                    .description_problem()
                     .as_deref()
                     .is_some_and(|reason| reason.contains(diagnostic))
             })
@@ -229,7 +229,7 @@ fn invalid_or_unavailable_new_urn_keeps_the_committed_light_controllable() {
             );
             assert!(after.contains(&old_capabilities), "{after}");
             let saved = c.store.devices().load_configuration().unwrap();
-            assert_eq!(saved, app_before.configuration);
+            assert_eq!(saved, *app_before.configuration);
             let served = matter.read(committed.endpoint).await;
             assert_eq!(
                 (
@@ -437,9 +437,9 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         until(|| {
             let live = c.context.directory.borrow();
             assert!(
-                live.devices["one"].blocked.is_none(),
+                live.devices["one"].description_problem().is_none(),
                 "unexpected description failure: {:?}",
-                live.devices["one"].blocked
+                live.devices["one"].description_problem()
             );
             c.publication.failure().is_some()
         })

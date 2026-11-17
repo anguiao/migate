@@ -79,7 +79,7 @@ fn narrower_supported_range_replaces_the_logical_light_while_keeping_identity() 
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(narrower);
@@ -164,7 +164,7 @@ fn binding_change_retires_old_feedback_authority() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(changed);
@@ -254,7 +254,7 @@ fn retired_work_replacement_retires_old_feedback_authority() {
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(changed);

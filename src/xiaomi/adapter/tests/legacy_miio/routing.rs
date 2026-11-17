@@ -28,7 +28,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
             let slot = live.devices.get_mut(did).unwrap();
             // There is no newer authoritative cloud model in this scenario.
             slot.cloud_access = None;
-            slot.candidate = Some(candidate.into());
+            slot.latest_description = Some(candidate.into());
         }
         assert!(control.context.legacy_mapping(did).is_some());
         let plan = control.publication.plan().unwrap().unwrap();

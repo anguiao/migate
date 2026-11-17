@@ -40,7 +40,7 @@ pub struct BridgeOptions<'a> {
 
 /// One committed configuration with its derived graph and serving devices.
 pub(crate) struct EffectiveConfiguration {
-    pub(crate) configuration: CommittedConfiguration,
+    pub(crate) configuration: Rc<CommittedConfiguration>,
     pub(crate) derived: Rc<DerivedConfiguration>,
     pub(crate) entries: Vec<Rc<SourceEntry>>,
     pub(crate) published: DeviceRegistry,
@@ -77,7 +77,7 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn open(source: SourceHandle, store: Store) -> Result<Self, StorageError> {
-        let configuration = store.devices().load_configuration()?;
+        let configuration = source.configuration();
         // Serving starts from the committed graph with real revocations
         // overlaid. Planning separately compares the unmodified committed graph
         // so withdrawals still receive their version increments.
@@ -106,6 +106,15 @@ impl App {
         self.current.borrow().clone()
     }
 
+    fn replace_current(&self, current: EffectiveConfiguration) {
+        self.source.set_configuration(current.configuration.clone());
+        *self.current.borrow_mut() = Rc::new(current);
+    }
+
+    pub(crate) fn accessible_groups(&self, current: &EffectiveConfiguration) -> BTreeSet<String> {
+        self.source.accessible_groups(&current.configuration.scope)
+    }
+
     pub(crate) fn diagnostics(&self) -> crate::xiaomi::adapter::AdapterStatus {
         self.source.diagnostics()
     }
@@ -118,8 +127,11 @@ impl App {
         self.pending.get()
     }
 
-    pub(crate) fn accessible_descriptions(&self) -> BTreeSet<DeviceKey> {
-        self.source.accessible_descriptions()
+    pub(crate) fn accessible_descriptions(
+        &self,
+        current: &EffectiveConfiguration,
+    ) -> BTreeSet<DeviceKey> {
+        self.source.accessible_descriptions(&current.configuration)
     }
 
     pub(crate) fn configurable_devices(
@@ -248,7 +260,7 @@ impl App {
     /// No activation resource is created here.
     pub(crate) fn plan(&self) -> Result<Option<Plan>, StorageError> {
         let current = self.current();
-        let snapshot = self.source.snapshot();
+        let snapshot = self.source.snapshot(&current.configuration);
         if snapshot.scope.is_none() {
             return Ok(None);
         }
@@ -328,13 +340,22 @@ impl App {
                 *self.failure.borrow_mut() = Some(error.to_string());
                 return Err(error);
             }
-            let entries = self.source.install(&plan, prepared.resources);
-            let published = published_registry(&plan.derived.published, &entries);
-            activate_temperature_bindings(&plan.configuration, &entries);
-            let root_version = plan.configuration.root_version;
-            *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-                configuration: plan.configuration,
-                derived: plan.derived,
+            let Plan {
+                configuration,
+                derived,
+                operations,
+                ..
+            } = plan;
+            let configuration = Rc::new(configuration);
+            let entries =
+                self.source
+                    .install(&configuration, &derived, &operations, prepared.resources);
+            let published = published_registry(&derived.published, &entries);
+            activate_temperature_bindings(&configuration, &entries);
+            let root_version = configuration.root_version;
+            self.replace_current(EffectiveConfiguration {
+                configuration,
+                derived,
                 entries,
                 published,
             });
@@ -354,7 +375,7 @@ impl App {
         validate_label(label)
             .map_err(|error| StorageError::new(self.store.path(), "write device label", error))?;
         let current = self.current();
-        let mut configuration = current.configuration.clone();
+        let mut configuration = (*current.configuration).clone();
         let device = configuration
             .devices
             .iter_mut()
@@ -375,8 +396,8 @@ impl App {
         if let Some(served) = derived.served.get_mut(key) {
             served.description.set_label(label);
         }
-        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-            configuration,
+        self.replace_current(EffectiveConfiguration {
+            configuration: Rc::new(configuration),
             derived: Rc::new(derived),
             entries: current.entries.clone(),
             published: current.published.clone(),
@@ -413,7 +434,7 @@ impl App {
             .scope
             .as_ref()
             .expect("accessible device has a scope");
-        let mut configuration = current.configuration.clone();
+        let mut configuration = (*current.configuration).clone();
         let channel = configuration
             .relay_channels
             .iter_mut()
@@ -438,8 +459,8 @@ impl App {
             .devices()
             .commit_configuration(&configuration, &[])
             .map_err(|error| error.to_string())?;
-        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-            configuration,
+        self.replace_current(EffectiveConfiguration {
+            configuration: Rc::new(configuration),
             derived: current.derived.clone(),
             entries: current.entries.clone(),
             published: current.published.clone(),
@@ -477,7 +498,7 @@ impl LabelWriter for App {
         validate_label(label)
             .map_err(|error| StorageError::new(self.store.path(), "write relay label", error))?;
         let current = self.current();
-        let mut configuration = current.configuration.clone();
+        let mut configuration = (*current.configuration).clone();
         let channel = configuration
             .relay_channels
             .iter_mut()
@@ -493,8 +514,8 @@ impl LabelWriter for App {
         self.store
             .devices()
             .commit_configuration(&configuration, &[])?;
-        *self.current.borrow_mut() = Rc::new(EffectiveConfiguration {
-            configuration,
+        self.replace_current(EffectiveConfiguration {
+            configuration: Rc::new(configuration),
             derived: current.derived.clone(),
             entries: current.entries.clone(),
             published: current.published.clone(),

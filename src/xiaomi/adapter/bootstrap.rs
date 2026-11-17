@@ -1,6 +1,6 @@
 use super::{
     credentials::Credentials,
-    directory::{DeviceSlot, Directory},
+    directory::{DescriptionOperation, DescriptionProblem, DeviceSlot, Directory},
     hub::Hub,
     model::{AdapterError, Ready, TopologyReady},
     runner::XiaomiAdapter,
@@ -118,7 +118,7 @@ impl XiaomiAdapter {
                     Ok(description) => (description, None),
                     Err(error) => (committed.clone(), Some(error.to_string())),
                 };
-                staged.push((candidate, committed, group, failure));
+                staged.push((candidate, failure));
             }
             // Every current non-revoked native entity is restored, including
             // currently unpublishable native groups; publication is decided by
@@ -187,6 +187,7 @@ impl XiaomiAdapter {
             ready: ready.clone(),
             clock,
 
+            configuration: RefCell::new(Rc::new(stored)),
             sync_requested: Cell::new(true),
             sync_changed: Event::new(),
         });
@@ -210,9 +211,6 @@ impl XiaomiAdapter {
             context.registry.insert(sink.physical.clone());
             let slot = DeviceSlot {
                 admitted: Some(work.clone()),
-                group: restored_relations
-                    .iter()
-                    .any(|group| group.group_did == did),
                 ..Default::default()
             };
             let virtual_group = context
@@ -232,16 +230,22 @@ impl XiaomiAdapter {
             context.install_work(&did);
             context.add_consumers(work, sink, receivers);
         }
-        for (candidate, committed, group, failure) in staged {
-            let did = candidate.raw.key.id.clone();
+        for (description, failure) in staged {
+            let did = description.raw.key.id.clone();
             {
                 let mut live = context.directory.borrow_mut();
                 let slot = live.devices.entry(did.clone()).or_default();
-                slot.group = group;
-                slot.committed = Some(committed);
-                slot.candidate = Some(candidate);
-                slot.recompute_failed = failure.is_some();
-                slot.blocked = failure.clone();
+                if let Some(reason) = &failure {
+                    slot.description_failed(DescriptionProblem {
+                        operation: DescriptionOperation::RecognizeStored,
+                        target: Some((
+                            description.raw.model.clone(),
+                            description.raw.instance_type.clone(),
+                        )),
+                        reason: reason.clone(),
+                    });
+                }
+                slot.latest_description = Some(description);
             }
             if failure.is_some() {
                 context.status_changed.notify(usize::MAX);

@@ -307,7 +307,7 @@ fn readmitted_device_gets_a_fresh_temperature_instance() {
         {
             let mut live = c.context.directory.borrow_mut();
             let slot = live.devices.get_mut("sensor").unwrap();
-            slot.candidate.as_mut().unwrap().native = Some(native);
+            slot.latest_description.as_mut().unwrap().native = Some(native);
             slot.confirmed = true;
             slot.cloud_access = cloud_access;
         }

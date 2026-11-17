@@ -285,7 +285,7 @@ fn command_diagnostics_are_sampled_only_for_reports() {
 }
 
 #[test]
-fn committed_raw_description_stays_known_without_visible_details() {
+fn withdrawn_raw_description_uses_pending_or_unknown_without_visible_details() {
     block_on(async {
         let (_dir, store, status, _registry, _receivers) = fixture();
         let mut configuration = store.devices().load_configuration().unwrap();
@@ -297,7 +297,7 @@ fn committed_raw_description_stays_known_without_visible_details() {
         let derived = configuration.derive();
         let view = super::View {
             current: std::rc::Rc::new(crate::app::EffectiveConfiguration {
-                configuration,
+                configuration: std::rc::Rc::new(configuration),
                 derived: derived.into(),
                 entries: Vec::new(),
                 published: DeviceRegistry::new(),
@@ -305,6 +305,7 @@ fn committed_raw_description_stays_known_without_visible_details() {
             pending: true,
             failure: Some("withdrawal save failed".into()),
             accessible_descriptions: Default::default(),
+            accessible_groups: Default::default(),
             configurable_devices: Default::default(),
         };
         let mut diagnostics = support::diagnostics();
@@ -323,10 +324,16 @@ fn committed_raw_description_stays_known_without_visible_details() {
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(text.starts_with("one: not published\n"), "{text}");
+            if pending {
+                assert_eq!(
+                    text,
+                    "one (Retired source): pending (description unavailable)"
+                );
+            } else {
+                assert!(text.starts_with("Unknown device DID.\n"), "{text}");
+            }
             assert!(!text.contains("outlet:2"), "{text}");
             assert!(!text.contains("recognition issue"), "{text}");
-            assert!(!text.contains(": pending ("), "{text}");
         }
         let unknown = view
             .handle_words(&["status", "missing"], &status, || diagnostics.clone())

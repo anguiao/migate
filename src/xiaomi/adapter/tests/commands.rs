@@ -153,7 +153,7 @@ fn a_late_success_for_an_obsolete_native_instance_does_not_override_the_current_
                 .devices
                 .get_mut("one")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(changed);
@@ -249,7 +249,7 @@ fn restored_and_duplicate_description_sync_keeps_channel_commands() {
                 .devices
                 .get_mut("multi")
                 .unwrap()
-                .candidate
+                .latest_description
                 .as_mut()
                 .unwrap()
                 .native = Some(stable.clone());

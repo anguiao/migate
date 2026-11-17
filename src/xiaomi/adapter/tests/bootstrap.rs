@@ -7,7 +7,7 @@ fn equivalent_startup_recomputation_keeps_versions_and_uses_no_network() {
     let before = rig.store.devices().load_configuration().unwrap();
     let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
     assert!(app.plan().unwrap().is_none());
-    assert_eq!(app.current().configuration, before);
+    assert_eq!(*app.current().configuration, before);
     assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
     assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
 }
@@ -62,11 +62,60 @@ fn failed_recognition(context: &super::super::state::Context, did: &str) {
     {
         let mut live = context.directory.borrow_mut();
         let slot = live.devices.get_mut(did).unwrap();
-        slot.candidate = slot.committed.clone();
-        slot.recompute_failed = true;
-        slot.blocked = Some(RECOGNITION_FAILURE.into());
+        let raw = &slot.latest_description.as_ref().unwrap().raw;
+        let target = Some((raw.model.clone(), raw.instance_type.clone()));
+        slot.description_failed(super::super::directory::DescriptionProblem {
+            operation: super::super::directory::DescriptionOperation::RecognizeStored,
+            target,
+            reason: RECOGNITION_FAILURE.into(),
+        });
     }
     context.status_changed.notify(usize::MAX);
+}
+
+#[test]
+fn startup_recognition_and_description_read_problems_recover_independently() {
+    let rig = Rig::new(true, &["one"]);
+    let context = &rig.source.context;
+    failed_recognition(context, "one");
+    {
+        let mut directory = context.directory.borrow_mut();
+        let slot = directory.devices.get_mut("one").unwrap();
+        let raw = &slot.latest_description.as_ref().unwrap().raw;
+        slot.cloud_access = Some(crate::xiaomi::mijia::CloudDeviceInfo {
+            did: "one".into(),
+            model: raw.model.clone(),
+            instance_type: raw.instance_type.clone(),
+            online: false,
+            lan: crate::xiaomi::mijia::LanCredentials::NotIp,
+        });
+    }
+    context.pending_description("one", "new description read failed".into());
+    let pending = context.diagnostics().pending;
+    let problem = pending.iter().find(|pending| pending.did == "one").unwrap();
+    assert!(
+        problem.reason.contains(RECOGNITION_FAILURE),
+        "{}",
+        problem.reason
+    );
+    assert!(
+        problem.reason.contains("new description read failed"),
+        "{}",
+        problem.reason
+    );
+    context.resolved_description_target("one");
+    let pending = context.diagnostics().pending;
+    let problem = pending.iter().find(|pending| pending.did == "one").unwrap();
+    assert!(
+        problem.reason.contains(RECOGNITION_FAILURE),
+        "{}",
+        problem.reason
+    );
+    assert!(
+        !problem.reason.contains("new description read failed"),
+        "{}",
+        problem.reason
+    );
 }
 
 #[test]
@@ -76,7 +125,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
     let before = app.current().configuration.clone();
     let retained = context.directory.borrow().devices["one"]
-        .committed
+        .latest_description
         .clone()
         .unwrap();
     let work = context.directory.borrow().devices["one"]
@@ -98,7 +147,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
         .devices
         .get_mut("two")
         .unwrap()
-        .candidate = Some(candidate);
+        .latest_description = Some(candidate);
 
     let plan = app.plan().unwrap().unwrap();
     assert_eq!(
@@ -138,9 +187,18 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     assert!(app.plan().unwrap().is_none());
     assert!(!app.pending());
     assert!(app.failure().is_none());
-    assert!(context.directory.borrow().devices["one"].recompute_failed);
+    assert!(
+        context.directory.borrow().devices["one"]
+            .description_problems
+            .iter()
+            .any(|problem| {
+                problem.operation == super::super::directory::DescriptionOperation::RecognizeStored
+            })
+    );
     assert_eq!(
-        context.directory.borrow().devices["one"].candidate.as_ref(),
+        context.directory.borrow().devices["one"]
+            .latest_description
+            .as_ref(),
         Some(&retained)
     );
     assert!(
@@ -148,7 +206,7 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
             .diagnostics()
             .pending
             .iter()
-            .any(|pending| pending.did == "one" && pending.reason == RECOGNITION_FAILURE)
+            .any(|pending| pending.did == "one" && pending.reason.contains(RECOGNITION_FAILURE))
     );
     assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
 
@@ -180,7 +238,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
         let before = c.store.devices().load_configuration().unwrap();
         let key = DeviceKey::new("xiaomi", "group-1");
         let retained = c.context.directory.borrow().devices["group-1"]
-            .committed
+            .latest_description
             .clone()
             .unwrap();
         failed_recognition(&c.context, "group-1");
@@ -193,7 +251,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
             .devices
             .get_mut("member-b")
             .unwrap()
-            .candidate = Some(candidate.into());
+            .latest_description = Some(candidate.into());
 
         let plan = c.publication.plan().unwrap().unwrap();
         assert_eq!(plan.configuration.groups, before.groups);
@@ -208,7 +266,7 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
         c.publication.apply(c.publication.prepare(plan)).unwrap();
         assert_eq!(
             c.context.directory.borrow().devices["group-1"]
-                .committed
+                .latest_description
                 .as_ref(),
             Some(&retained)
         );
@@ -218,13 +276,9 @@ fn failed_group_recognition_keeps_its_source_while_member_composition_updates() 
                 .temperature_interval(),
             Some(crate::device::TemperatureInterval::new(3000, 6000).unwrap())
         );
-        assert!(
-            c.context
-                .diagnostics()
-                .pending
-                .iter()
-                .any(|pending| pending.did == "group-1" && pending.reason == RECOGNITION_FAILURE)
-        );
+        assert!(c.context.diagnostics().pending.iter().any(
+            |pending| pending.did == "group-1" && pending.reason.contains(RECOGNITION_FAILURE)
+        ));
         assert!(c.publication.plan().unwrap().is_none());
     }));
 }
@@ -240,12 +294,20 @@ fn a_new_description_resolves_the_retained_recognition_failure() {
                 .is_some()
         })
         .await;
-        assert!(c.context.directory.borrow().devices["one"].recompute_failed);
-        assert_eq!(
+        assert!(
             c.context.directory.borrow().devices["one"]
-                .blocked
-                .as_deref(),
-            Some(RECOGNITION_FAILURE)
+                .description_problems
+                .iter()
+                .any(|problem| {
+                    problem.operation
+                        == super::super::directory::DescriptionOperation::RecognizeStored
+                })
+        );
+        assert!(
+            c.context.directory.borrow().devices["one"]
+                .description_problem()
+                .unwrap()
+                .contains(RECOGNITION_FAILURE)
         );
         assert!(c.cloud.lock().unwrap().instance_reads.is_empty());
         let committed = c.store.devices().load_configuration().unwrap();
@@ -261,10 +323,9 @@ fn a_new_description_resolves_the_retained_recognition_failure() {
         until(|| {
             let live = c.context.directory.borrow();
             let slot = &live.devices["one"];
-            !slot.recompute_failed
-                && slot.blocked.is_none()
+            slot.description_problems.is_empty()
                 && slot
-                    .committed
+                    .latest_description
                     .as_ref()
                     .is_some_and(|description| description.raw.instance_type == urn)
         })
@@ -274,7 +335,7 @@ fn a_new_description_resolves_the_retained_recognition_failure() {
                 .diagnostics()
                 .pending
                 .iter()
-                .any(|pending| pending.reason == RECOGNITION_FAILURE)
+                .any(|pending| pending.reason.contains(RECOGNITION_FAILURE))
         );
         let current = c.store.devices().load_configuration().unwrap();
         assert_eq!(current.devices[0].unique_id, committed.devices[0].unique_id);
@@ -398,7 +459,7 @@ fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay(
     let prepared = app.prepare(plan);
     assert!(app.apply(prepared).is_err());
     assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
-    assert_eq!(app.current().configuration, before);
+    assert_eq!(*app.current().configuration, before);
     assert_eq!(app.frozen().len(), 1);
     assert!(!app.frozen()[0].device.description().has_battery());
     assert!(app.failure().is_some());
@@ -519,7 +580,14 @@ fn cached_sources_are_not_classified_as_groups_by_names_or_models() {
         );
         for group in &groups {
             assert!(registry.get(group.device().key()).is_some());
-            assert!(!source.context.directory.borrow().devices[&group.device().key().id].group);
+            assert!(
+                source
+                    .context
+                    .directory
+                    .borrow()
+                    .group(&group.device().key().id)
+                    .is_none()
+            );
             assert_eq!(
                 rig.store
                     .devices()

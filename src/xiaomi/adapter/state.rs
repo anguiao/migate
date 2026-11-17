@@ -1,6 +1,8 @@
 use super::{bootstrap::Clock, model::Ready, tasks::TaskSet};
 use crate::{
-    configuration::DerivedConfiguration, device::DeviceRegistry, storage::Store,
+    configuration::{CommittedConfiguration, DerivedConfiguration},
+    device::DeviceRegistry,
+    storage::Store,
     xiaomi::mijia::MijiaClient,
 };
 use event_listener::Event;
@@ -51,6 +53,8 @@ pub(super) struct Context {
     pub(super) credentials: RefCell<super::credentials::Credentials>,
     pub(super) directory: RefCell<super::directory::Directory>,
     pub(super) hub: RefCell<super::hub::Hub>,
+    /// Shared application input; runtime bindings remain on each DeviceWork.
+    pub(super) configuration: RefCell<Rc<CommittedConfiguration>>,
     /// The one committed group graph installed with the serving configuration.
     pub(super) graph: RefCell<Rc<DerivedConfiguration>>,
     pub(super) registry: DeviceRegistry,

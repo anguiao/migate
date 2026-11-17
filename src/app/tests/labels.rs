@@ -72,7 +72,7 @@ fn rename_rejects_overlong_utf8_without_changing_saved_or_served_views() {
     let saved = store.devices().load_configuration().unwrap();
     assert!(app.rename(&key, &"灯".repeat(11)).is_err());
     assert_eq!(store.devices().load_configuration().unwrap(), saved);
-    assert_eq!(app.current().configuration, saved);
+    assert_eq!(*app.current().configuration, saved);
     assert_eq!(
         source.physical.as_ref().unwrap().description().label(),
         valid
@@ -92,7 +92,7 @@ fn failed_name_commit_keeps_the_saved_and_served_name() {
     ).unwrap();
     assert!(app.rename(&key, "Changed").is_err());
     assert_eq!(store.devices().load_configuration().unwrap(), saved);
-    assert_eq!(app.current().configuration, saved);
+    assert_eq!(*app.current().configuration, saved);
     assert_eq!(
         source.physical.as_ref().unwrap().description().label(),
         "Test Outlet"

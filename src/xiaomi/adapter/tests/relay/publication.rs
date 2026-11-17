@@ -179,7 +179,7 @@ fn source_to_matter_relays_keep_identity_and_reject_stale_home_commands() {
             assert_eq!(peer.count("rpcReq", "one", 2), 0);
             assert_eq!(peer.count("rpcReq", "one", 3), 3);
             assert_eq!(peer.count("rpcReq", "one", 4), 0);
-            assert_eq!(control.store.devices().load_configuration().unwrap(), control.publication.current().configuration);
+            assert_eq!(control.store.devices().load_configuration().unwrap(), *control.publication.current().configuration);
         }).await;
     })).unwrap()).unwrap().join().unwrap();
 }
@@ -236,7 +236,10 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                         original.configuration_version + 1
                     );
                     assert_eq!(after.root_version, before.root_version + 1);
-                    assert_eq!(control.store.devices().load_configuration().unwrap(), after);
+                    assert_eq!(
+                        control.store.devices().load_configuration().unwrap(),
+                        *after
+                    );
                     assert!(control.publication.plan().unwrap().unwrap().rebuild);
                     let list = terminal.handle_line("list").await.unwrap().unwrap();
                     assert!(list.contains("mode wired; mapping light"), "{list}");

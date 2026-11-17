@@ -1,4 +1,5 @@
 use super::{
+    directory::{DescriptionOperation, DescriptionProblem},
     model::AdapterError,
     state::{Context, LogicalSink},
     work::DeviceWork,
@@ -88,7 +89,7 @@ impl Context {
         Ok(())
     }
     pub(super) fn reconcile(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        if self.directory.borrow().devices[did].group {
+        if self.directory.borrow().group(did).is_some() {
             return self.reconcile_group(did);
         }
         if self.directory.borrow().devices[did].admitted.is_some() {
@@ -104,33 +105,46 @@ impl Context {
     /// A failed directory description is diagnostic only: the committed
     /// runtime keeps serving and the latest pending fact is retained.
     pub(super) fn pending_description(&self, did: &str, reason: String) {
-        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did) {
-            slot.blocked = Some(reason);
+        {
+            let mut directory = self.directory.borrow_mut();
+            let target = directory.description_target(did);
+            if let Some(slot) = directory.devices.get_mut(did) {
+                slot.description_failed(DescriptionProblem {
+                    operation: DescriptionOperation::Load,
+                    target,
+                    reason,
+                });
+            }
         }
         self.status_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }
 
-    pub(super) fn clear_description_problem(&self, did: &str) {
-        if let Some(slot) = self.directory.borrow_mut().devices.get_mut(did)
-            && !slot.recompute_failed
-        {
-            slot.blocked = None;
-        }
-        self.status_changed.notify(usize::MAX);
-    }
-
     pub(super) fn resolved_description_target(&self, did: &str) {
         let cleared = {
-            let mut live = self.directory.borrow_mut();
-            let slot = live
+            let mut directory = self.directory.borrow_mut();
+            let target = directory.description_target(did);
+            let slot = directory
                 .devices
                 .get_mut(did)
-                .expect("a confirmed source retains its slot");
-            slot.loading.is_none() && !slot.recompute_failed && slot.blocked.take().is_some()
+                .expect("a retained source has a slot");
+            let matches = target
+                .as_ref()
+                .zip(slot.latest_description.as_ref())
+                .is_some_and(|((model, urn), source)| {
+                    source.raw.model == *model && source.raw.instance_type == *urn
+                });
+            if slot.loading.is_some() || !matches {
+                false
+            } else {
+                let before = slot.description_problems.len();
+                slot.description_problems
+                    .retain(|problem| problem.operation != DescriptionOperation::Load);
+                slot.description_problems.len() != before
+            }
         };
         if cleared {
-            self.clear_description_problem(did);
+            self.status_changed.notify(usize::MAX);
         }
     }
     /// Retire one native runtime and its current logical sink.
@@ -164,13 +178,7 @@ impl Context {
         self.changed.notify(usize::MAX);
     }
     pub(super) fn remove(self: &Rc<Self>, did: &str) -> Result<(), AdapterError> {
-        if self
-            .directory
-            .borrow()
-            .devices
-            .get(did)
-            .is_some_and(|slot| slot.group)
-        {
+        if self.directory.borrow().group(did).is_some() {
             return self.remove_group(did);
         }
         self.revoke(did, "device removed from the selected home")?;

@@ -86,7 +86,11 @@ pub(super) fn local_device_offline(
 pub(super) fn force_unavailable(context: &super::super::state::Context, did: &str, reason: &str) {
     let reason = reason.to_owned();
     if let Some(slot) = context.directory.borrow_mut().devices.get_mut(did) {
-        slot.blocked = Some(reason.clone());
+        slot.description_failed(super::super::directory::DescriptionProblem {
+            operation: super::super::directory::DescriptionOperation::Load,
+            target: None,
+            reason: reason.clone(),
+        });
     }
     if let Some(work) = context
         .directory

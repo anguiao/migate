@@ -269,7 +269,7 @@ fn configured_runtime_rebuilds_only_for_configuration_and_keeps_committed_state(
             {
                 let mut live = c.context.directory.borrow_mut();
                 let slot = live.devices.get_mut("group-1").unwrap();
-                let candidate = slot.candidate.as_mut().unwrap();
+                let candidate = slot.latest_description.as_mut().unwrap();
                 let native = candidate.native.as_ref().unwrap();
                 let grid = crate::device::NumericRange::new(2700, 6500, 1).unwrap();
                 candidate.native = Some(
@@ -469,7 +469,7 @@ fn failed_source_wins_before_configured_startup_commits() {
             let live = c.context.directory.borrow();
             live.scope.is_some()
                 && live.devices.get("one").is_some_and(|slot| {
-                    slot.candidate
+                    slot.latest_description
                         .as_ref()
                         .is_some_and(|source| source.native.is_some())
                 })
