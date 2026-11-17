@@ -1,16 +1,12 @@
 mod format;
 
-use format::{
-    check_command, format_authentication, format_certificate, format_device, format_gateway,
-    format_routing,
-};
+use format::{auth_report_lines, format_device, format_gateway, format_routing};
 pub(super) use format::{format_command, path, property_diagnostics, timestamp};
 pub use format::{format_report, login_command};
 
 use crate::xiaomi::{
     adapter::{AdapterStatus, GatewayStatus},
-    auth::{AuthReport, AuthenticationState, CertificateUpdate},
-    certificate::CertificateStatus,
+    auth::{AuthReport, AuthenticationState},
 };
 use std::{cell::RefCell, fmt::Write as _, path::PathBuf};
 use time::OffsetDateTime;
@@ -101,73 +97,14 @@ impl AuthStatus {
 
     pub fn log(&self, now: i64) {
         let report = self.report.borrow();
-        if let Some(account) = &report.account {
-            log::info!("Xiaomi account: {} ({}).", account.uid, account.region);
-        } else {
-            log::info!("Xiaomi account: not signed in (cn).");
-        }
-        if let Some(stop) = report.recovery_stop {
-            log::warn!(
-                "Account recovery: stopped. {}.",
-                crate::xiaomi::auth::FailureReason::RecoveryStopped(stop)
-            );
-        }
-        for (label, state) in [("Mijia session", &report.mijia), ("HA OAuth", &report.ha)] {
-            let level = if matches!(
-                state,
-                AuthenticationState::SignInRequired(_) | AuthenticationState::Unavailable(_)
-            ) {
-                log::Level::Warn
-            } else {
-                log::Level::Info
-            };
-            log::log!(level, "{}", format_authentication(label, state));
-        }
-        let certificate_level = match report.certificate.map(|validity| validity.status(now)) {
-            Some(CertificateStatus::NotYetValid | CertificateStatus::Expired) => log::Level::Warn,
-            _ => log::Level::Info,
-        };
-        log::log!(
-            certificate_level,
-            "{}",
-            format_certificate(report.certificate, now)
-        );
-        if let CertificateUpdate::Failed(reason) = &report.certificate_update {
-            log::warn!("Gateway certificate update failed: {reason}.");
-        }
-        if matches!(
-            report.ha,
-            AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
-        ) || report.recovery_stop.is_some()
-            || matches!(
-                report.mijia,
-                AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
-            )
-        {
-            log::info!(
-                "Sign in with: {}",
-                login_command(&self.executable, &self.data_dir)
-            );
-        }
-        if matches!(report.mijia, AuthenticationState::Unavailable(_))
-            || matches!(report.ha, AuthenticationState::Unavailable(_))
-            || matches!(report.certificate_update, CertificateUpdate::Failed(_))
-        {
-            log::info!(
-                "Retry maintenance with: {}",
-                check_command(&self.executable, &self.data_dir)
-            );
-        }
-        if report.recovery_stop == Some(crate::storage::RecoveryStop::VerificationRequired)
-            || [&report.mijia, &report.ha].iter().any(|state| match state {
-                AuthenticationState::SignInRequired(reason)
-                | AuthenticationState::Unavailable(reason) => reason.requires_verification(),
-                _ => false,
-            })
-        {
-            log::warn!(
-                "Complete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request."
-            );
+        for (level, line) in auth_report_lines(
+            &report,
+            report.certificate.map(|validity| validity.status(now)),
+            &self.executable,
+            &self.data_dir,
+            " ",
+        ) {
+            log::log!(level, "{line}");
         }
     }
 }

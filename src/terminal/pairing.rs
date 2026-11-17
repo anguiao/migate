@@ -1,3 +1,4 @@
+use super::qr;
 use crate::matter::PairingEvent;
 use std::io::{self, Write};
 
@@ -7,8 +8,13 @@ pub fn write_event(mut output: impl Write, event: PairingEvent) -> io::Result<()
             window_seconds,
             manual_code,
             qr_payload,
-            qr_text,
         } => {
+            let qr_text = qr::render(&qr_payload).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot render pairing QR code: payload is too long",
+                )
+            })?;
             writeln!(
                 output,
                 "Add MiGate in the Home app. The pairing window is open for {} minutes.\nManual pairing code: {manual_code}\n{qr_payload}",

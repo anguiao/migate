@@ -24,33 +24,62 @@ pub(super) fn format_report_with_certificate(
     executable: &Path,
     data_dir: &Path,
 ) -> String {
+    auth_report_lines(report, certificate_status, executable, data_dir, "\n  ")
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(super) fn auth_report_lines(
+    report: &AuthReport,
+    certificate_status: Option<CertificateStatus>,
+    executable: &Path,
+    data_dir: &Path,
+    command_separator: &str,
+) -> Vec<(log::Level, String)> {
+    use log::Level::{Info, Warn};
+
     let account = match &report.account {
         Some(account) => format!("Xiaomi account: {} ({}).", account.uid, account.region),
         None => "Xiaomi account: not signed in (cn).".to_owned(),
     };
-    let mut output = format!(
-        "{}\n{}\n{}\n{}",
-        account,
-        format_authentication("Mijia session", &report.mijia),
-        format_authentication("HA OAuth", &report.ha),
-        format_certificate_with_status(report.certificate, certificate_status)
-    );
+    let mut lines = vec![(Info, account)];
+    for (label, state) in [("Mijia session", &report.mijia), ("HA OAuth", &report.ha)] {
+        let level = match state {
+            AuthenticationState::SignInRequired(_) | AuthenticationState::Unavailable(_) => Warn,
+            _ => Info,
+        };
+        lines.push((level, format_authentication(label, state)));
+    }
+    let certificate_level = match certificate_status {
+        Some(CertificateStatus::NotYetValid | CertificateStatus::Expired) => Warn,
+        _ => Info,
+    };
+    lines.push((
+        certificate_level,
+        format_certificate_with_status(report.certificate, certificate_status),
+    ));
     if let Some(failure) = &report.login_failure {
-        let _ = write!(
-            output,
-            "\nLogin failed during {}: {}.",
-            failure.stage, failure.reason
-        );
+        lines.push((
+            Warn,
+            format!("Login failed during {}: {}.", failure.stage, failure.reason),
+        ));
     }
     if let Some(stop) = report.recovery_stop {
-        let _ = write!(
-            output,
-            "\nAccount recovery: stopped. {}.",
-            crate::xiaomi::auth::FailureReason::RecoveryStopped(stop)
-        );
+        lines.push((
+            Warn,
+            format!(
+                "Account recovery: stopped. {}.",
+                crate::xiaomi::auth::FailureReason::RecoveryStopped(stop)
+            ),
+        ));
     }
     if let CertificateUpdate::Failed(reason) = &report.certificate_update {
-        let _ = write!(output, "\nGateway certificate update failed: {reason}.");
+        lines.push((
+            Warn,
+            format!("Gateway certificate update failed: {reason}."),
+        ));
     }
     if matches!(
         report.mijia,
@@ -62,21 +91,25 @@ pub(super) fn format_report_with_certificate(
             AuthenticationState::NotSignedIn | AuthenticationState::SignInRequired(_)
         )
     {
-        let _ = write!(
-            output,
-            "\nSign in with:\n  {}",
-            login_command(executable, data_dir)
-        );
+        lines.push((
+            Info,
+            format!(
+                "Sign in with:{command_separator}{}",
+                login_command(executable, data_dir)
+            ),
+        ));
     }
     if matches!(report.mijia, AuthenticationState::Unavailable(_))
         || matches!(report.ha, AuthenticationState::Unavailable(_))
         || matches!(report.certificate_update, CertificateUpdate::Failed(_))
     {
-        let _ = write!(
-            output,
-            "\nRetry maintenance with:\n  {}",
-            check_command(executable, data_dir)
-        );
+        lines.push((
+            Info,
+            format!(
+                "Retry maintenance with:{command_separator}{}",
+                check_command(executable, data_dir)
+            ),
+        ));
     }
     let needs_verification = report.recovery_stop
         == Some(crate::storage::RecoveryStop::VerificationRequired)
@@ -90,9 +123,9 @@ pub(super) fn format_report_with_certificate(
             _ => false,
         });
     if needs_verification {
-        output.push_str("\nComplete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request.");
+        lines.push((Warn, "Complete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request.".into()));
     }
-    output
+    lines
 }
 
 pub(super) fn format_gateway(status: &GatewayStatus) -> String {
@@ -545,7 +578,7 @@ fn format_actions(channel: &str, actions: &crate::device::LightActionDiagnostics
     )
 }
 
-pub(super) fn format_authentication(label: &str, authentication: &AuthenticationState) -> String {
+fn format_authentication(label: &str, authentication: &AuthenticationState) -> String {
     match authentication {
         AuthenticationState::NotSignedIn => format!("{label}: not signed in."),
         AuthenticationState::Checking => format!("{label}: checking."),
@@ -569,16 +602,12 @@ pub fn login_command(executable: &Path, data_dir: &Path) -> String {
     )
 }
 
-pub(super) fn check_command(executable: &Path, data_dir: &Path) -> String {
+fn check_command(executable: &Path, data_dir: &Path) -> String {
     format!(
         "{} --data-dir {} auth check",
         shell_quote(executable),
         shell_quote(data_dir)
     )
-}
-
-pub(super) fn format_certificate(validity: Option<CertificateValidity>, now: i64) -> String {
-    format_certificate_with_status(validity, validity.map(|validity| validity.status(now)))
 }
 
 fn format_certificate_with_status(

@@ -6,6 +6,86 @@ use crate::{
 };
 
 #[test]
+fn login_failure_preserves_the_report_in_logs_and_terminal() {
+    if std::env::var_os("MIGATE_TEST_LOGGER_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "terminal::status::tests::logging::login_failure_preserves_the_report_in_logs_and_terminal",
+                "--nocapture",
+            ])
+            .env("MIGATE_TEST_LOGGER_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "logger child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    use crate::{
+        storage::RecoveryStop,
+        xiaomi::{
+            auth::{
+                AuthReport, AuthenticationState, CertificateUpdate, FailureReason, LoginFailure,
+            },
+            certificate::CertificateValidity,
+        },
+    };
+    use std::io::Write;
+
+    let capture = tempfile::NamedTempFile::new().unwrap();
+    env_logger::Builder::new()
+        .filter_module("migate::terminal::status", log::LevelFilter::Info)
+        .format(|buffer, record| writeln!(buffer, "{}|{}", record.level(), record.args()))
+        .target(env_logger::Target::Pipe(Box::new(
+            capture.reopen().unwrap(),
+        )))
+        .init();
+    let mut report = AuthReport::for_test(
+        AuthenticationState::Authenticated,
+        Some(CertificateValidity {
+            not_before: 1,
+            not_after: 2,
+        }),
+        CertificateUpdate::Failed(FailureReason::InvalidCertificate),
+        3,
+    );
+    report.login_failure = Some(LoginFailure {
+        stage: "HA OAuth authorization",
+        reason: FailureReason::RecoveryStopped(RecoveryStop::VerificationRequired),
+    });
+    let status = AuthStatus::new(report, "/bin/migate".into(), "/data".into());
+    status.log(3);
+    let output = std::fs::read_to_string(capture.path()).unwrap();
+    let messages: Vec<_> = output
+        .lines()
+        .map(|line| line.split_once('|').unwrap().1)
+        .collect();
+    let terminal = status.render(3).replace("with:\n  ", "with: ");
+    assert_eq!(messages, terminal.lines().collect::<Vec<_>>(), "{output}");
+    for message in [
+        "Login failed during HA OAuth authorization:",
+        "Gateway certificate: expired",
+        "Gateway certificate update failed:",
+        "Complete the requested verification",
+    ] {
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with(&format!("WARN|{message}"))),
+            "{output}"
+        );
+    }
+    assert!(output.contains("INFO|Sign in with: '/bin/migate' --data-dir '/data' auth login"));
+    assert!(
+        output.contains("INFO|Retry maintenance with: '/bin/migate' --data-dir '/data' auth check")
+    );
+}
+
+#[test]
 fn startup_login_command_is_a_single_prefixed_log_record() {
     if std::env::var_os("MIGATE_TEST_LOGGER_CHILD").is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())

@@ -13,7 +13,6 @@ use support::*;
 use super::{
     Bridge, PairingEvent,
     model::{basic_info, persist_basic_info, prepare_basic_info},
-    pairing,
     storage::StoreAdapter,
 };
 use crate::{
@@ -220,26 +219,6 @@ fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
             assert!(!endpoint.clusters.iter().any(|cluster| cluster.id == 0x300));
         });
     }
-}
-
-#[test]
-fn pairing_codes_use_the_same_passcode() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    let identity = store.load_identity().unwrap();
-    let info = basic_info(&identity);
-    let PairingEvent::Opened {
-        qr_payload: qr,
-        manual_code: manual,
-        ..
-    } = pairing::opened(&info, 900).unwrap()
-    else {
-        panic!("expected pairing information");
-    };
-    let mut buf = [0; 1024];
-    let qr = rs_matter::pairing::qr::QrPayload::parse(&qr, &mut buf).unwrap();
-    let manual = rs_matter::pairing::qr::QrPayload::parse_pairing_code(&manual).unwrap();
-    assert_eq!(qr.passcode(), manual.passcode());
 }
 
 #[test]

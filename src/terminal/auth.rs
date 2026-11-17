@@ -1,11 +1,10 @@
-use super::format_report;
+use super::{format_report, qr};
 use crate::{
     RuntimeError,
     storage::XiaomiStore,
-    xiaomi::auth::{AccountErrorKind, AuthError, AuthReport, AuthService},
+    xiaomi::auth::{AuthError, AuthReport, AuthService, FailureReason, LoginFailure},
 };
 use futures_lite::io::AsyncWriteExt;
-use qrcodegen_no_heap::{QrCode, QrCodeEcc, Version};
 use std::path::Path;
 
 pub fn logout(store: &XiaomiStore, mut output: impl std::io::Write) -> Result<(), RuntimeError> {
@@ -37,19 +36,8 @@ pub async fn login(
             return Err(error.into());
         }
     };
-    let mut scratch = [0; 16384];
-    let mut buffer = [0; 16384];
-    let qr = match QrCode::encode_text(
-        attempt.login_url(),
-        &mut scratch,
-        &mut buffer,
-        QrCodeEcc::Medium,
-        Version::MIN,
-        Version::MAX,
-        None,
-        false,
-    ) {
-        Ok(qr) => qr,
+    let text = match qr::render(attempt.login_url()) {
+        Ok(text) => text,
         Err(_) => {
             output
                 .write_all(b"Login failed during QR display: payload is too long.\n")
@@ -58,21 +46,6 @@ pub async fn login(
             return Err("Cannot render login QR code: payload is too long".into());
         }
     };
-    let mut text = String::from("\x1b[97;40m");
-    for y in (-4..qr.size() + 4).step_by(2) {
-        for x in -4..qr.size() + 4 {
-            let top = !qr.get_module(x, y);
-            let bottom = !qr.get_module(x, y + 1);
-            text.push(match (top, bottom) {
-                (true, true) => '█',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (false, false) => ' ',
-            });
-        }
-        text.push('\n');
-    }
-    text.push_str("\x1b[0m");
     let seconds = attempt.remaining().as_secs();
     output.write_all(format!("Scan this QR code with the Xiaomi app (valid for up to {seconds} seconds):\n{text}Waiting for scan confirmation...\n").as_bytes()).await?;
     output.flush().await?;
@@ -99,17 +72,23 @@ async fn report_error(
     service: &AuthService,
     executable: &Path,
     data_dir: &Path,
-    stage: &str,
+    stage: &'static str,
     error: &AuthError,
 ) -> Result<(), RuntimeError> {
-    output
-        .write_all(format!("Login failed during {stage}: {error}.\n").as_bytes())
-        .await?;
-    if matches!(error, AuthError::Account(error) if error.kind() == AccountErrorKind::VerificationRequired)
-    {
-        output.write_all(b"Complete the requested verification at https://www.mi.com/ on a phone or computer, preferably on the same network, then run auth login again. This may not prevent another verification request.\n").await?;
+    let reason = match error {
+        AuthError::Account(error) => Some(FailureReason::Account(error.clone())),
+        AuthError::Cloud(error) => Some(FailureReason::Cloud(error.clone())),
+        AuthError::Failure(reason) => Some(reason.clone()),
+        AuthError::Storage(_) | AuthError::LoginStep { .. } | AuthError::Missing(_) => None,
+    };
+    if reason.is_none() {
+        output
+            .write_all(format!("Login failed during {stage}: {error}.\n").as_bytes())
+            .await?;
     }
-    write_report(output, &service.local_status()?, executable, data_dir).await?;
+    let mut report = service.local_status()?;
+    report.login_failure = reason.map(|reason| LoginFailure { stage, reason });
+    write_report(output, &report, executable, data_dir).await?;
     Ok(())
 }
 

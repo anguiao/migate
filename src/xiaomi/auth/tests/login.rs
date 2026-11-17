@@ -8,6 +8,7 @@ use url::Url;
 enum Failure {
     None,
     LongQr,
+    QrVerification,
     Expired,
     WrongQrUid,
     Sts,
@@ -57,6 +58,7 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
         let current = step % 10;
         step += 1;
         match current {
+            0 if failure == Failure::QrVerification => redirect("https://account.xiaomi.com/pass/notification?ticket=verify-secret"),
             0 => {
                 let body = if failure == Failure::LongQr { qr_body().replace("qr-secret", &"x".repeat(5000)) } else if failure == Failure::Expired { qr_body().replace("\"timeout\":60", "\"timeout\":1") } else { qr_body() };
                 response(200, "Set-Cookie: qrSession=qr-cookie; Domain=account.xiaomi.com; Path=/\r\n", &body)
@@ -558,6 +560,78 @@ fn terminal_displays_qr_and_purpose_without_manual_callback_or_ticket_text() {
             && !output.contains("homeassistant.local")
             && !output.contains("ticket=")
     );
+}
+
+#[test]
+fn terminal_failure_uses_the_candidate_report_for_stage_and_verification() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut previous = previous_record();
+    previous.recovery.stop = Some(RecoveryStop::Rejected);
+    store.xiaomi().fixture_replace(&previous).unwrap();
+    let peers = make_peers(&store, Failure::Verification);
+    assert!(peers.auth.local_status().unwrap().login_failure.is_none());
+    let mut output = Vec::new();
+    let result = block_on(crate::terminal::auth::login(
+        &peers.auth,
+        Path::new("migate"),
+        Path::new("/data"),
+        &mut output,
+    ));
+    assert!(result.is_err());
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains("Login failed during HA OAuth authorization:"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Complete the requested verification at https://www.mi.com/"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Sign in with:\n  'migate' --data-dir '/data' auth login"),
+        "{output}"
+    );
+    assert!(!output.contains("verify-secret"), "{output}");
+    assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+}
+
+#[test]
+fn terminal_qr_request_failure_includes_one_shared_login_and_verification_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut previous = previous_record();
+    previous.recovery.stop = None;
+    previous.ha.stopped = false;
+    store.xiaomi().fixture_replace(&previous).unwrap();
+    let peers = make_peers(&store, Failure::QrVerification);
+    let mut output = Vec::new();
+    let result = block_on(crate::terminal::auth::login(
+        &peers.auth,
+        Path::new("migate"),
+        Path::new("/data"),
+        &mut output,
+    ));
+    assert!(result.is_err());
+    let output = String::from_utf8(output).unwrap();
+    assert!(
+        output.contains("Login failed during QR request:"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Sign in with:\n  'migate' --data-dir '/data' auth login"),
+        "{output}"
+    );
+    assert_eq!(
+        output
+            .matches("Complete the requested verification")
+            .count(),
+        1,
+        "{output}"
+    );
+    assert!(!output.contains("Scan this QR code"), "{output}");
+    assert!(!output.contains("verify-secret"), "{output}");
+    assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
 }
 
 #[test]
