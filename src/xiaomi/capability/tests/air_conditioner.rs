@@ -260,7 +260,7 @@ fn ambiguous_cross_service_ownership_is_rejected() {
 fn stored_bindings_must_keep_their_service_ownership_and_nonoverlapping_paths() {
     use super::super::model::{
         AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-        AirConditionerTemperatureBinding,
+        ThermostatTemperatureBinding,
     };
     let valid = parse(&instance());
     let wrong_mode = AirConditionerModeBinding::new(
@@ -279,7 +279,7 @@ fn stored_bindings_must_keep_their_service_ownership_and_nonoverlapping_paths() 
         )
         .is_err()
     );
-    let wrong_temperature = AirConditionerTemperatureBinding::new(
+    let wrong_temperature = ThermostatTemperatureBinding::new(
         PropertyBinding { siid: 9, piid: 4 },
         valid.temperature().format(),
         valid.temperature().grid(),
@@ -338,7 +338,7 @@ fn binding_constructors_reject_invalid_native_codes_and_formats() {
     use super::super::{
         NumericFormat,
         model::{
-            AirConditionerModeBinding, AirConditionerSpeedBinding, AirConditionerTemperatureBinding,
+            AirConditionerModeBinding, AirConditionerSpeedBinding, ThermostatTemperatureBinding,
         },
     };
     use crate::device::air_conditioner::TemperatureGrid;
@@ -351,11 +351,9 @@ fn binding_constructors_reject_invalid_native_codes_and_formats() {
     assert!(AirConditionerSpeedBinding::new(speed, NumericFormat::Int8, [0, 1, 2, 128]).is_err());
     let temperature = PropertyBinding { siid: 3, piid: 4 };
     let grid = TemperatureGrid::new(-1, 30, 1).unwrap();
-    assert!(
-        AirConditionerTemperatureBinding::new(temperature, NumericFormat::Uint8, grid).is_err()
-    );
+    assert!(ThermostatTemperatureBinding::new(temperature, NumericFormat::Uint8, grid).is_err());
     let integer =
-        AirConditionerTemperatureBinding::new(temperature, NumericFormat::Int8, grid).unwrap();
+        ThermostatTemperatureBinding::new(temperature, NumericFormat::Int8, grid).unwrap();
     assert_eq!(integer.encode(26), json!(26));
     assert_eq!(integer.read_value(&json!(-1)).unwrap(), -1);
 }
@@ -417,6 +415,28 @@ fn mcn04_requires_its_real_private_feedback_and_records_patch() {
                     .functions()
                     .iter()
                     .all(|function| function.air_conditioner().is_none())
+        );
+    }
+}
+
+#[test]
+fn mcn04_feedback_rejects_malformed_access_entries() {
+    for piid in [6, 7] {
+        let mut invalid = instance();
+        property(&mut invalid, 8, piid)["access"] = json!(["read", "notify", 17]);
+        let result = super::super::parse_device_for_model(
+            crate::device::DeviceKey::new("xiaomi", "mcn04"),
+            "lumi.acpartner.mcn04",
+            &invalid,
+        );
+        assert!(
+            result.is_err()
+                || result
+                    .unwrap()
+                    .functions()
+                    .iter()
+                    .all(|function| function.air_conditioner().is_none()),
+            "8.{piid}"
         );
     }
 }

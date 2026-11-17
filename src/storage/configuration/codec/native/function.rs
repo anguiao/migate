@@ -12,7 +12,6 @@ impl WireFunction {
             };
         }
         if let Some(ac) = function.air_conditioner() {
-            let grid = ac.temperature().grid();
             return Self::AirConditioner {
                 id: function.id().into(),
                 label: function.label().into(),
@@ -22,13 +21,7 @@ impl WireFunction {
                     format: ac.mode().format(),
                     codes: ac.mode().codes(),
                 },
-                temperature: WireAirConditionerTemperature {
-                    property: ac.temperature().property().into(),
-                    format: ac.temperature().format(),
-                    min: grid.min(),
-                    max: grid.max(),
-                    step: grid.step(),
-                },
+                temperature: WireThermostatTemperature::from_binding(ac.temperature()),
                 speed: WireAirConditionerEnum {
                     property: ac.speed().property().into(),
                     format: ac.speed().format(),
@@ -42,18 +35,11 @@ impl WireFunction {
             };
         }
         if let Some(heater) = function.heater() {
-            let grid = heater.temperature().grid();
             return Self::Heater {
                 id: function.id().into(),
                 label: function.label().into(),
                 power: heater.power().into(),
-                temperature: WireAirConditionerTemperature {
-                    property: heater.temperature().property().into(),
-                    format: heater.temperature().format(),
-                    min: grid.min(),
-                    max: grid.max(),
-                    step: grid.step(),
-                },
+                temperature: WireThermostatTemperature::from_binding(heater.temperature()),
                 diagnostic_mode: heater.diagnostic_mode().map(|mode| mode.property.into()),
                 power_refresh_trigger: heater
                     .power_refresh_trigger()
@@ -257,17 +243,12 @@ impl WireFunction {
                 swing,
                 mcn04,
             } => {
-                let grid = TemperatureGrid::new(temperature.min, temperature.max, temperature.step)
-                    .map_err(|_| "Stored air-conditioner binding is invalid")?;
                 let mode =
                     AirConditionerModeBinding::new(mode.property.into(), mode.format, mode.codes)
                         .map_err(|_| "Stored air-conditioner binding is invalid")?;
-                let temperature = AirConditionerTemperatureBinding::new(
-                    temperature.property.into(),
-                    temperature.format,
-                    grid,
-                )
-                .map_err(|_| "Stored air-conditioner binding is invalid")?;
+                let temperature = temperature
+                    .into_binding()
+                    .map_err(|_| "Stored air-conditioner binding is invalid")?;
                 let speed = AirConditionerSpeedBinding::new(
                     speed.property.into(),
                     speed.format,
@@ -300,14 +281,9 @@ impl WireFunction {
                 diagnostic_mode,
                 power_refresh_trigger,
             } => {
-                let grid = TemperatureGrid::new(temperature.min, temperature.max, temperature.step)
+                let temperature = temperature
+                    .into_binding()
                     .map_err(|_| "Stored heater binding is invalid")?;
-                let temperature = AirConditionerTemperatureBinding::new(
-                    temperature.property.into(),
-                    temperature.format,
-                    grid,
-                )
-                .map_err(|_| "Stored heater binding is invalid")?;
                 let mut bindings = HeaterBindings::new(power.into(), temperature)
                     .map_err(|_| "Stored heater binding is invalid")?;
                 // The original MIoT instance supplies the feedback enum tables.

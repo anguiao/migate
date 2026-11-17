@@ -1,17 +1,15 @@
 use super::{
-    CapabilityError, HeaterBindings, description::string, thermostat::target_temperature,
-    thermostat::unique_property,
+    CapabilityError, HeaterBindings,
+    description::{Service, binding},
+    thermostat::target_temperature,
 };
 
 /// Recognize the standard PTC heater's independent heating switch and setpoint.
 pub(super) fn parse_heater_service(
-    service: &super::description::Service<'_>,
+    service: &Service<'_>,
 ) -> Result<HeaterBindings, CapabilityError> {
-    let power = unique_property(service, "heating", 0xc7)?;
-    super::description::control_access(power)?;
-    if string(power.value, "format")? != "bool" {
-        return Err(CapabilityError::InvalidDescription("heater boolean format"));
-    }
+    let power = service.property("heating", 0xc7)?;
+    power.boolean_control()?;
     let temperature = target_temperature(service, false)?;
-    HeaterBindings::new(super::description::binding(service, power), temperature)
+    HeaterBindings::new(binding(service, power), temperature)
 }

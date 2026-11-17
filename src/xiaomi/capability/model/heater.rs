@@ -40,7 +40,8 @@ impl HeaterBindings {
         power: PropertyBinding,
         temperature: ThermostatTemperatureBinding,
     ) -> Result<Self, CapabilityError> {
-        if !valid_property(power)
+        if temperature.format() == NumericFormat::Float
+            || !valid_property(power)
             || power.siid != temperature.property().siid
             || power == temperature.property()
         {

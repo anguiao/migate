@@ -1,17 +1,17 @@
 use super::{
-    CapabilityError, NumericFormat,
-    description::{Property, Service, array, binding, control_access, integer_format, string},
+    CapabilityError,
+    description::{Service, array, binding, string},
     model::ThermostatTemperatureBinding,
 };
 use crate::device::TemperatureGrid;
 
-/// Parse the standard integer target-temperature property of a thermostat.
+/// Parse a thermostat target whose range is expressed in whole Celsius degrees.
 pub(super) fn target_temperature(
     service: &Service<'_>,
     allow_float: bool,
 ) -> Result<ThermostatTemperatureBinding, CapabilityError> {
-    let property = unique_property(service, "target-temperature", 0x21)?;
-    control_access(property)?;
+    let property = service.property("target-temperature", 0x21)?;
+    property.control_access()?;
     if string(property.value, "unit")? != "celsius" {
         return Err(CapabilityError::InvalidDescription(
             "thermostat temperature unit",
@@ -29,31 +29,12 @@ pub(super) fn target_temperature(
     };
     let grid = TemperatureGrid::new(integer(min)?, integer(max)?, integer(step)?)
         .map_err(|_| CapabilityError::InvalidDescription("thermostat temperature range"))?;
-    let format = if allow_float && string(property.value, "format")? == "float" {
-        NumericFormat::Float
+    let format = if allow_float {
+        property.numeric_format()?
     } else {
-        integer_format(property)?
+        property.integer_format()?
     };
     ThermostatTemperatureBinding::new(binding(service, property), format, grid)
-}
-
-pub(super) fn unique_property<'a>(
-    service: &'a Service<'a>,
-    name: &'static str,
-    type_id: u32,
-) -> Result<&'a Property<'a>, CapabilityError> {
-    let matches = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", name, type_id))
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [property] => Ok(*property),
-        [] => Err(CapabilityError::MissingFunction(name)),
-        _ => Err(CapabilityError::InvalidDescription(
-            "ambiguous thermostat property",
-        )),
-    }
 }
 
 fn integer(value: &serde_json::Value) -> Result<i16, CapabilityError> {

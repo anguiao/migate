@@ -1,7 +1,7 @@
 use super::{
-    BatteryBinding, CapabilityError, MeasurementBinding, MeasurementUnit, NumericFormat,
-    ParsedFunction, PropertyBinding,
-    description::{Description, array, string},
+    BatteryBinding, CapabilityError, MeasurementBinding, MeasurementUnit, ParsedFunction,
+    PropertyBinding,
+    description::{Description, Property, array, string},
 };
 use crate::device::MeasurementRange;
 
@@ -57,7 +57,7 @@ pub(super) fn measurements(
                     .map(move |property| (service.iid, property))
             });
         for (siid, property) in candidates {
-            let binding = match measurement_binding(siid, property.iid, property.value, unit) {
+            let binding = match measurement_binding(siid, property, unit) {
                 Ok(binding) => binding,
                 Err(error) => {
                     diagnostics.push(super::RecognitionDiagnostic {
@@ -83,33 +83,12 @@ pub(super) fn measurements(
 
 fn measurement_binding(
     siid: u32,
-    piid: u32,
-    value: &serde_json::Value,
+    property: &Property<'_>,
     unit: MeasurementUnit,
 ) -> Result<MeasurementBinding, CapabilityError> {
-    let access = array(value, "access")?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or(CapabilityError::InvalidDescription("access"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for permission in ["read", "notify"] {
-        if !access.contains(&permission) {
-            return Err(CapabilityError::MissingAccess(permission));
-        }
-    }
-    let format = match string(value, "format")? {
-        "float" => NumericFormat::Float,
-        "uint8" => NumericFormat::Uint8,
-        "uint16" => NumericFormat::Uint16,
-        "uint32" => NumericFormat::Uint32,
-        "int8" => NumericFormat::Int8,
-        "int16" => NumericFormat::Int16,
-        "int32" => NumericFormat::Int32,
-        _ => return Err(CapabilityError::InvalidMeasurement("format")),
-    };
+    property.access(&["read", "notify"])?;
+    let format = property.numeric_format()?;
+    let value = property.value;
     let expected_unit = match unit {
         MeasurementUnit::Celsius => "celsius",
         MeasurementUnit::Percentage => "percentage",
@@ -130,7 +109,15 @@ fn measurement_binding(
         .ok_or(CapabilityError::InvalidMeasurement("range"))?;
     let range = MeasurementRange::new(min, max)
         .map_err(|_| CapabilityError::InvalidMeasurement("range"))?;
-    MeasurementBinding::new(PropertyBinding { siid, piid }, format, unit, range)
+    MeasurementBinding::new(
+        PropertyBinding {
+            siid,
+            piid: property.iid,
+        },
+        format,
+        unit,
+        range,
+    )
 }
 
 pub(super) fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Option<String>) {
@@ -144,27 +131,13 @@ pub(super) fn battery(instance: &Description<'_>) -> (Option<BatteryBinding>, Op
         [service] => *service,
         _ => return (None, Some("multiple battery services".into())),
     };
-    let properties = service
-        .properties
-        .iter()
-        .filter(|property| {
-            property
-                .urn
-                .standard("property", "battery-level", BATTERY_LEVEL)
-        })
-        .collect::<Vec<_>>();
-    let property = match properties.as_slice() {
-        [] => return (None, Some("battery-level property is missing".into())),
-        [property] => *property,
-        _ => return (None, Some("multiple battery-level properties".into())),
+    let property = match service.optional_property("battery-level", BATTERY_LEVEL) {
+        Ok(Some(property)) => property,
+        Ok(None) => return (None, Some("battery-level property is missing".into())),
+        Err(_) => return (None, Some("multiple battery-level properties".into())),
     };
-    match measurement_binding(
-        service.iid,
-        property.iid,
-        property.value,
-        MeasurementUnit::Percentage,
-    )
-    .and_then(BatteryBinding::new)
+    match measurement_binding(service.iid, property, MeasurementUnit::Percentage)
+        .and_then(BatteryBinding::new)
     {
         Ok(binding) => (Some(binding), None),
         Err(error) => (None, Some(format!("invalid battery capability: {error}"))),

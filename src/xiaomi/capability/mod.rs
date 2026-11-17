@@ -19,8 +19,8 @@ pub(crate) use group::parse_group;
 pub(crate) use model::FanSpeedEncoding;
 pub(crate) use model::{
     ActionBinding, AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-    AirConditionerTemperatureBinding, HeaterBindings, HeaterFeedbackBinding, SharedFanChannel,
-    SharedFanSpeedBinding,
+    HeaterBindings, HeaterFeedbackBinding, SharedFanChannel, SharedFanSpeedBinding,
+    ThermostatTemperatureBinding,
 };
 pub use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,
@@ -29,6 +29,7 @@ pub use model::{
     MeasurementUnit, ModeBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
     RecognitionDiagnostic, RecognitionMetadata, TemperatureBinding,
 };
+pub use native::LanProtocol;
 pub(crate) use native::{NativeDescription, ReadInput, RelatedScope, SHARED_FEEDBACK_CHANNEL};
 pub(crate) use repair::{RepairPlan, compose_group_light};
 pub(crate) use source::{RawDescription, SourceDescription};

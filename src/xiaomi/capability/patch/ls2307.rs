@@ -3,7 +3,7 @@ use super::super::{
     NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding, RecognitionDiagnostic,
     TemperatureBinding,
     description::{Description, Service, Urn, array},
-    light::{access, color_binding, format, standard_property},
+    light::color_binding,
 };
 use super::BuiltinPatch;
 
@@ -179,8 +179,8 @@ fn parse_ls2307(
     {
         return Err(incompatible());
     }
-    let color_property = standard_property(ambient, "color", 0x0e)?;
-    let mode_property = standard_property(ambient, "mode", 8)?;
+    let color_property = ambient.property("color", 0x0e)?;
+    let mode_property = ambient.property("mode", 8)?;
     if color_property.iid != COLOR_PROPERTY.piid
         || mode_property.iid != MODE_PROPERTY.piid
         || !matches_vendor(&color_property.urn)
@@ -192,8 +192,8 @@ fn parse_ls2307(
     if !is_color(&color) {
         return Err(incompatible());
     }
-    access(mode_property)?;
-    if format(mode_property)? != MODE_FORMAT {
+    mode_property.control_access()?;
+    if mode_property.integer_format()? != MODE_FORMAT {
         return Err(incompatible());
     }
     let values = array(mode_property.value, "value-list")?;

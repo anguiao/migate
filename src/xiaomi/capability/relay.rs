@@ -1,6 +1,6 @@
 use super::{
     CapabilityError, ParsedFunction, RecognitionDiagnostic,
-    description::{Description, Property, Service, array, binding, integer_format},
+    description::{Description, Service, array, binding},
 };
 
 pub(super) fn candidates(
@@ -37,18 +37,11 @@ pub(super) fn is_relay_service(service: &Service<'_>) -> bool {
 fn parse(
     service: &Service<'_>,
 ) -> Result<(super::PropertyBinding, super::PropertyBinding, bool), CapabilityError> {
-    let power = required(service, "on", 6)?;
+    let power = service.property("on", 6)?;
     let power = super::outlet::power_binding(service.iid, power)?;
-    let mode = required(service, "mode", 8)?;
-    integer_format(mode)?;
-    let access = array(mode.value, "access")?;
-    if access.iter().any(|entry| entry.as_str().is_none()) {
-        return Err(CapabilityError::InvalidDescription("mode access"));
-    }
-    if !access.iter().any(|entry| entry.as_str() == Some("read")) {
-        return Err(CapabilityError::MissingAccess("read"));
-    }
-    let notify = access.iter().any(|entry| entry.as_str() == Some("notify"));
+    let mode = service.property("mode", 8)?;
+    mode.integer_format()?;
+    let notify = mode.access(&["read"])?.contains("notify");
     let values = array(mode.value, "value-list")?;
     let mut wired = false;
     let mut wireless = false;
@@ -72,24 +65,4 @@ fn parse(
         return Err(CapabilityError::InvalidDescription("relay mode semantics"));
     }
     Ok((power, binding(service, mode), notify))
-}
-
-fn required<'a>(
-    service: &'a Service<'_>,
-    name: &'static str,
-    id: u32,
-) -> Result<&'a Property<'a>, CapabilityError> {
-    let mut properties = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", name, id));
-    let property = properties
-        .next()
-        .ok_or(CapabilityError::MissingFunction(name))?;
-    if properties.next().is_some() {
-        return Err(CapabilityError::InvalidDescription(
-            "ambiguous relay property",
-        ));
-    }
-    Ok(property)
 }

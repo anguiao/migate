@@ -217,3 +217,17 @@ fn another_standard_ptc_service_uses_the_same_contract() {
         .collect::<Vec<_>>();
     assert!(ids.contains(&HEATER));
 }
+
+#[test]
+fn heating_thermostat_uses_integer_temperature_encoding() {
+    let parsed = parse(&v13()).unwrap();
+    let heater = parsed
+        .functions()
+        .iter()
+        .find_map(|function| function.heater())
+        .unwrap();
+    let target = heater.temperature();
+    assert_eq!(target.encode(26), json!(26));
+    assert!(target.encode(26).is_i64());
+    assert_eq!(target.read_value(&json!(26)), Ok(26));
+}

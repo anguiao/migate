@@ -1,6 +1,6 @@
 use super::{
     CapabilityError, ParsedFunction, PropertyBinding,
-    description::{Description, Property, array, string},
+    description::{Description, Property},
 };
 
 pub(super) fn candidates(
@@ -19,15 +19,10 @@ pub(super) fn candidates(
             && (!mentioned || ![2, 3, 4, 9].contains(&s.iid))
     }) {
         let target = format!("outlet:{}", service.iid);
-        let properties = service
-            .properties
-            .iter()
-            .filter(|p| p.urn.standard("property", "on", 6))
-            .collect::<Vec<_>>();
-        let result = match properties.as_slice() {
-            [property] => power_binding(service.iid, property),
-            [] => Err(CapabilityError::MissingMainPower),
-            _ => Err(CapabilityError::AmbiguousMainPower),
+        let result = match service.optional_property("on", 6) {
+            Ok(Some(property)) => power_binding(service.iid, property),
+            Ok(None) => Err(CapabilityError::MissingMainPower),
+            Err(_) => Err(CapabilityError::AmbiguousMainPower),
         };
         match result {
             Ok(power) => functions.push(ParsedFunction::outlet(target, "主电源", power)),
@@ -52,22 +47,12 @@ pub(super) fn power_binding(
     siid: u32,
     property: &Property<'_>,
 ) -> Result<PropertyBinding, CapabilityError> {
-    if string(property.value, "format")? != "bool" {
-        return Err(CapabilityError::InvalidMainPowerType);
-    }
-    let access = array(property.value, "access")?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or(CapabilityError::InvalidDescription("access"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    for permission in ["read", "write", "notify"] {
-        if !access.contains(&permission) {
-            return Err(CapabilityError::MissingAccess(permission));
+    property.boolean_control().map_err(|error| match error {
+        CapabilityError::InvalidDescription("boolean property format") => {
+            CapabilityError::InvalidMainPowerType
         }
-    }
+        other => other,
+    })?;
     Ok(PropertyBinding {
         siid,
         piid: property.iid,

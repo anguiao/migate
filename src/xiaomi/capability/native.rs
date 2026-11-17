@@ -3,9 +3,17 @@
 use super::{
     AppliedPatch, CapabilityError, ParsedDevice, SharedFanChannel, description::Urn, patch,
 };
-use crate::device::PhysicalDeviceDescription;
+use crate::device::{FunctionKind, PhysicalDeviceDescription};
 use crate::xiaomi::capability::PropertyBinding;
 use crate::xiaomi::legacy_miio::Mapping;
+
+/// The direct protocol selected from validated native control semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LanProtocol {
+    Miot,
+    MiotLegacyShared,
+    LegacyMcn02,
+}
 
 /// A derived transport adaptation; its diagnostic patch is not persisted.
 #[derive(Clone, Debug)]
@@ -263,6 +271,55 @@ impl NativeDescription {
             device,
             legacy_profile,
             plan,
+        })
+    }
+
+    /// Display metadata can change while the installed native bindings remain valid.
+    pub(crate) fn same_control_as(&self, other: &Self) -> bool {
+        self.direct_protocol() == other.direct_protocol()
+            && self.legacy_profile == other.legacy_profile
+            && self.plan == other.plan
+            && self.device.refresh_trigger() == other.device.refresh_trigger()
+            && self.device.battery() == other.device.battery()
+            && self.device.functions().len() == other.device.functions().len()
+            && self
+                .device
+                .functions()
+                .iter()
+                .zip(other.device.functions())
+                .all(|(left, right)| left.same_control_as(right))
+    }
+
+    pub(crate) fn direct_protocol(&self) -> Option<LanProtocol> {
+        if self.model == "dmaker.fan.p5c" {
+            Some(LanProtocol::Miot)
+        } else if self.legacy_profile.is_some() {
+            Some(LanProtocol::LegacyMcn02)
+        } else if self.plan.shared_feedback().is_some() && self.direct_probe_binding().is_some() {
+            Some(LanProtocol::MiotLegacyShared)
+        } else {
+            None
+        }
+    }
+
+    /// A real boolean property used for read-only direct identity confirmation.
+    /// Enum switches and the shared legacy feedback group cannot serve as probes.
+    pub(in crate::xiaomi) fn direct_probe_binding(&self) -> Option<PropertyBinding> {
+        if let Some(profile) = &self.legacy_profile {
+            return self
+                .device
+                .functions()
+                .iter()
+                .find(|function| function.id() == profile.target())
+                .and_then(|function| function.air_conditioner().map(|ac| ac.power()));
+        }
+        self.device.functions().iter().find_map(|function| {
+            (function.fan().is_some()
+                || function.heater().is_some()
+                || function.lighting().is_some()
+                || matches!(function.kind(), FunctionKind::Outlet))
+            .then(|| function.power())
+            .flatten()
         })
     }
 

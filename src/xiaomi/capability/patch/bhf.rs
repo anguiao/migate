@@ -3,9 +3,7 @@ use super::{
         ActionBinding, AppliedPatch, CapabilityError, HeaterFeedbackBinding, ParsedDevice,
         ParsedFunction, PropertyBinding, RecognitionDiagnostic, SharedFanChannel,
         SharedFanSpeedBinding,
-        description::{
-            Description, Service, Urn, array, binding, control_access, integer_format, string,
-        },
+        description::{Description, Service, Urn, array, binding},
     },
     BuiltinPatch,
 };
@@ -125,21 +123,14 @@ fn parse_fan(
     diagnostics: &mut Vec<RecognitionDiagnostic>,
 ) -> Result<FanBindings, CapabilityError> {
     let service = ptc_service(instance)?;
-    let properties = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", name, type_id))
-        .collect::<Vec<_>>();
-    let [property] = properties.as_slice() else {
-        return Err(CapabilityError::MissingFunction(match channel {
-            SharedFanChannel::Blow => "blow",
-            SharedFanChannel::Ventilation => "ventilation",
-        }));
-    };
-    control_access(property)?;
-    if string(property.value, "format")? != "bool" {
-        return Err(CapabilityError::InvalidDescription("fan boolean format"));
-    }
+    let property =
+        service
+            .optional_property(name, type_id)?
+            .ok_or(CapabilityError::MissingFunction(match channel {
+                SharedFanChannel::Blow => "blow",
+                SharedFanChannel::Ventilation => "ventilation",
+            }))?;
+    property.boolean_control()?;
     let target = match channel {
         SharedFanChannel::Blow => BLOW,
         SharedFanChannel::Ventilation => VENTILATION,
@@ -162,7 +153,7 @@ pub(in crate::xiaomi::capability) fn feedback_property(
     instance: &Description<'_>,
     expected: PropertyBinding,
 ) -> Result<HeaterFeedbackBinding, CapabilityError> {
-    let (name, type_id, permissions): (_, _, &[&str]) = match expected {
+    let (name, type_id, permissions): (_, _, &[&'static str]) = match expected {
         MODE => ("mode", 0x08, &["read", "notify"]),
         HEAT_LEVEL => ("heat-level", 0x47, &["notify"]),
         _ => {
@@ -172,21 +163,9 @@ pub(in crate::xiaomi::capability) fn feedback_property(
         }
     };
     let service = ptc_service(instance)?;
-    let properties = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", name, type_id))
-        .collect::<Vec<_>>();
-    let [property] = properties.as_slice() else {
-        return Err(CapabilityError::MissingFunction(name));
-    };
-    let access = array(property.value, "access")?;
-    for &permission in permissions {
-        if !access.iter().any(|item| item.as_str() == Some(permission)) {
-            return Err(CapabilityError::MissingAccess(permission));
-        }
-    }
-    let format = integer_format(property)?;
+    let property = service.property(name, type_id)?;
+    property.access(permissions)?;
+    let format = property.integer_format()?;
     let binding = binding(service, property);
     if binding != expected {
         return Err(CapabilityError::InvalidDescription(

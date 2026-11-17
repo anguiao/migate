@@ -5,7 +5,6 @@ pub enum CapabilityError {
     InvalidDescription(&'static str),
     UnsupportedDevice,
     NoCapabilities(Vec<String>),
-    UnsupportedLightGroup,
     MissingMainPower,
     InvalidMainPowerType,
     MissingAccess(&'static str),
@@ -31,9 +30,6 @@ impl fmt::Display for CapabilityError {
                 "no supported MIoT functions: {}",
                 issues.join("; ")
             ),
-            Self::UnsupportedLightGroup => {
-                formatter.write_str("Xiaomi light groups are not supported")
-            }
             Self::MissingMainPower => formatter.write_str("standard outlet main power is missing"),
             Self::InvalidMainPowerType => formatter.write_str("outlet switch must be boolean"),
             Self::MissingAccess(access) => {

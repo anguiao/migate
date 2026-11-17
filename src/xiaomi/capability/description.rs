@@ -239,30 +239,95 @@ pub(super) fn binding(service: &Service<'_>, property: &Property<'_>) -> Propert
     }
 }
 
-pub(super) fn control_access(property: &Property<'_>) -> Result<(), CapabilityError> {
-    let access = array(property.value, "access")?;
-    if access.iter().any(|item| item.as_str().is_none()) {
-        return Err(CapabilityError::InvalidDescription("access"));
+impl<'a> Service<'a> {
+    pub fn property(
+        &self,
+        name: &'static str,
+        type_id: u32,
+    ) -> Result<&Property<'a>, CapabilityError> {
+        self.optional_property(name, type_id)?
+            .ok_or(CapabilityError::MissingFunction(name))
     }
-    for permission in ["read", "write", "notify"] {
-        if !access.iter().any(|item| item.as_str() == Some(permission)) {
-            return Err(CapabilityError::MissingAccess(permission));
+
+    pub fn optional_property(
+        &self,
+        name: &str,
+        type_id: u32,
+    ) -> Result<Option<&Property<'a>>, CapabilityError> {
+        self.matching_property(|property| property.urn.standard("property", name, type_id))
+    }
+
+    pub fn matching_property(
+        &self,
+        matches: impl Fn(&Property<'_>) -> bool,
+    ) -> Result<Option<&Property<'a>>, CapabilityError> {
+        let mut properties = self.properties.iter().filter(|property| matches(property));
+        let first = properties.next();
+        if properties.next().is_some() {
+            return Err(CapabilityError::InvalidDescription("ambiguous property"));
         }
+        Ok(first)
     }
-    Ok(())
 }
 
-pub(super) fn integer_format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
-    match string(property.value, "format")? {
-        "uint8" => Ok(NumericFormat::Uint8),
-        "uint16" => Ok(NumericFormat::Uint16),
-        "uint32" => Ok(NumericFormat::Uint32),
-        "int8" => Ok(NumericFormat::Int8),
-        "int16" => Ok(NumericFormat::Int16),
-        "int32" => Ok(NumericFormat::Int32),
-        _ => Err(CapabilityError::InvalidDescription(
-            "integer property format",
-        )),
+pub(super) struct Access<'a>(&'a [Value]);
+
+impl Access<'_> {
+    pub fn contains(&self, permission: &str) -> bool {
+        self.0.iter().any(|item| item.as_str() == Some(permission))
+    }
+}
+
+impl<'a> Property<'a> {
+    pub fn access(&self, required: &[&'static str]) -> Result<Access<'a>, CapabilityError> {
+        let values = array(self.value, "access")?;
+        if values.iter().any(|item| item.as_str().is_none()) {
+            return Err(CapabilityError::InvalidDescription("access"));
+        }
+        let access = Access(values);
+        for &permission in required {
+            if !access.contains(permission) {
+                return Err(CapabilityError::MissingAccess(permission));
+            }
+        }
+        Ok(access)
+    }
+
+    pub fn control_access(&self) -> Result<(), CapabilityError> {
+        self.access(&["read", "write", "notify"])?;
+        Ok(())
+    }
+
+    pub fn boolean_control(&self) -> Result<(), CapabilityError> {
+        self.control_access()?;
+        if string(self.value, "format")? != "bool" {
+            return Err(CapabilityError::InvalidDescription(
+                "boolean property format",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn integer_format(&self) -> Result<NumericFormat, CapabilityError> {
+        match string(self.value, "format")? {
+            "uint8" => Ok(NumericFormat::Uint8),
+            "uint16" => Ok(NumericFormat::Uint16),
+            "uint32" => Ok(NumericFormat::Uint32),
+            "int8" => Ok(NumericFormat::Int8),
+            "int16" => Ok(NumericFormat::Int16),
+            "int32" => Ok(NumericFormat::Int32),
+            _ => Err(CapabilityError::InvalidDescription(
+                "integer property format",
+            )),
+        }
+    }
+
+    pub fn numeric_format(&self) -> Result<NumericFormat, CapabilityError> {
+        if string(self.value, "format")? == "float" {
+            Ok(NumericFormat::Float)
+        } else {
+            self.integer_format()
+        }
     }
 }
 

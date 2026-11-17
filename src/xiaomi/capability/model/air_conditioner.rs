@@ -1,6 +1,5 @@
-pub(crate) use super::thermostat::AirConditionerTemperatureBinding;
 use super::thermostat::valid_property;
-use super::{CapabilityError, NumericFormat, PropertyBinding};
+use super::{CapabilityError, NumericFormat, PropertyBinding, ThermostatTemperatureBinding};
 use crate::device::air_conditioner::{AirConditionerFanSpeed, AirConditionerMode};
 use serde_json::Value;
 
@@ -129,7 +128,7 @@ pub(crate) struct Mcn04Bindings {
 pub(crate) struct AirConditionerBindings {
     power: PropertyBinding,
     mode: AirConditionerModeBinding,
-    temperature: AirConditionerTemperatureBinding,
+    temperature: ThermostatTemperatureBinding,
     speed: AirConditionerSpeedBinding,
     swing: Option<PropertyBinding>,
     mcn04: Option<Mcn04Bindings>,
@@ -138,7 +137,7 @@ impl AirConditionerBindings {
     pub(crate) fn new(
         power: PropertyBinding,
         mode: AirConditionerModeBinding,
-        temperature: AirConditionerTemperatureBinding,
+        temperature: ThermostatTemperatureBinding,
         speed: AirConditionerSpeedBinding,
         swing: Option<PropertyBinding>,
     ) -> Result<Self, CapabilityError> {
@@ -213,7 +212,7 @@ impl AirConditionerBindings {
     pub(crate) fn mode(&self) -> &AirConditionerModeBinding {
         &self.mode
     }
-    pub(crate) fn temperature(&self) -> &AirConditionerTemperatureBinding {
+    pub(crate) fn temperature(&self) -> &ThermostatTemperatureBinding {
         &self.temperature
     }
     pub(crate) fn speed(&self) -> &AirConditionerSpeedBinding {

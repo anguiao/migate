@@ -42,32 +42,17 @@ pub(in crate::xiaomi::capability) fn parse(
         ));
     };
     let property = |name, type_id| -> Result<&Property<'_>, CapabilityError> {
-        let properties = service
-            .properties
-            .iter()
-            .filter(|property| {
+        let property = service
+            .matching_property(|property| {
                 property.urn.matches("lumi-spec", "property", name, type_id)
                     && property.urn.vendor == "lumi-mcn04"
-            })
-            .collect::<Vec<_>>();
-        let [property] = properties.as_slice() else {
-            return Err(CapabilityError::InvalidDescription(
+            })?
+            .ok_or(CapabilityError::InvalidDescription(
                 "mcn04 feedback property",
-            ));
-        };
-        let access = property
-            .value
-            .get("access")
-            .and_then(serde_json::Value::as_array)
-            .ok_or(CapabilityError::InvalidDescription("mcn04 feedback access"))?;
-        if string(property.value, "format")? != "string"
-            || !["read", "notify"]
-                .iter()
-                .all(|required| access.iter().any(|item| item.as_str() == Some(required)))
-        {
-            return Err(CapabilityError::InvalidDescription(
-                "mcn04 feedback access or format",
-            ));
+            ))?;
+        property.access(&["read", "notify"])?;
+        if string(property.value, "format")? != "string" {
+            return Err(CapabilityError::InvalidDescription("mcn04 feedback format"));
         }
         Ok(property)
     };

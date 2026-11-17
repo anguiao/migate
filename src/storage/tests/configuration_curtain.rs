@@ -194,9 +194,7 @@ fn curtain_step_changes_replace_native_bindings_without_changing_publication_sha
     let mut instance: serde_json::Value = serde_json::from_str(text).unwrap();
     instance["services"][1]["properties"][3]["value-range"] = serde_json::json!([0, 100, 5]);
     let updated = native("curtain", "xiaomi.curtain.acn010", instance);
-    assert!(!crate::configuration::same_control_description(
-        &original, &updated
-    ));
+    assert!(!original.same_control_as(&updated));
     let plan = next(&current, scope("account", "home"), vec![updated]);
     assert!(plan.rebuild);
     assert_eq!(plan.configuration.root_version, current.root_version);

@@ -4,7 +4,7 @@
 use super::{
     CommittedConfiguration, CommittedDevice, CommittedFunction, DerivedConfiguration,
     OperationKind, Plan, PlanError, PlanInput, PlanOperation, RelayChannel, RelayType,
-    default_device_label, import_label, same_control_description,
+    default_device_label, import_label,
 };
 use crate::device::{DeviceKey, FunctionDescription, FunctionKey, FunctionKind};
 use crate::xiaomi::capability::RawDescription;
@@ -360,9 +360,7 @@ fn operations(
             None => OperationKind::Added,
             Some(previous) => match &previous.native {
                 None => OperationKind::Added,
-                Some(before) if !same_control_description(before, after) => {
-                    OperationKind::ReplacedNative
-                }
+                Some(before) if !before.same_control_as(after) => OperationKind::ReplacedNative,
                 Some(_) if scope_changed || clear_revocations.contains(&device.key) => {
                     OperationKind::ReplacedAuthority
                 }

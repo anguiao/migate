@@ -1,8 +1,6 @@
 use super::{
-    CapabilityError, NumericFormat, RecognitionDiagnostic,
-    description::{
-        Description, Property, Service, array, binding, control_access, integer_format, string,
-    },
+    CapabilityError, RecognitionDiagnostic,
+    description::{Description, Property, Service, array, binding},
     model::{AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding},
     thermostat::target_temperature,
 };
@@ -14,31 +12,28 @@ pub(super) fn parse_air_conditioner(
 ) -> Result<AirConditionerBindings, CapabilityError> {
     let service = unique_service(instance, "air-conditioner", 0x780f)?;
     let fan_service = unique_service(instance, "fan-control", 0x7809)?;
-    let power = required(service, "on", 0x06)?;
-    boolean(power)?;
-    let mode = required(service, "mode", 0x08)?;
-    control_access(mode)?;
+    let power = service.property("on", 0x06)?;
+    power.boolean_control()?;
+    let mode = service.property("mode", 0x08)?;
+    mode.control_access()?;
     let mode = AirConditionerModeBinding::new(
         binding(service, mode),
-        numeric_format(mode)?,
+        mode.numeric_format()?,
         codes(mode, &["cool", "heat", "auto", "fan", "dry"])?,
     )?;
     let temperature = target_temperature(service, true)?;
-    let speed = required(fan_service, "fan-level", 0x16)?;
-    control_access(speed)?;
+    let speed = fan_service.property("fan-level", 0x16)?;
+    speed.control_access()?;
     let speed = AirConditionerSpeedBinding::new(
         binding(fan_service, speed),
-        numeric_format(speed)?,
+        speed.numeric_format()?,
         codes(speed, &["auto", "low", "medium", "high"])?,
     )?;
-    let swing_candidates = fan_service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", "vertical-swing", 0x18))
-        .collect::<Vec<_>>();
-    let swing = match swing_candidates.as_slice() {
-        [] => None,
-        [property] if boolean(property).is_ok() => Some(binding(fan_service, property)),
+    let swing = match fan_service.optional_property("vertical-swing", 0x18) {
+        Ok(None) => None,
+        Ok(Some(property)) if property.boolean_control().is_ok() => {
+            Some(binding(fan_service, property))
+        }
         _ => {
             diagnostics.push(RecognitionDiagnostic {
                 target: format!("air-conditioner:{}", service.iid),
@@ -66,40 +61,6 @@ fn unique_service<'a>(
         _ => Err(CapabilityError::InvalidDescription(
             "ambiguous air-conditioner service ownership",
         )),
-    }
-}
-fn required<'a>(
-    service: &'a Service<'a>,
-    name: &'static str,
-    type_id: u32,
-) -> Result<&'a Property<'a>, CapabilityError> {
-    let matches = service
-        .properties
-        .iter()
-        .filter(|property| property.urn.standard("property", name, type_id))
-        .collect::<Vec<_>>();
-    match matches.as_slice() {
-        [property] => Ok(property),
-        [] => Err(CapabilityError::MissingFunction(name)),
-        _ => Err(CapabilityError::InvalidDescription(
-            "ambiguous air-conditioner property",
-        )),
-    }
-}
-fn boolean(property: &Property<'_>) -> Result<(), CapabilityError> {
-    control_access(property)?;
-    if string(property.value, "format")? != "bool" {
-        return Err(CapabilityError::InvalidDescription(
-            "air-conditioner boolean format",
-        ));
-    }
-    Ok(())
-}
-fn numeric_format(property: &Property<'_>) -> Result<NumericFormat, CapabilityError> {
-    if string(property.value, "format")? == "float" {
-        Ok(NumericFormat::Float)
-    } else {
-        integer_format(property)
     }
 }
 fn codes<const N: usize>(

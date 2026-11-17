@@ -1024,3 +1024,92 @@ fn changed_mcn02_direct_profile_replaces_source_without_changing_identity() {
     assert_eq!(after.functions, before.functions);
     assert_eq!(after.configuration_version, before.configuration_version);
 }
+
+#[test]
+fn heater_temperature_limit_change_replaces_native_with_the_same_function_id() {
+    let before: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/miot/yeelink-bhf-light-v13.json"
+    ))
+    .unwrap();
+    let mut after = before.clone();
+    let heater = after["services"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|service| service["iid"] == 3)
+        .unwrap();
+    heater["properties"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|property| property["iid"] == 8)
+        .unwrap()["value-range"] = json!([25, 46, 1]);
+    let before = SourceFixture::new("heater", "yeelink.bhf_light.v13", before);
+    let after = SourceFixture::new("heater", "yeelink.bhf_light.v13", after);
+    let heating = |native: &SourceFixture| {
+        native
+            .device()
+            .functions()
+            .iter()
+            .find(|function| function.id() == "heater:3")
+            .unwrap()
+            .heater()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        heating(&before).temperature().property(),
+        heating(&after).temperature().property()
+    );
+    assert_eq!(heating(&before).temperature().grid().max(), 45);
+    assert_eq!(heating(&after).temperature().grid().max(), 46);
+    let initial = plan(
+        CommittedConfiguration::empty(),
+        facts(
+            scope(),
+            vec![source("heater", before, Some("Bathroom"))],
+            Vec::new(),
+        ),
+        BTreeMap::from([(key("heater"), unique("heater"))]),
+    )
+    .unwrap()
+    .configuration;
+    let updated = plan(
+        initial.clone(),
+        facts(scope(), vec![source("heater", after, None)], Vec::new()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(updated.operations[0].kind, OperationKind::ReplacedNative);
+    assert!(updated.rebuild);
+    let old = initial.device(&key("heater")).unwrap();
+    let new = updated.configuration.device(&key("heater")).unwrap();
+    assert_eq!(new.unique_id, old.unique_id);
+    assert_eq!(new.endpoint, old.endpoint);
+    assert_eq!(new.label, old.label);
+    assert_eq!(new.functions, old.functions);
+}
+
+#[test]
+fn direct_protocol_change_replaces_native_with_the_same_bindings() {
+    let instance: serde_json::Value =
+        serde_json::from_str(include_str!("../../../tests/fixtures/miot/dmaker-p5c.json")).unwrap();
+    let before = SourceFixture::new("fan", "dmaker.fan.p5c", instance.clone());
+    let after = SourceFixture::new("fan", "dmaker.fan.other", instance);
+    assert_eq!(before.device().functions(), after.device().functions());
+    let initial = plan(
+        CommittedConfiguration::empty(),
+        facts(scope(), vec![source("fan", before, None)], Vec::new()),
+        BTreeMap::from([(key("fan"), unique("fan"))]),
+    )
+    .unwrap()
+    .configuration;
+    let updated = plan(
+        initial,
+        facts(scope(), vec![source("fan", after, None)], Vec::new()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    assert_eq!(updated.operations[0].kind, OperationKind::ReplacedNative);
+    assert!(updated.rebuild);
+}

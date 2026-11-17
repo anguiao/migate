@@ -76,5 +76,3 @@ impl ThermostatTemperatureBinding {
         Ok(value)
     }
 }
-
-pub(crate) type AirConditionerTemperatureBinding = ThermostatTemperatureBinding;

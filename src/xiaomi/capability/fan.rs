@@ -1,9 +1,7 @@
 use super::patch::dmaker;
 use super::{
     CapabilityError, FanBindings, FanSpeedBinding, FanSpeedEncoding, RecognitionDiagnostic,
-    description::{
-        Description, Property, Service, array, binding, control_access, integer_format, string,
-    },
+    description::{Description, Property, Service, array, binding, string},
 };
 
 pub(super) fn parse_fan_service(
@@ -39,29 +37,24 @@ fn parse_bindings(
     matched: dmaker::Match,
     diagnostics: &mut Vec<RecognitionDiagnostic>,
 ) -> Result<FanBindings, CapabilityError> {
-    let power = required(service, |p| p.urn.standard("property", "on", 6), "on")?;
-    boolean(power)?;
-    let swings = service
-        .properties
-        .iter()
-        .filter(|p| p.urn.standard("property", "horizontal-swing", 0x17))
-        .collect::<Vec<_>>();
-    let swing = match swings.as_slice() {
-        [] => None,
-        [swing] => match boolean(swing) {
-            Ok(()) => Some(binding(service, swing)),
-            Err(error) => {
-                diagnostics.push(super::RecognitionDiagnostic {
-                    target: format!("fan:{}", service.iid),
-                    reason: format!("horizontal swing: {error}"),
-                });
-                None
-            }
-        },
-        _ => {
-            diagnostics.push(super::RecognitionDiagnostic {
+    let power = service.property("on", 6)?;
+    power.boolean_control()?;
+    let swing = match service
+        .optional_property("horizontal-swing", 0x17)
+        .and_then(|property| {
+            property
+                .map(|property| {
+                    property
+                        .boolean_control()
+                        .map(|()| binding(service, property))
+                })
+                .transpose()
+        }) {
+        Ok(swing) => swing,
+        Err(error) => {
+            diagnostics.push(RecognitionDiagnostic {
                 target: format!("fan:{}", service.iid),
-                reason: "horizontal swing property is ambiguous".into(),
+                reason: format!("horizontal swing: {error}"),
             });
             None
         }
@@ -132,8 +125,8 @@ fn parse_speed(
     service: &Service<'_>,
     property: &Property<'_>,
 ) -> Result<FanSpeedBinding, CapabilityError> {
-    control_access(property)?;
-    let format = integer_format(property)?;
+    property.control_access()?;
+    let format = property.integer_format()?;
     let encoding = match (
         property.value.get("value-range"),
         property.value.get("value-list"),
@@ -208,30 +201,4 @@ fn level_order(description: &str) -> Option<(u8, u32)> {
         .unwrap_or(&compact);
     let order = number.parse::<u32>().ok()?;
     (order > 0).then_some((1, order))
-}
-
-pub(super) fn required<'a>(
-    service: &'a Service<'a>,
-    matches: impl Fn(&Property<'_>) -> bool,
-    name: &'static str,
-) -> Result<&'a Property<'a>, CapabilityError> {
-    let properties = service
-        .properties
-        .iter()
-        .filter(|property| matches(property))
-        .collect::<Vec<_>>();
-    match properties.as_slice() {
-        [property] => Ok(property),
-        [] => Err(CapabilityError::MissingFunction(name)),
-        _ => Err(CapabilityError::InvalidDescription(
-            "ambiguous fan property",
-        )),
-    }
-}
-fn boolean(property: &Property<'_>) -> Result<(), CapabilityError> {
-    control_access(property)?;
-    if string(property.value, "format")? != "bool" {
-        return Err(CapabilityError::InvalidDescription("fan boolean format"));
-    }
-    Ok(())
 }

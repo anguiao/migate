@@ -270,32 +270,6 @@ impl CommittedConfiguration {
     }
 }
 
-/// True when two native descriptions use the same bindings and source semantics.
-/// Metadata-only changes reuse the served instance; a different derived direct
-/// profile changes transport semantics and requires a new source runtime.
-pub(crate) fn same_control_description(a: &NativeDescription, b: &NativeDescription) -> bool {
-    a.legacy_profile() == b.legacy_profile()
-        && a.device().refresh_trigger() == b.device().refresh_trigger()
-        && a.device().battery() == b.device().battery()
-        && a.device().functions().len() == b.device().functions().len()
-        && a.device()
-            .functions()
-            .iter()
-            .zip(b.device().functions())
-            .all(|(left, right)| {
-                left.id() == right.id()
-                    && left.power() == right.power()
-                    && left.relay_mode() == right.relay_mode()
-                    && left.lighting() == right.lighting()
-                    && left.curtain() == right.curtain()
-                    && left.fan() == right.fan()
-                    && left.air_conditioner() == right.air_conditioner()
-                    && left.measurement() == right.measurement()
-                    && left.state() == right.state()
-                    && left.motion() == right.motion()
-            })
-}
-
 /// Import a name without splitting a UTF-8 character. Protocol writes use validation instead.
 pub(crate) fn import_label(label: &str) -> String {
     let mut end = label.len().min(32);

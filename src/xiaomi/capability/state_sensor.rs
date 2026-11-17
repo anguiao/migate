@@ -155,32 +155,6 @@ fn integer_fits(format: NumericFormat, raw: i64) -> bool {
         NumericFormat::Float => false,
     }
 }
-fn integer_format(value: &Value) -> Result<NumericFormat, CapabilityError> {
-    match string(value, "format")? {
-        "uint8" => Ok(NumericFormat::Uint8),
-        "uint16" => Ok(NumericFormat::Uint16),
-        "uint32" => Ok(NumericFormat::Uint32),
-        "int8" => Ok(NumericFormat::Int8),
-        "int16" => Ok(NumericFormat::Int16),
-        "int32" => Ok(NumericFormat::Int32),
-        _ => Err(CapabilityError::InvalidDescription("state format")),
-    }
-}
-fn readable_notification(property: &Property<'_>) -> Result<(), CapabilityError> {
-    let access = array(property.value, "access")?;
-    if access.iter().any(|value| value.as_str().is_none()) {
-        return Err(CapabilityError::InvalidDescription("access"));
-    }
-    for permission in ["read", "notify"] {
-        if !access
-            .iter()
-            .any(|value| value.as_str() == Some(permission))
-        {
-            return Err(CapabilityError::MissingAccess(permission));
-        }
-    }
-    Ok(())
-}
 fn enumeration(
     property: &Property<'_>,
     active: &[&str],
@@ -209,7 +183,7 @@ fn enumeration(
         })
         .collect::<Result<_, _>>()?;
     Ok(StateMapping::Enumerated {
-        format: integer_format(property.value)?,
+        format: property.integer_format()?,
         values,
     })
 }
@@ -222,7 +196,7 @@ fn contact(service: &Service<'_>) -> Result<StateBinding, CapabilityError> {
             .filter(|property| property.urn.standard("property", name, type_id))
         {
             let candidate = (|| {
-                readable_notification(property)?;
+                property.access(&["read", "notify"])?;
                 let mapping = if name == "contact-state" {
                     if property.value["format"] != "bool" {
                         return Err(CapabilityError::InvalidDescription("contact format"));
@@ -262,7 +236,7 @@ fn motion(service: &Service<'_>) -> Result<MotionBinding, CapabilityError> {
                 .standard("property", "no-motion-duration", 0xCB)
         })
         .ok_or(CapabilityError::MissingFunction("no-motion-duration"))?;
-    readable_notification(property)?;
+    property.access(&["read", "notify"])?;
     if property.value["unit"] != "seconds" {
         return Err(CapabilityError::InvalidDescription("motion duration unit"));
     }
@@ -272,7 +246,7 @@ fn motion(service: &Service<'_>) -> Result<MotionBinding, CapabilityError> {
             piid: property.iid,
         },
         StateMapping::NoMotionDuration {
-            format: integer_format(property.value)?,
+            format: property.integer_format()?,
         },
     )?;
     let arguments = event
@@ -363,7 +337,7 @@ pub(super) fn functions(
                 .iter()
                 .find(|property| property.urn.standard("property", "occupancy-status", 0x166))
                 .ok_or(CapabilityError::MissingFunction("occupancy status"))?;
-            readable_notification(property)?;
+            property.access(&["read", "notify"])?;
             let mapping = enumeration(property, &["Has One", "Has Someone"], &["No One"], true)?;
             StateBinding::new(
                 PropertyBinding {

@@ -280,7 +280,7 @@ impl<'a> Core<'a> {
             .committed
             .as_ref()
             .and_then(|source| source.native.as_ref())
-            .is_none_or(|native| super::super::super::lan::protocol(native).is_none())
+            .is_none_or(|native| native.direct_protocol().is_none())
         {
             return Err(Unavailable::Fact("device model not supported"));
         }

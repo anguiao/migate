@@ -5,6 +5,7 @@ mod curtain;
 mod fan;
 mod heater;
 pub(crate) mod model_fixture;
+mod native;
 mod relay;
 
 use super::{CapabilityError, PropertyBinding};

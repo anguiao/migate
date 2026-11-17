@@ -1,10 +1,7 @@
 use super::super::{
     CapabilityError, FanModeBinding, FanSpeedBinding, FanSpeedEncoding, ParsedDevice,
     ParsedFunction,
-    description::{
-        Description, Service, Urn, array, binding, control_access, integer_format, string,
-    },
-    fan::required,
+    description::{Description, Service, Urn, array, binding, string},
 };
 use super::BuiltinPatch;
 
@@ -118,9 +115,9 @@ pub(in crate::xiaomi::capability) fn bindings(
     instance: &Description<'_>,
     service: &Service<'_>,
 ) -> Result<(FanModeBinding, FanSpeedBinding), CapabilityError> {
-    let mode = required(service, |p| p.urn.standard("property", "mode", 8), "mode")?;
-    control_access(mode)?;
-    let mode_format = integer_format(mode)?;
+    let mode = service.property("mode", 8)?;
+    mode.control_access()?;
+    let mode_format = mode.integer_format()?;
     let values = array(mode.value, "value-list")?;
     let mut straight = None;
     let mut native_values = Vec::new();
@@ -154,15 +151,15 @@ pub(in crate::xiaomi::capability) fn bindings(
     let [vendor] = services.as_slice() else {
         return Err(CapabilityError::MissingFunction("dm-service"));
     };
-    let speed = required(
-        vendor,
-        |p| {
-            p.urn.matches("dmaker-spec", "property", "speed-level", 1)
-                && p.urn.vendor == instance.urn.vendor
-        },
-        "speed-level",
-    )?;
-    control_access(speed)?;
+    let speed = vendor
+        .matching_property(|property| {
+            property
+                .urn
+                .matches("dmaker-spec", "property", "speed-level", 1)
+                && property.urn.vendor == instance.urn.vendor
+        })?
+        .ok_or(CapabilityError::MissingFunction("speed-level"))?;
+    speed.control_access()?;
     let range = array(speed.value, "value-range")?;
     if range
         != [
@@ -175,7 +172,7 @@ pub(in crate::xiaomi::capability) fn bindings(
     }
     let speed = FanSpeedBinding::new(
         binding(vendor, speed),
-        integer_format(speed)?,
+        speed.integer_format()?,
         FanSpeedEncoding::Range {
             min: 1,
             max: 100,

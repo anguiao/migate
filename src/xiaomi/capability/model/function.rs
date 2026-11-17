@@ -60,6 +60,10 @@ enum FunctionBindings {
     },
 }
 impl ParsedFunction {
+    pub(in crate::xiaomi::capability) fn same_control_as(&self, other: &Self) -> bool {
+        self.id == other.id && self.bindings == other.bindings
+    }
+
     pub(crate) fn relay(
         id: impl Into<String>,
         label: impl Into<String>,

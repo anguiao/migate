@@ -1,7 +1,6 @@
 mod air_conditioner;
 pub(crate) use air_conditioner::{
     AirConditionerBindings, AirConditionerModeBinding, AirConditionerSpeedBinding,
-    AirConditionerTemperatureBinding,
 };
 mod curtain;
 mod device;

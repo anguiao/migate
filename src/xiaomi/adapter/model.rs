@@ -367,12 +367,7 @@ pub enum LanState {
     Ready,
     Failed,
 }
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LanProtocol {
-    Miot,
-    MiotLegacyShared,
-    LegacyMcn02,
-}
+pub use crate::xiaomi::capability::LanProtocol;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LanStatus {
     pub protocol: LanProtocol,

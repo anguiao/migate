@@ -7,13 +7,13 @@ use crate::{
     device::{MeasurementRange, NumericRange, TemperatureGrid},
     xiaomi::capability::{
         ActionBinding, AirConditionerBindings, AirConditionerModeBinding,
-        AirConditionerSpeedBinding, AirConditionerTemperatureBinding, BatteryBinding,
-        BrightnessBinding, ColorBinding, CurtainBindings, CurtainMotorBinding,
-        CurtainPositionBinding, CurtainStatusBinding, EventArgument, EventBinding, FanBindings,
-        FanModeBinding, FanSpeedBinding, FanSpeedEncoding, HeaterBindings, LightBindings,
-        MeasurementBinding, MeasurementUnit, ModeBinding, MotionBinding, NumericFormat,
-        ParsedDevice, ParsedFunction, PropertyBinding, RecognitionMetadata, SharedFanChannel,
-        SharedFanSpeedBinding, StateBinding, StateMapping, StateValue, TemperatureBinding,
+        AirConditionerSpeedBinding, BatteryBinding, BrightnessBinding, ColorBinding,
+        CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
+        EventArgument, EventBinding, FanBindings, FanModeBinding, FanSpeedBinding,
+        FanSpeedEncoding, HeaterBindings, LightBindings, MeasurementBinding, MeasurementUnit,
+        ModeBinding, MotionBinding, NumericFormat, ParsedDevice, ParsedFunction, PropertyBinding,
+        RecognitionMetadata, SharedFanChannel, SharedFanSpeedBinding, StateBinding, StateMapping,
+        StateValue, TemperatureBinding, ThermostatTemperatureBinding,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -67,7 +67,7 @@ enum WireFunction {
         label: String,
         power: WireBinding,
         mode: WireAirConditionerEnum<5>,
-        temperature: WireAirConditionerTemperature,
+        temperature: WireThermostatTemperature,
         speed: WireAirConditionerEnum<4>,
         swing: Option<WireBinding>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,7 +77,7 @@ enum WireFunction {
         id: String,
         label: String,
         power: WireBinding,
-        temperature: WireAirConditionerTemperature,
+        temperature: WireThermostatTemperature,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diagnostic_mode: Option<WireBinding>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -153,7 +153,7 @@ struct WireAirConditionerEnum<const N: usize> {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireAirConditionerTemperature {
+struct WireThermostatTemperature {
     property: WireBinding,
     format: NumericFormat,
     min: i16,
@@ -460,6 +460,26 @@ impl WireMeasurement {
         self.into_binding().and_then(|binding| {
             BatteryBinding::new(binding).map_err(|_| "Stored battery binding is invalid")
         })
+    }
+}
+
+impl WireThermostatTemperature {
+    fn from_binding(binding: &ThermostatTemperatureBinding) -> Self {
+        let grid = binding.grid();
+        Self {
+            property: binding.property().into(),
+            format: binding.format(),
+            min: grid.min(),
+            max: grid.max(),
+            step: grid.step(),
+        }
+    }
+
+    fn into_binding(self) -> Result<ThermostatTemperatureBinding, &'static str> {
+        let grid = TemperatureGrid::new(self.min, self.max, self.step)
+            .map_err(|_| "Stored thermostat temperature binding is invalid")?;
+        ThermostatTemperatureBinding::new(self.property.into(), self.format, grid)
+            .map_err(|_| "Stored thermostat temperature binding is invalid")
     }
 }
 
