@@ -1,6 +1,6 @@
 use super::*;
 use crate::device::CommandReceiver;
-use crate::lighting::hs;
+use crate::device::lighting::hs;
 use c::ClusterAsyncHandler as _;
 
 fn white_state(function: &Function) {
@@ -17,8 +17,8 @@ fn white_state(function: &Function) {
 
 fn gray_hue_move() -> ColorTask {
     ColorTask::Hs(hs::HsTask {
-        hue: hs::HueAxis::move_at(0.0, 20.0),
-        saturation: hs::SaturationAxis::Hold(0.0),
+        hue: hs::HueAxis::move_at(0.0, 20.0, 254.0),
+        saturation: hs::SaturationAxis::hold(0.0),
     })
 }
 
@@ -32,8 +32,8 @@ fn red_target() -> ColorTask {
 fn color_task(use_hs: bool, transition_ms: u64) -> ColorTask {
     if use_hs {
         ColorTask::Hs(hs::HsTask {
-            hue: hs::HueAxis::move_to(0.0, 85.0, hs::Direction::Shortest, transition_ms),
-            saturation: hs::SaturationAxis::Hold(254.0),
+            hue: hs::HueAxis::move_to(0.0, 85.0, hs::Direction::Shortest, transition_ms, 254.0),
+            saturation: hs::SaturationAxis::hold(254.0),
         })
     } else {
         ColorTask::XyMoveTo {

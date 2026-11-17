@@ -1,3 +1,4 @@
+mod color;
 mod dispatch;
 pub(super) use dispatch::{Dispatch, IDENTIFY};
 mod handlers;
@@ -7,8 +8,8 @@ mod report;
 mod tests;
 
 use super::units;
+use crate::device::lighting::{ActionPlan, Scheduler, Task, clock::Clock};
 use crate::device::{Command, CommandError, Function, LightAction, LightDimension, LightProfile};
-use crate::lighting::{Scheduler, Task, clock::Clock};
 use futures_lite::future::or;
 pub(super) use handlers::{ColorHandler, LevelHandler, OnOffHandler};
 use report::{Projection, Report};
@@ -63,7 +64,7 @@ impl Lighting {
             on_off,
             level,
             color,
-            Rc::new(crate::lighting::clock::SystemClock::new()),
+            Rc::new(crate::device::lighting::clock::SystemClock::new()),
         )
     }
     fn with_clock(
@@ -79,12 +80,7 @@ impl Lighting {
             .kind
             .light_profile()
             .ok_or(ErrorCode::InvalidState)?;
-        let scheduler = Scheduler::new(
-            function.clone(),
-            clock,
-            units::brightness_from_level,
-            units::kelvin_from_mireds,
-        );
+        let scheduler = Scheduler::new(function.clone(), clock);
         let result = Self {
             function,
             endpoint,
@@ -124,7 +120,15 @@ impl Lighting {
             profile: self.profile,
             settings: self.settings(),
             state: self.plan_state(),
-            trajectory: self.color_trajectory(),
+            hs_trajectory: self.scheduler.observe(LightDimension::Color).is_some_and(
+                |observation| {
+                    observation.current
+                        && matches!(
+                            observation.task,
+                            Task::Color(crate::device::lighting::color::Task::Hs(_))
+                        )
+                },
+            ),
         }
     }
     fn settings(&self) -> plan::Settings {
@@ -144,17 +148,6 @@ impl Lighting {
             hs: projection.hs,
         }
     }
-    fn color_trajectory(&self) -> Option<plan::Trajectory> {
-        let observation = self.scheduler.observe(LightDimension::Color)?;
-        let Task::Color(task) = observation.task else {
-            return None;
-        };
-        Some(plan::Trajectory {
-            task,
-            elapsed_ms: observation.elapsed,
-            current: observation.current,
-        })
-    }
     fn refresh(&self) -> Projection {
         self.report
             .refresh(&self.function, &self.scheduler, self.profile)
@@ -164,14 +157,12 @@ impl Lighting {
             .sync_versions(&self.function, &self.scheduler, self.profile)
     }
     fn remaining_time(&self, dimension: LightDimension) -> u16 {
+        self.report.sync_remaining(&self.scheduler);
         self.report.remaining_time(dimension)
     }
-    fn begin(&self, task: Task, forced_power: Option<bool>) -> Result<Rc<LightAction>, Error> {
+    fn begin(&self, plan: ActionPlan) -> Result<Rc<LightAction>, Error> {
         self.refresh();
-        let action = self
-            .scheduler
-            .begin(task, forced_power)
-            .map_err(command_error)?;
+        let action = self.scheduler.begin(plan).map_err(command_error)?;
         self.report.sync_remaining(&self.scheduler);
         Ok(action)
     }
@@ -179,10 +170,10 @@ impl Lighting {
         match plan {
             plan::Plan::Ignore => Ok(()),
             plan::Plan::Stop(dimension) => self.stop(dimension),
-            plan::Plan::Execute { task } => {
-                let action = self.begin(task, None)?;
+            plan::Plan::Execute(plan) => {
+                let action = self.begin(plan)?;
                 action.accepted().await.map_err(command_error)?;
-                if matches!(task, Task::Color(_)) {
+                if matches!(plan.task, Task::Color(_)) {
                     self.refresh();
                 }
                 Ok(())
@@ -197,11 +188,8 @@ impl Lighting {
                     .await
                     .map_err(command_error)?;
             }
-            plan::PowerPlan::Begin { task, power } => {
-                self.begin(Task::Level(task), Some(power))?
-                    .accepted()
-                    .await
-                    .map_err(command_error)?;
+            plan::PowerPlan::Begin(plan) => {
+                self.begin(plan)?.accepted().await.map_err(command_error)?;
             }
         }
         Ok(())

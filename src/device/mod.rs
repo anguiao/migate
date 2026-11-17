@@ -8,6 +8,7 @@ mod heater;
 mod heater_command;
 mod light_command;
 mod light_observation;
+pub(crate) mod lighting;
 mod model;
 mod registry;
 mod state;

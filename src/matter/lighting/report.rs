@@ -6,8 +6,9 @@
 //! `Lighting` owns assembly only and calls these operations; the trajectory
 //! layer supplies raw samples.
 
+use super::color as coordinates;
+use crate::device::lighting::{Scheduler, Task, color, hs};
 use crate::device::{ActionToken, Function, LightDimension, LightMode, LightProfile, Rgb};
-use crate::lighting::{Scheduler, Task, color, hs};
 use crate::matter::units::{level_from_brightness, mireds_from_kelvin};
 use rs_matter::dm::Dataver;
 use std::cell::{Cell, RefCell};
@@ -135,12 +136,12 @@ impl Report {
         let (xy, hs) = if profile.has_rgb() {
             match lighting.mode {
                 Some(LightMode::Temperature) => {
-                    let xy = temperature.map(color::temperature_to_xy);
-                    let hs = xy.map(|(x, y)| hs::rgb_to_hs(color::xy_to_rgb(x, y)));
+                    let xy = temperature.map(coordinates::temperature_to_xy);
+                    let hs = xy.map(|(x, y)| coordinates::rgb_to_hs(coordinates::xy_to_rgb(x, y)));
                     (xy, hs)
                 }
                 Some(LightMode::Rgb) => (
-                    lighting.color.and_then(color::rgb_to_xy),
+                    lighting.color.and_then(coordinates::rgb_to_xy),
                     lighting.color.map(|rgb| self.rgb_hs(scheduler, rgb)),
                 ),
                 None => (None, None),
@@ -164,7 +165,7 @@ impl Report {
         }
     }
     fn rgb_hs(&self, scheduler: &Scheduler, rgb: Rgb) -> hs::Hs {
-        let mut value = hs::rgb_to_hs(rgb);
+        let mut value = coordinates::rgb_to_hs(rgb);
         // RGB cannot encode a hue at zero saturation. Retain accepted hue
         // selections, including a hue-only trajectory through neutral white.
         if let Some(observation) = scheduler.observe(LightDimension::Color)
@@ -179,7 +180,7 @@ impl Report {
             };
             let requested = task.frame(elapsed).0;
             if (finished || (value.saturation == 0.0 && observation.current))
-                && hs::hs_to_rgb(requested) == rgb
+                && coordinates::hs_to_rgb(requested) == rgb
             {
                 self.hue_hint.set(requested.hue);
             }

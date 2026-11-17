@@ -5,11 +5,36 @@
 //! current-trajectory decisions. They consume plain values, return
 //! Ignore/Stop/Execute and never touch TLV, rs-matter or the clock.
 
+use super::color as coordinates;
+use crate::device::lighting::{ActionPlan, FramePower, Task, Units, color, hs, level};
 use crate::device::{Command, LightDimension, LightProfile};
-use crate::lighting::{Task, color, hs, level};
 use crate::matter::units::mired_bounds;
 
-pub(super) const XY_MAX: u16 = color::XY_MAX;
+pub(super) const XY_MAX: u16 = coordinates::XY_MAX;
+const HUE_PERIOD: f64 = 254.0;
+const SATURATION_MAX: f64 = 254.0;
+const UNITS: Units = Units {
+    brightness: crate::matter::units::brightness_from_level,
+    temperature: crate::matter::units::kelvin_from_mireds,
+    xy: coordinates::xy_to_rgb,
+    hs: coordinates::hs_to_rgb,
+};
+
+fn action(task: Task) -> ActionPlan {
+    ActionPlan {
+        task,
+        units: UNITS,
+        power: FramePower::default(),
+        retain_hs: None,
+    }
+}
+
+fn hs_execution(task: hs::HsTask, retain_hs: hs::AxisKind) -> Plan {
+    Plan::Execute(ActionPlan {
+        retain_hs: Some(retain_hs),
+        ..action(Task::Color(color::Task::Hs(task)))
+    })
+}
 
 /// Effective feedback projection relevant to planning.
 #[derive(Clone, Copy, Default)]
@@ -19,14 +44,6 @@ pub(super) struct State {
     pub(super) temperature: Option<u16>,
     pub(super) xy: Option<(u16, u16)>,
     pub(super) hs: Option<hs::Hs>,
-}
-
-/// Current color trajectory sampled by the scheduler.
-#[derive(Clone, Copy)]
-pub(super) struct Trajectory {
-    pub(super) task: color::Task,
-    pub(super) elapsed_ms: u64,
-    pub(super) current: bool,
 }
 
 /// Writable cluster settings owned by the report surface.
@@ -44,7 +61,7 @@ pub(super) struct Input {
     pub(super) profile: LightProfile,
     pub(super) settings: Settings,
     pub(super) state: State,
-    pub(super) trajectory: Option<Trajectory>,
+    pub(super) hs_trajectory: bool,
 }
 
 /// Matter Options/OptionsMask values decoded for one command.
@@ -63,13 +80,13 @@ impl Options {
 pub(super) enum Plan {
     Ignore,
     Stop(LightDimension),
-    Execute { task: Task },
+    Execute(ActionPlan),
 }
 
 #[derive(Debug)]
 pub(super) enum PowerPlan {
     Execute(Command),
-    Begin { task: level::Task, power: bool },
+    Begin(ActionPlan),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +102,12 @@ pub(super) enum MoveMode {
     Up,
     Down,
     Stop,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum LevelDirection {
+    Up,
+    Down,
 }
 
 #[derive(Clone, Copy)]
@@ -157,19 +180,22 @@ pub(super) fn move_to_level(
     } else {
         input.state.level.ok_or(PlanError::InvalidState)?
     };
-    Ok(Plan::Execute {
-        task: Task::Level(level::Task::MoveToLevel {
-            with_on_off,
+    Ok(Plan::Execute(ActionPlan {
+        power: FramePower {
+            during: with_on_off.then_some(start > 1 || level > start),
+            final_frame: with_on_off.then_some(level > 1),
+        },
+        ..action(Task::Level(level::Task::MoveTo {
             start,
             target: level,
             transition_ms,
-        }),
-    })
+        }))
+    }))
 }
 
 pub(super) fn move_level(
     with_on_off: bool,
-    mode: level::Direction,
+    mode: LevelDirection,
     rate: Option<u8>,
     request: Options,
     input: &Input,
@@ -183,14 +209,22 @@ pub(super) fn move_level(
     if !level_gate(with_on_off, request, input)? {
         return Ok(Plan::Ignore);
     }
-    Ok(Plan::Execute {
-        task: Task::Level(level::Task::Move {
-            with_on_off,
-            start: input.state.level.ok_or(PlanError::InvalidState)?,
-            move_mode: mode,
+    let start = input.state.level.ok_or(PlanError::InvalidState)?;
+    let target = match mode {
+        LevelDirection::Up => 254,
+        LevelDirection::Down => 1,
+    };
+    Ok(Plan::Execute(ActionPlan {
+        power: FramePower {
+            during: with_on_off.then_some(true),
+            final_frame: with_on_off.then_some(target > 1),
+        },
+        ..action(Task::Level(level::Task::Move {
+            start,
+            target,
             rate,
-        }),
-    })
+        }))
+    }))
 }
 
 pub(super) fn step(
@@ -229,24 +263,13 @@ pub(super) fn stop_level(
 
 fn hs_base(input: &Input) -> Result<(hs::HsTask, hs::Hs), PlanError> {
     let start = input.state.hs.ok_or(PlanError::InvalidState)?;
-    let task = match input.trajectory {
-        Some(Trajectory {
-            task: color::Task::Hs(task),
-            elapsed_ms,
-            current: true,
-        }) => task.resume(elapsed_ms),
-        _ => hs::HsTask::stationary(start),
-    };
-    Ok((task, start))
+    Ok((hs::HsTask::stationary(start), start))
 }
 
 /// A Hue/Saturation Stop only cancels its own HS trajectory, never an XY or
 /// color-temperature move that shares the color dimension.
 fn stop_hs(input: &Input) -> Plan {
-    if input
-        .trajectory
-        .is_some_and(|value| matches!(value.task, color::Task::Hs(_)))
-    {
+    if input.hs_trajectory {
         Plan::Stop(LightDimension::Color)
     } else {
         Plan::Ignore
@@ -270,10 +293,14 @@ pub(super) fn move_to_hue(
         return Ok(Plan::Ignore);
     }
     let (mut task, start) = hs_base(input)?;
-    task.hue = hs::HueAxis::move_to(start.hue, hue as f64, direction, duration_ds as u64 * 100);
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    task.hue = hs::HueAxis::move_to(
+        start.hue,
+        hue as f64,
+        direction,
+        duration_ds as u64 * 100,
+        HUE_PERIOD,
+    );
+    Ok(hs_execution(task, hs::AxisKind::Saturation))
 }
 
 pub(super) fn move_hue(
@@ -300,10 +327,8 @@ pub(super) fn move_hue(
     } else {
         -(rate as f64)
     };
-    task.hue = hs::HueAxis::move_at(start.hue, rate);
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    task.hue = hs::HueAxis::move_at(start.hue, rate, HUE_PERIOD);
+    Ok(hs_execution(task, hs::AxisKind::Saturation))
 }
 
 pub(super) fn step_hue(
@@ -328,10 +353,8 @@ pub(super) fn step_hue(
     } else {
         -(size as f64)
     };
-    task.hue = hs::HueAxis::step(start.hue, delta, duration_ds as u64 * 100);
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    task.hue = hs::HueAxis::step(start.hue, delta, duration_ds as u64 * 100, HUE_PERIOD);
+    Ok(hs_execution(task, hs::AxisKind::Saturation))
 }
 
 pub(super) fn move_to_saturation(
@@ -355,9 +378,7 @@ pub(super) fn move_to_saturation(
         saturation as f64,
         duration_ds as u64 * 100,
     );
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    Ok(hs_execution(task, hs::AxisKind::Hue))
 }
 
 pub(super) fn move_saturation(
@@ -384,10 +405,8 @@ pub(super) fn move_saturation(
     } else {
         -(rate as f64)
     };
-    task.saturation = hs::SaturationAxis::move_at(start.saturation, rate);
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    task.saturation = hs::SaturationAxis::move_at(start.saturation, rate, SATURATION_MAX);
+    Ok(hs_execution(task, hs::AxisKind::Hue))
 }
 
 pub(super) fn step_saturation(
@@ -414,12 +433,10 @@ pub(super) fn step_saturation(
     };
     task.saturation = hs::SaturationAxis::move_to(
         start.saturation,
-        (start.saturation + delta).clamp(0.0, 254.0),
+        (start.saturation + delta).clamp(0.0, SATURATION_MAX),
         duration_ds as u64 * 100,
     );
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    Ok(hs_execution(task, hs::AxisKind::Hue))
 }
 
 pub(super) fn move_to_hue_and_saturation(
@@ -452,6 +469,7 @@ pub(super) fn move_to_hue_and_saturation(
                 target.hue,
                 hs::Direction::Shortest,
                 duration_ds as u64 * 100,
+                HUE_PERIOD,
             ),
             saturation: hs::SaturationAxis::move_to(
                 start.saturation,
@@ -460,9 +478,7 @@ pub(super) fn move_to_hue_and_saturation(
             ),
         }
     };
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::Hs(task)),
-    })
+    Ok(Plan::Execute(action(Task::Color(color::Task::Hs(task)))))
 }
 
 pub(super) fn move_to_color(
@@ -486,15 +502,13 @@ pub(super) fn move_to_color(
     } else {
         input.state.xy.ok_or(PlanError::InvalidState)?
     };
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::XyMoveTo {
-            start_x,
-            start_y,
-            target_x: x,
-            target_y: y,
-            transition_ms: duration_ds as u64 * 100,
-        }),
-    })
+    Ok(Plan::Execute(action(Task::Color(color::Task::XyMoveTo {
+        start_x,
+        start_y,
+        target_x: x,
+        target_y: y,
+        transition_ms: duration_ds as u64 * 100,
+    }))))
 }
 
 pub(super) fn move_color(
@@ -513,14 +527,13 @@ pub(super) fn move_color(
         return Ok(Plan::Stop(LightDimension::Color));
     }
     let (start_x, start_y) = input.state.xy.ok_or(PlanError::InvalidState)?;
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::XyMove {
-            start_x,
-            start_y,
-            rate_x,
-            rate_y,
-        }),
-    })
+    Ok(Plan::Execute(action(Task::Color(color::Task::XyMove {
+        start_x,
+        start_y,
+        rate_x,
+        rate_y,
+        maximum: XY_MAX,
+    }))))
 }
 
 pub(super) fn step_color(
@@ -545,15 +558,13 @@ pub(super) fn step_color(
     let (start_x, start_y) = input.state.xy.ok_or(PlanError::InvalidState)?;
     let target_x = (start_x as i32 + x as i32).clamp(0, XY_MAX as i32) as u16;
     let target_y = (start_y as i32 + y as i32).clamp(0, XY_MAX as i32) as u16;
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::XyMoveTo {
-            start_x,
-            start_y,
-            target_x,
-            target_y,
-            transition_ms: duration_ds as u64 * 100,
-        }),
-    })
+    Ok(Plan::Execute(action(Task::Color(color::Task::XyMoveTo {
+        start_x,
+        start_y,
+        target_x,
+        target_y,
+        transition_ms: duration_ds as u64 * 100,
+    }))))
 }
 
 pub(super) fn stop_move_step(request: Options, input: &Input) -> Result<Plan, PlanError> {
@@ -586,13 +597,13 @@ pub(super) fn move_to_color_temperature(
     } else {
         input.state.temperature.ok_or(PlanError::InvalidState)?
     };
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::ColorTemperatureMoveTo {
+    Ok(Plan::Execute(action(Task::Color(
+        color::Task::TemperatureMoveTo {
             start,
-            target_mireds: target,
+            target,
             transition_ms: duration_ds as u64 * 100,
-        }),
-    })
+        },
+    ))))
 }
 
 fn temperature_bounds(profile: LightProfile, min: u16, max: u16) -> Result<(u16, u16), PlanError> {
@@ -630,19 +641,19 @@ pub(super) fn move_color_temperature(
     }
     let (lo, hi) = temperature_bounds(input.profile, min, max)?;
     let start = input.state.temperature.ok_or(PlanError::InvalidState)?;
-    let rate_mireds_per_sec = if matches!(mode, MoveMode::Up) {
+    let rate_per_sec = if matches!(mode, MoveMode::Up) {
         rate as i32
     } else {
         -(rate as i32)
     };
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::ColorTemperatureMove {
+    Ok(Plan::Execute(action(Task::Color(
+        color::Task::TemperatureMove {
             start,
-            rate_mireds_per_sec,
-            min_mireds: lo,
-            max_mireds: hi,
-        }),
-    })
+            rate_per_sec,
+            min: lo,
+            max: hi,
+        },
+    ))))
 }
 
 pub(super) fn step_color_temperature(
@@ -677,13 +688,13 @@ pub(super) fn step_color_temperature(
     // distance. XY Step intentionally retains its whole transition.
     let transition_ms =
         (duration_ds as u64 * 100 * start.abs_diff(target) as u64).div_ceil(size as u64);
-    Ok(Plan::Execute {
-        task: Task::Color(color::Task::ColorTemperatureMoveTo {
+    Ok(Plan::Execute(action(Task::Color(
+        color::Task::TemperatureMoveTo {
             start,
-            target_mireds: target,
+            target,
             transition_ms,
-        }),
-    })
+        },
+    ))))
 }
 
 /// On/Off planning including the OnLevel preset. Repeated On keeps the
@@ -701,15 +712,17 @@ pub(super) fn power(command: Command, input: &Input) -> Result<PowerPlan, PlanEr
         .filter(|_| input.state.power != Some(on))
     {
         let target = if on { preset } else { 1 };
-        return Ok(PowerPlan::Begin {
-            task: level::Task::MoveToLevel {
-                with_on_off: false,
+        return Ok(PowerPlan::Begin(ActionPlan {
+            power: FramePower {
+                during: Some(on),
+                final_frame: Some(on),
+            },
+            ..action(Task::Level(level::Task::MoveTo {
                 start: target,
                 target,
                 transition_ms: 0,
-            },
-            power: on,
-        });
+            }))
+        }));
     }
     Ok(PowerPlan::Execute(if on {
         Command::On

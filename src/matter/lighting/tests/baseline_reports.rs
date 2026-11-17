@@ -28,9 +28,10 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
             Some(true)
         );
         let input = light.plan_input();
-        let lighting_plan::Plan::Execute {
+        let lighting_plan::Plan::Execute(ActionPlan {
             task: LightingTask::Level(task),
-        } = lighting_plan::move_level(
+            ..
+        }) = lighting_plan::move_level(
             false,
             Direction::Up,
             Some(1),
@@ -42,7 +43,9 @@ fn observed_zero_is_known_minimum_without_changing_power_and_relative_start() {
             panic!("expected a level execution")
         };
         assert_eq!(task.frame(0).0, 1);
-        let action = light.begin(LightingTask::Level(task), None).unwrap();
+        let action = light
+            .begin(action_plan(LightingTask::Level(task), None))
+            .unwrap();
         let request = frame(&mut receiver).await;
         assert_eq!(request.target.brightness_percent(), Some(1.0));
         accept(&function, request);
@@ -92,16 +95,19 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
                 start_y: 21627,
                 rate_x: -1000,
                 rate_y: 0,
+                maximum: super::super::color::XY_MAX,
             }
         } else {
-            ColorTask::ColorTemperatureMove {
+            ColorTask::TemperatureMove {
                 start: 200,
-                rate_mireds_per_sec: 10,
-                min_mireds: 154,
-                max_mireds: 370,
+                rate_per_sec: 10,
+                min: 154,
+                max: 370,
             }
         };
-        let action = light.begin(LightingTask::Color(task), None).unwrap();
+        let action = light
+            .begin(action_plan(LightingTask::Color(task), None))
+            .unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
@@ -138,14 +144,14 @@ fn color_quiet_reports_ignore_unrelated_unknown_caches_and_remaining_time_change
         // A long CT trajectory whose first tick still rounds to the current
         // value advances RemainingTime's DataVersion without a quiet report.
         let action = light
-            .begin(
-                LightingTask::Color(ColorTask::ColorTemperatureMoveTo {
+            .begin(action_plan(
+                LightingTask::Color(ColorTask::TemperatureMoveTo {
                     start: 200,
-                    target_mireds: 201,
+                    target: 201,
                     transition_ms: 10000,
                 }),
                 None,
-            )
+            ))
             .unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
@@ -179,20 +185,19 @@ fn version_reads_preserve_quiet_final_and_unknown_reports() {
             .unwrap();
         collect_reports(&light);
         let task = if dimension == LightDimension::Brightness {
-            LightingTask::Level(Task::MoveToLevel {
-                with_on_off: false,
+            LightingTask::Level(Task::MoveTo {
                 start: 1,
                 target: 254,
                 transition_ms: 1500,
             })
         } else {
-            LightingTask::Color(ColorTask::ColorTemperatureMoveTo {
+            LightingTask::Color(ColorTask::TemperatureMoveTo {
                 start: 200,
-                target_mireds: 300,
+                target: 300,
                 transition_ms: 1500,
             })
         };
-        let action = light.begin(task, None).unwrap();
+        let action = light.begin(action_plan(task, None)).unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();

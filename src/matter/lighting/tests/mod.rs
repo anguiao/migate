@@ -1,17 +1,16 @@
 use crate::{
     device::Rgb,
-    lighting::{
-        color::Task as ColorTask,
-        level::{Direction, Task},
-    },
+    device::lighting::{color::Task as ColorTask, level::Task},
 };
 
-use super::plan as lighting_plan;
+use super::plan::LevelDirection as Direction;
 use super::{
     Lighting, Task as LightingTask,
     handlers::{ColorHandler, LevelHandler},
 };
-use crate::lighting::clock::Clock;
+use super::{color as coordinates, plan as lighting_plan};
+use crate::device::lighting::clock::Clock;
+use crate::device::lighting::{ActionPlan, FramePower, Units};
 use crate::{
     device::{
         Availability, CommandError, DeviceRequest, Function, LightColorTarget, LightDimension,
@@ -45,9 +44,26 @@ use std::{
     rc::Rc,
 };
 
+fn action_plan(task: LightingTask, power: Option<bool>) -> ActionPlan {
+    ActionPlan {
+        task,
+        units: Units {
+            brightness: crate::matter::units::brightness_from_level,
+            temperature: crate::matter::units::kelvin_from_mireds,
+            xy: coordinates::xy_to_rgb,
+            hs: coordinates::hs_to_rgb,
+        },
+        power: FramePower {
+            during: power,
+            final_frame: power,
+        },
+        retain_hs: None,
+    }
+}
+
 async fn execute_color(light: &Lighting, task: ColorTask) -> Result<(), rs_matter::error::Error> {
     light
-        .begin(LightingTask::Color(task), None)?
+        .begin(action_plan(LightingTask::Color(task), None))?
         .accepted()
         .await
         .map_err(super::command_error)?;
@@ -122,11 +138,14 @@ impl Clock for TestClock {
 }
 macro_rules! setup {
     ($rgb:expr,$function:ident,$receiver:ident,$light:ident,$clock:ident,$ctx:ident) => {
+        setup!(@device support::light($rgb), $function, $receiver, $light, $clock, $ctx);
+    };
+    (@device $device:expr,$function:ident,$receiver:ident,$light:ident,$clock:ident,$ctx:ident) => {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let identity = store.load_identity().unwrap();
 
-        let (device, mut $receiver) = support::light($rgb);
+        let (device, mut $receiver) = $device;
         let $function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
 
@@ -196,6 +215,7 @@ mod color_reports;
 
 mod plan;
 
+mod remaining;
 mod report;
 
 mod units;

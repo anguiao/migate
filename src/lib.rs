@@ -3,7 +3,6 @@ pub mod app;
 pub mod config;
 mod configuration;
 mod device;
-mod lighting;
 pub mod matter;
 pub mod storage;
 pub mod terminal;

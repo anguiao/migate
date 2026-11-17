@@ -1,9 +1,11 @@
+use crate::device::lighting::{
+    ActionPlan, FramePower, Scheduler, Task, Units, clock::Clock, level,
+};
 use crate::device::{
     Availability, CommandReceiver, DeviceKey, DeviceRequest, Function, FunctionDescription,
     FunctionKind, LightDimension, LightPatch, LightProfile, PhysicalDevice,
-    PhysicalDeviceDescription, TemperatureInterval,
+    PhysicalDeviceDescription, Rgb, TemperatureInterval,
 };
-use crate::lighting::{Scheduler, Task, clock::Clock, level};
 use futures_lite::future::{block_on, poll_once};
 use std::{cell::Cell, future::Future, pin::Pin, rc::Rc};
 
@@ -74,19 +76,40 @@ async fn next_light(receiver: &mut CommandReceiver) -> crate::device::LightReque
 }
 
 fn level_task() -> Task {
-    Task::Level(level::Task::MoveToLevel {
-        with_on_off: false,
+    Task::Level(level::Task::MoveTo {
         start: 1,
         target: 254,
         transition_ms: 100,
     })
 }
 
+fn action_plan() -> ActionPlan {
+    ActionPlan {
+        task: level_task(),
+        units: Units {
+            brightness,
+            temperature,
+            xy: |_, _| Rgb {
+                red: 255,
+                green: 255,
+                blue: 255,
+            },
+            hs: |_| Rgb {
+                red: 255,
+                green: 255,
+                blue: 255,
+            },
+        },
+        power: FramePower::default(),
+        retain_hs: None,
+    }
+}
+
 #[test]
 fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadline() {
     let (function, mut receiver) = light_device();
     let clock = Rc::new(TestClock::default());
-    let scheduler = Scheduler::new(function.clone(), clock.clone(), brightness, temperature);
+    let scheduler = Scheduler::new(function.clone(), clock.clone());
     function
         .observe_light(LightPatch {
             power: Some(true),
@@ -97,7 +120,7 @@ fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadl
     block_on(async {
         // A receipt delayed past the deadline must not restart the trajectory:
         // the engine advances to the original final frame directly.
-        let action = scheduler.begin(level_task(), None).unwrap();
+        let action = scheduler.begin(action_plan()).unwrap();
         let first = next_light(&mut receiver).await;
         assert_eq!(first.target.brightness_percent(), Some(1.0));
         assert!(!first.final_frame);
@@ -123,7 +146,7 @@ fn canceled_token_suppresses_frames_and_delayed_receipt_keeps_the_original_deadl
 
         // A canceled token must suppress every remaining frame, even after
         // its original deadline has passed.
-        let action = scheduler.begin(level_task(), None).unwrap();
+        let action = scheduler.begin(action_plan()).unwrap();
         let first = next_light(&mut receiver).await;
         first.mark_sent().unwrap();
         first.accept().unwrap();

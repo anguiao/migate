@@ -1,6 +1,6 @@
 use super::*;
 use crate::device::LightTarget;
-use crate::lighting::hs;
+use crate::device::lighting::hs;
 use c::ClusterAsyncHandler as _;
 use rs_matter::error::Error;
 
@@ -218,13 +218,13 @@ fn invalid_and_ignored_hs_requests_preserve_the_existing_action() {
         .unwrap();
     block_on(async {
         let action = light
-            .begin(
+            .begin(action_plan(
                 LightingTask::Color(ColorTask::Hs(hs::HsTask {
-                    hue: hs::HueAxis::move_at(0.0, 10.0),
-                    saturation: hs::SaturationAxis::Hold(254.0),
+                    hue: hs::HueAxis::move_at(0.0, 10.0, 254.0),
+                    saturation: hs::SaturationAxis::hold(254.0),
                 })),
                 None,
-            )
+            ))
             .unwrap();
         accept(&function, frame(&mut receiver).await);
         action.accepted().await.unwrap();
@@ -398,9 +398,9 @@ fn hs_stop_does_not_cancel_xy_or_temperature_actions() {
     block_on(async {
         let handler = ColorHandler::<true>(&light);
         for task in [
-            ColorTask::ColorTemperatureMoveTo {
+            ColorTask::TemperatureMoveTo {
                 start: 200,
-                target_mireds: 250,
+                target: 250,
                 transition_ms: 1000,
             },
             ColorTask::XyMoveTo {
@@ -411,7 +411,9 @@ fn hs_stop_does_not_cancel_xy_or_temperature_actions() {
                 transition_ms: 1000,
             },
         ] {
-            let action = light.begin(LightingTask::Color(task), None).unwrap();
+            let action = light
+                .begin(action_plan(LightingTask::Color(task), None))
+                .unwrap();
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
             let before = handler.color_mode(&ctx).await.unwrap();

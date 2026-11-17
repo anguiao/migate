@@ -1,5 +1,5 @@
 use super::super::{Lighting, plan, plan_error};
-use crate::{device::LightDimension, lighting::level};
+use crate::device::LightDimension;
 use rs_matter::{
     dm::{Cluster, InvokeContext, ReadContext, WriteContext, clusters::decl::level_control as l},
     error::{Error, ErrorCode},
@@ -48,8 +48,8 @@ macro_rules! level_move {
             request: l::$request<'_>,
         ) -> Result<(), Error> {
             let mode = match request.move_mode()? {
-                l::MoveModeEnum::Up => level::Direction::Up,
-                l::MoveModeEnum::Down => level::Direction::Down,
+                l::MoveModeEnum::Up => plan::LevelDirection::Up,
+                l::MoveModeEnum::Down => plan::LevelDirection::Down,
             };
             let rate = request.rate()?.into_option();
             let (mask, override_) = (

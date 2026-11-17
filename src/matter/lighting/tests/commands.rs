@@ -1,6 +1,137 @@
 use super::*;
 
 #[test]
+fn level_commands_link_power_on_the_planned_start_and_final_frames() {
+    use l::ClusterAsyncHandler as _;
+    for (with_on_off, power, brightness, target, first_power, last_power) in [
+        (true, false, 1.0, 254, Some(true), Some(true)),
+        (true, true, 100.0, 0, Some(true), Some(false)),
+        (false, true, 100.0, 0, None, None),
+    ] {
+        setup!(false, function, receiver, light, clock, ctx);
+        function
+            .observe_light(LightPatch {
+                power: Some(power),
+                brightness_percent: Some(brightness),
+                ..Default::default()
+            })
+            .unwrap();
+        collect_reports(&light);
+        block_on(async {
+            let handler = LevelHandler(&light);
+            let bytes = [
+                0x15, 0x24, 0, target, 0x25, 1, 10, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+            ];
+            let mut invoke = pin!(async {
+                if with_on_off {
+                    handler
+                        .handle_move_to_level_with_on_off(
+                            &ctx,
+                            l::MoveToLevelWithOnOffRequest::new(TLVElement::new(&bytes)),
+                        )
+                        .await
+                } else {
+                    handler
+                        .handle_move_to_level(
+                            &ctx,
+                            l::MoveToLevelRequest::new(TLVElement::new(&bytes)),
+                        )
+                        .await
+                }
+            });
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            let first = frame(&mut receiver).await;
+            assert_eq!(first.target.power(), first_power);
+            assert!(!first.final_frame);
+            accept(&function, first);
+            invoke.await.unwrap();
+            collect_reports(&light);
+
+            clock.set(500);
+            light.advance();
+            let middle = frame(&mut receiver).await;
+            assert_eq!(middle.target.power(), first_power);
+            assert!(!middle.final_frame);
+            accept(&function, middle);
+            clock.set(1000);
+            light.advance();
+            let last = frame(&mut receiver).await;
+            assert_eq!(last.target.power(), last_power);
+            assert!(last.final_frame);
+            accept(&function, last);
+            let reports = collect_reports(&light);
+            assert!(reports.contains(&(8, 0)));
+            if first_power != last_power {
+                assert!(reports.contains(&(6, 0)));
+            }
+        });
+    }
+}
+
+#[test]
+fn ct_command_interpolates_in_mireds_and_reports_its_final_frame() {
+    use crate::device::{LightProfile, TemperatureInterval};
+    use c::ClusterAsyncHandler as _;
+    let profile = LightProfile::ColorTemperature(TemperatureInterval::new(2500, 6500).unwrap());
+    setup!(@device support::light_with(profile), function, receiver, light, clock, ctx);
+    function
+        .observe_light(LightPatch {
+            power: Some(true),
+            temperature_kelvin: Some(2500),
+            mode: Some(LightMode::Temperature),
+            ..Default::default()
+        })
+        .unwrap();
+    collect_reports(&light);
+    block_on(async {
+        let handler = ColorHandler::<false>(&light);
+        let bytes = [
+            0x15, 0x25, 0, 200, 0, 0x25, 1, 10, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+        ];
+        let mut invoke = pin!(handler.handle_move_to_color_temperature(
+            &ctx,
+            c::MoveToColorTemperatureRequest::new(TLVElement::new(&bytes))
+        ));
+        assert!(poll_once(invoke.as_mut()).await.is_none());
+        let first = frame(&mut receiver).await;
+        assert_eq!(
+            first.target.color_target(),
+            Some(LightColorTarget::Temperature(2500.0))
+        );
+        assert_eq!(first.target.power(), None);
+        accept(&function, first);
+        invoke.await.unwrap();
+
+        clock.set(500);
+        light.advance();
+        let middle = frame(&mut receiver).await;
+        assert_eq!(
+            middle.target.color_target(),
+            Some(LightColorTarget::Temperature(1_000_000.0 / 300.0))
+        );
+        assert!(!middle.final_frame);
+        accept(&function, middle);
+        assert_eq!(handler.remaining_time(&ctx).await.unwrap(), 5);
+        collect_reports(&light);
+
+        clock.set(1000);
+        light.advance();
+        let last = frame(&mut receiver).await;
+        assert!(last.final_frame);
+        assert_eq!(
+            last.target.color_target(),
+            Some(LightColorTarget::Temperature(5000.0))
+        );
+        assert_eq!(last.target.power(), None);
+        accept(&function, last);
+        assert_eq!(handler.remaining_time(&ctx).await.unwrap(), 0);
+        let reports = collect_reports(&light);
+        assert!(reports.contains(&(0x300, 7)));
+        assert!(reports.contains(&(0x300, 2)));
+    });
+}
+
+#[test]
 fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
     use c::ClusterAsyncHandler as _;
     setup!(false, function, receiver, light, clock, ctx);
@@ -71,15 +202,14 @@ fn malformed_stop_with_onoff_does_not_cancel_active_action() {
         })
         .unwrap();
     let action = light
-        .begin(
+        .begin(action_plan(
             LightingTask::Level(Task::Move {
-                with_on_off: false,
                 start: 100,
-                move_mode: Direction::Up,
+                target: 254,
                 rate: 1,
             }),
             None,
-        )
+        ))
         .unwrap();
     block_on(async {
         let result = LevelHandler(&light)
@@ -148,15 +278,14 @@ fn ordinary_onoff_honors_on_level_and_repeated_off_cancels_without_reapplying_pr
             })
             .unwrap();
         let old = light
-            .begin(
+            .begin(action_plan(
                 LightingTask::Level(Task::Move {
-                    with_on_off: false,
                     start: 75,
-                    move_mode: Direction::Up,
+                    target: 254,
                     rate: 1,
                 }),
                 None,
-            )
+            ))
             .unwrap();
         let mut repeated = pin!(light.power(Command::Off));
         assert!(poll_once(repeated.as_mut()).await.is_none());
@@ -204,15 +333,15 @@ fn ct_stop_parses_all_fields_before_cancellation_and_ignores_motion_only_bounds(
         })
         .unwrap();
     let action = light
-        .begin(
-            LightingTask::Color(ColorTask::ColorTemperatureMove {
+        .begin(action_plan(
+            LightingTask::Color(ColorTask::TemperatureMove {
                 start: 200,
-                rate_mireds_per_sec: 1,
-                min_mireds: 154,
-                max_mireds: 370,
+                rate_per_sec: 1,
+                min: 154,
+                max: 370,
             }),
             None,
-        )
+        ))
         .unwrap();
     block_on(async {
         for bytes in [
@@ -325,15 +454,14 @@ fn unsupported_coupling_command_override_is_rejected_before_takeover() {
         })
         .unwrap();
     let action = light
-        .begin(
+        .begin(action_plan(
             LightingTask::Level(Task::Move {
-                with_on_off: false,
                 start: 100,
-                move_mode: Direction::Up,
+                target: 254,
                 rate: 1,
             }),
             None,
-        )
+        ))
         .unwrap();
     block_on(async {
         let data = [
@@ -372,15 +500,15 @@ fn ignored_ct_step_still_validates_required_bounds_before_success() {
         })
         .unwrap();
     let action = light
-        .begin(
-            LightingTask::Color(ColorTask::ColorTemperatureMove {
+        .begin(action_plan(
+            LightingTask::Color(ColorTask::TemperatureMove {
                 start: 200,
-                rate_mireds_per_sec: 1,
-                min_mireds: 154,
-                max_mireds: 370,
+                rate_per_sec: 1,
+                min: 154,
+                max: 370,
             }),
             None,
-        )
+        ))
         .unwrap();
     block_on(async {
         for bytes in [

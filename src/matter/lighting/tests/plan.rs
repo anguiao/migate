@@ -1,8 +1,8 @@
 use super::super::plan::{
-    self as planner, Input, Options, Plan, PlanError, PowerPlan, Settings, State, Trajectory,
+    self as planner, Input, Options, Plan, PlanError, PowerPlan, Settings, State,
 };
+use crate::device::lighting::{ActionPlan, Task, color, hs};
 use crate::device::{LightDimension, LightProfile, TemperatureInterval};
-use crate::lighting::{Task, color, hs};
 
 /// A valid published light profile. Bounds are always derived from the logical
 /// interval, so the planner never sees a contradictory capability combination.
@@ -28,7 +28,7 @@ fn input(profile: LightProfile, settings: Settings, state: State) -> Input {
         profile,
         settings,
         state,
-        trajectory: None,
+        hs_trajectory: false,
     }
 }
 
@@ -41,9 +41,11 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
     let profile = profile(false);
     let settings = Settings::default();
     for wire in [0, 1] {
-        let Plan::Execute {
+        let Plan::Execute(ActionPlan {
             task: Task::Level(task),
-        } = planner::move_to_level(
+            power,
+            ..
+        }) = planner::move_to_level(
             wire,
             true,
             Some(0),
@@ -54,10 +56,13 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
         else {
             panic!("expected a level execution")
         };
-        assert_eq!(task.frame(0), (1, true, Some(false)));
-        let Plan::Execute {
+        assert_eq!(task.frame(0), (1, true));
+        assert_eq!(power.final_frame, Some(false));
+        let Plan::Execute(ActionPlan {
             task: Task::Level(task),
-        } = planner::move_to_level(
+            power,
+            ..
+        }) = planner::move_to_level(
             wire,
             false,
             Some(0),
@@ -68,7 +73,8 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
         else {
             panic!("expected a level execution")
         };
-        assert_eq!(task.frame(0), (1, true, None));
+        assert_eq!(task.frame(0), (1, true));
+        assert_eq!(power.final_frame, None);
     }
     assert_eq!(
         planner::move_to_level(
@@ -92,9 +98,10 @@ fn wire_zero_clamps_minimum_and_invalid_or_ignored_requests_do_not_create_tasks(
         .unwrap(),
         Plan::Ignore
     ));
-    let Plan::Execute {
+    let Plan::Execute(ActionPlan {
         task: Task::Level(task),
-    } = planner::step(
+        ..
+    }) = planner::step(
         false,
         planner::StepMode::Up,
         255,
@@ -144,7 +151,7 @@ fn options_gate_ignored_commands_but_invalid_bits_fail_before_ignoring() {
             &input(profile, settings, state)
         )
         .unwrap(),
-        Plan::Execute { .. }
+        Plan::Execute(_)
     ));
     settings.level_options = 0;
     assert!(matches!(
@@ -156,7 +163,7 @@ fn options_gate_ignored_commands_but_invalid_bits_fail_before_ignoring() {
             &input(profile, settings, state)
         )
         .unwrap(),
-        Plan::Execute { .. }
+        Plan::Execute(_)
     ));
     assert!(matches!(
         planner::move_to_level(
@@ -189,7 +196,7 @@ fn options_gate_ignored_commands_but_invalid_bits_fail_before_ignoring() {
             &input(profile, settings, state)
         )
         .unwrap(),
-        Plan::Execute { .. }
+        Plan::Execute(_)
     ));
     assert!(matches!(
         planner::move_to_color(
@@ -212,7 +219,7 @@ fn options_gate_ignored_commands_but_invalid_bits_fail_before_ignoring() {
             &input(profile, settings, state)
         )
         .unwrap(),
-        Plan::Execute { .. }
+        Plan::Execute(_)
     ));
     assert_eq!(
         planner::stop_move_step(options(2, 0), &input(profile, settings, state)).unwrap_err(),
@@ -232,15 +239,20 @@ fn on_level_presets_and_repeated_power_keep_the_existing_level() {
         ..Settings::default()
     };
     let profile = profile(false);
-    let PowerPlan::Begin { task, power } = planner::power(
+    let PowerPlan::Begin(ActionPlan {
+        task: Task::Level(task),
+        power,
+        ..
+    }) = planner::power(
         crate::device::Command::On,
         &input(profile, settings, feedback(Some(false), Some(60))),
     )
-    .unwrap() else {
+    .unwrap()
+    else {
         panic!("expected an on-level preset")
     };
-    assert!(power);
-    assert_eq!(task.frame(0), (1, true, None), "the preset is constant");
+    assert_eq!(power.final_frame, Some(true));
+    assert_eq!(task.frame(0), (1, true), "the preset is constant");
     assert!(matches!(
         planner::power(
             crate::device::Command::On,
@@ -249,15 +261,20 @@ fn on_level_presets_and_repeated_power_keep_the_existing_level() {
         .unwrap(),
         PowerPlan::Execute(crate::device::Command::On)
     ));
-    let PowerPlan::Begin { task, power } = planner::power(
+    let PowerPlan::Begin(ActionPlan {
+        task: Task::Level(task),
+        power,
+        ..
+    }) = planner::power(
         crate::device::Command::Off,
         &input(profile, settings, feedback(Some(true), Some(60))),
     )
-    .unwrap() else {
+    .unwrap()
+    else {
         panic!("expected an off-level preset")
     };
-    assert!(!power);
-    assert_eq!(task.frame(0), (1, true, None), "the off target is constant");
+    assert_eq!(power.final_frame, Some(false));
+    assert_eq!(task.frame(0), (1, true), "the off target is constant");
     assert!(matches!(
         planner::power(
             crate::device::Command::Off,
@@ -286,18 +303,19 @@ fn ct_targets_clamp_to_published_bounds_and_validate_required_ranges() {
         ..State::default()
     };
     let input = input(profile, settings, state);
-    let Plan::Execute {
+    let Plan::Execute(ActionPlan {
         task:
-            Task::Color(color::Task::ColorTemperatureMoveTo {
+            Task::Color(color::Task::TemperatureMoveTo {
                 start,
-                target_mireds,
+                target,
                 transition_ms,
             }),
-    } = planner::move_to_color_temperature(100, 0, options(0, 0), &input).unwrap()
+        ..
+    }) = planner::move_to_color_temperature(100, 0, options(0, 0), &input).unwrap()
     else {
         panic!("expected a temperature execution")
     };
-    assert_eq!((start, target_mireds, transition_ms), (200, 154, 0));
+    assert_eq!((start, target, transition_ms), (200, 154, 0));
     assert_eq!(
         planner::move_to_color_temperature(
             100,
@@ -322,14 +340,15 @@ fn ct_targets_clamp_to_published_bounds_and_validate_required_ranges() {
         },
         ..input
     };
-    let Plan::Execute {
+    let Plan::Execute(ActionPlan {
         task:
-            Task::Color(color::Task::ColorTemperatureMoveTo {
-                target_mireds,
+            Task::Color(color::Task::TemperatureMoveTo {
+                target,
                 transition_ms,
                 ..
             }),
-    } = planner::step_color_temperature(
+        ..
+    }) = planner::step_color_temperature(
         planner::StepMode::Up,
         10,
         100,
@@ -342,7 +361,7 @@ fn ct_targets_clamp_to_published_bounds_and_validate_required_ranges() {
     else {
         panic!("expected a temperature execution")
     };
-    assert_eq!((target_mireds, transition_ms), (370, 2000));
+    assert_eq!((target, transition_ms), (370, 2000));
     assert_eq!(
         planner::move_color_temperature(planner::MoveMode::Up, 1, 300, 200, options(0, 0), &input)
             .unwrap_err(),
@@ -351,7 +370,7 @@ fn ct_targets_clamp_to_published_bounds_and_validate_required_ranges() {
 }
 
 #[test]
-fn hs_commands_resume_the_current_trajectory_and_stop_only_hs() {
+fn hs_commands_request_preserving_the_other_axis_and_stop_only_hs() {
     let profile = profile(true);
     let settings = Settings::default();
     let state = State {
@@ -362,52 +381,30 @@ fn hs_commands_resume_the_current_trajectory_and_stop_only_hs() {
         }),
         ..State::default()
     };
-    let trajectory = Trajectory {
-        task: color::Task::Hs(hs::HsTask {
-            hue: hs::HueAxis::move_at(0.0, 20.0),
-            saturation: hs::SaturationAxis::move_at(0.0, 10.0),
-        }),
-        elapsed_ms: 500,
-        current: true,
-    };
     let input = Input {
         profile,
         settings,
         state,
-        trajectory: Some(trajectory),
+        hs_trajectory: true,
     };
-    let Plan::Execute {
+    let Plan::Execute(ActionPlan {
         task: Task::Color(color::Task::Hs(task)),
-    } = planner::move_hue(planner::MoveMode::Up, 20, options(0, 0), &input).unwrap()
+        retain_hs,
+        ..
+    }) = planner::move_hue(planner::MoveMode::Up, 20, options(0, 0), &input).unwrap()
     else {
         panic!("expected an HS execution")
     };
-    assert_eq!(task.hue, hs::HueAxis::move_at(10.0, 20.0));
-    assert_eq!(
-        task.saturation,
-        hs::HsTask {
-            hue: hs::HueAxis::move_at(0.0, 20.0),
-            saturation: hs::SaturationAxis::move_at(0.0, 10.0),
-        }
-        .resume(500)
-        .saturation,
-        "the other axis keeps its original timeline"
-    );
+    assert_eq!(task.hue, hs::HueAxis::move_at(10.0, 20.0, 254.0));
+    assert_eq!(task.saturation, hs::SaturationAxis::hold(100.0));
+    assert!(matches!(retain_hs, Some(hs::AxisKind::Saturation)));
 
     assert!(matches!(
         planner::move_hue(planner::MoveMode::Stop, 0, options(0, 0), &input).unwrap(),
         Plan::Stop(LightDimension::Color)
     ));
     let ct_input = Input {
-        trajectory: Some(Trajectory {
-            task: color::Task::ColorTemperatureMoveTo {
-                start: 200,
-                target_mireds: 300,
-                transition_ms: 1000,
-            },
-            elapsed_ms: 100,
-            current: true,
-        }),
+        hs_trajectory: false,
         ..input
     };
     assert!(matches!(

@@ -1,5 +1,5 @@
 use super::super::{Lighting, plan, plan_error};
-use crate::{device::LightDimension, lighting::hs};
+use crate::device::{LightDimension, lighting::hs};
 use rs_matter::{
     dm::{Cluster, InvokeContext, ReadContext, WriteContext, clusters::decl::color_control as c},
     error::{Error, ErrorCode},

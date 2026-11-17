@@ -1,5 +1,5 @@
 use super::*;
-use crate::lighting::hs;
+use crate::device::lighting::hs;
 use c::ClusterAsyncHandler as _;
 
 #[derive(Clone, Copy)]
@@ -14,7 +14,7 @@ fn check_hue_254_endpoint(outcome: FinalOutcome) {
     function
         .observe_light(LightPatch {
             power: Some(true),
-            color: Some(hs::hs_to_rgb(hs::Hs {
+            color: Some(coordinates::hs_to_rgb(hs::Hs {
                 hue: 240.0,
                 saturation: 254.0,
             })),

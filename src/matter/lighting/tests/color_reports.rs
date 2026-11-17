@@ -1,5 +1,5 @@
 use super::*;
-use crate::lighting::hs;
+use crate::device::lighting::hs;
 
 fn reported(light: &Lighting) -> Vec<u32> {
     let mut attributes: Vec<_> = collect_reports(light)
@@ -238,16 +238,19 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
                 start_y: 21627,
                 rate_x: -1000,
                 rate_y: 0,
+                maximum: super::super::color::XY_MAX,
             }
         } else {
-            ColorTask::ColorTemperatureMove {
+            ColorTask::TemperatureMove {
                 start: 200,
-                rate_mireds_per_sec: 10,
-                min_mireds: 154,
-                max_mireds: 370,
+                rate_per_sec: 10,
+                min: 154,
+                max: 370,
             }
         };
-        let action = light.begin(LightingTask::Color(task), None).unwrap();
+        let action = light
+            .begin(action_plan(LightingTask::Color(task), None))
+            .unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
@@ -272,11 +275,12 @@ fn mode_boundary_flushes_the_new_group_and_discards_the_old_quiet_report() {
             assert_eq!(
                 reported(&light),
                 if rgb {
-                    vec![0, 1, 3, 4, 7, 8, 0x4001]
+                    vec![0, 1, 2, 3, 4, 7, 8, 0x4001]
                 } else {
-                    vec![0, 1, 3, 4, 8, 0x4001]
+                    vec![0, 1, 2, 3, 4, 8, 0x4001]
                 }
             );
+            assert_eq!(light.remaining_time(LightDimension::Color), 0);
             assert!(!light.report.is_pending());
             clock.set(1000);
             assert!(reported(&light).is_empty());
@@ -308,13 +312,15 @@ fn short_color_transitions_report_the_active_group_at_the_end() {
                 transition_ms: 100,
             }
         } else {
-            ColorTask::ColorTemperatureMoveTo {
+            ColorTask::TemperatureMoveTo {
                 start: 200,
-                target_mireds: 300,
+                target: 300,
                 transition_ms: 100,
             }
         };
-        let action = light.begin(LightingTask::Color(task), None).unwrap();
+        let action = light
+            .begin(action_plan(LightingTask::Color(task), None))
+            .unwrap();
         block_on(async {
             accept(&function, frame(&mut receiver).await);
             action.accepted().await.unwrap();
@@ -352,13 +358,13 @@ fn gray_rgb_hue_selection_survives_a_temperature_mode_round_trip() {
         })
         .unwrap();
     let action = light
-        .begin(
+        .begin(action_plan(
             LightingTask::Color(ColorTask::Hs(hs::HsTask::stationary(hs::Hs {
                 hue: 170.0,
                 saturation: 0.0,
             }))),
             None,
-        )
+        ))
         .unwrap();
     block_on(async {
         accept(&function, frame(&mut receiver).await);
