@@ -25,7 +25,6 @@ use std::{net::UdpSocket, rc::Rc, time::Duration};
 const WINDOW_SECONDS: u16 = 900;
 
 #[cfg(test)]
-#[path = "tests/bridge.rs"]
 mod tests;
 
 /// Service registrations survive individual Matter runs.

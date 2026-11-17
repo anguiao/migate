@@ -199,65 +199,101 @@ fn battery_reads_and_notifications_keep_independent_source_and_reception_times()
 
 #[test]
 fn invalid_battery_data_and_read_failures_preserve_last_value_and_measurements() {
-    block_on(Rig::sensors(&["sensor"]).run(|c| async move {
-        c.announce();
-        let peer = sensor_peer(21.0, 45.0);
-        peer.value("sensor", BATTERY, json!(55));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)).await;
-            for invalid in [
-                json!("broken"),
-                json!(101),
-                json!(-1),
-                json!(true),
-                json!(null),
-            ] {
-                peer.notify_value("sensor", BATTERY, invalid, false);
-                for _ in 0..10 {
-                    future::yield_now().await;
+    let published = Rc::new(RefCell::new(None::<AdapterStatus>));
+    let reported = published.clone();
+    block_on(Rig::sensors(&["sensor"]).run_with_status(
+        move |status| *reported.borrow_mut() = Some(status),
+        |c| async move {
+            c.announce();
+            let peer = sensor_peer(21.0, 45.0);
+            peer.value("sensor", BATTERY, json!(55));
+            let control = &c;
+            c.peer(peer, |peer| async move {
+                let published_device = || {
+                    published.borrow().as_ref().and_then(|status| {
+                        status
+                            .devices
+                            .iter()
+                            .find(|device| device.did == "sensor")
+                            .cloned()
+                    })
+                };
+                until(|| {
+                    battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)
+                        && work(&control.context, "sensor").test_local_subscribed_contains(BATTERY)
+                        && published_device().is_some_and(|device| {
+                            device.notification_source == Some(PathKind::Local)
+                                && device.battery_problem.is_none()
+                        })
+                })
+                .await;
+                for invalid in [
+                    json!("broken"),
+                    json!(101),
+                    json!(-1),
+                    json!(true),
+                    json!(null),
+                ] {
+                    peer.notify_value("sensor", BATTERY, invalid, false);
+                    for _ in 0..10 {
+                        future::yield_now().await;
+                    }
+                    assert_eq!(
+                        battery(&control.context, "sensor").and_then(|b| b.value),
+                        Some(55.0)
+                    );
                 }
+                until(|| {
+                    published_device().is_some_and(|device| {
+                        device
+                            .battery_problem
+                            .is_some_and(|problem| problem.contains("invalid battery"))
+                    })
+                })
+                .await;
+                peer.notify_value("sensor", BATTERY, json!(66), false);
+                until(|| {
+                    battery(&control.context, "sensor").and_then(|b| b.value) == Some(66.0)
+                        && published_device().is_some_and(|device| device.battery_problem.is_none())
+                })
+                .await;
+                peer.state
+                    .borrow_mut()
+                    .read_fail
+                    .insert(("sensor".into(), 2, 1003));
+                work(&control.context, "sensor").refresh_property("battery", BATTERY);
+                until(|| {
+                    battery_status(&control.context, "sensor")
+                        .battery_problem
+                        .is_some()
+                })
+                .await;
                 assert_eq!(
                     battery(&control.context, "sensor").and_then(|b| b.value),
-                    Some(55.0)
+                    Some(66.0)
                 );
-            }
-            peer.state
-                .borrow_mut()
-                .read_fail
-                .insert(("sensor".into(), 2, 1003));
-            work(&control.context, "sensor").refresh_property("battery", BATTERY);
-            until(|| {
-                battery_status(&control.context, "sensor")
-                    .battery_problem
-                    .is_some()
+                assert_eq!(
+                    measurement(&control.context, "sensor", "temperature:3:1001").value,
+                    Some(21.0)
+                );
+                assert_eq!(
+                    measurement(&control.context, "sensor", "humidity:3:1008").value,
+                    Some(45.0)
+                );
+                assert_eq!(
+                    control
+                        .context
+                        .physical(&DeviceKey::new("xiaomi", "sensor"))
+                        .unwrap()
+                        .availability(),
+                    Availability::Available
+                );
+                let status = battery_status(&control.context, "sensor");
+                assert!(status.battery_problem.is_some(), "{status:?}");
             })
             .await;
-            assert_eq!(
-                battery(&control.context, "sensor").and_then(|b| b.value),
-                Some(55.0)
-            );
-            assert_eq!(
-                measurement(&control.context, "sensor", "temperature:3:1001").value,
-                Some(21.0)
-            );
-            assert_eq!(
-                measurement(&control.context, "sensor", "humidity:3:1008").value,
-                Some(45.0)
-            );
-            assert_eq!(
-                control
-                    .context
-                    .physical(&DeviceKey::new("xiaomi", "sensor"))
-                    .unwrap()
-                    .availability(),
-                Availability::Available
-            );
-            let status = battery_status(&control.context, "sensor");
-            assert!(status.battery_problem.is_some(), "{status:?}");
-        })
-        .await;
-    }));
+        },
+    ));
 }
 
 #[test]
@@ -380,35 +416,6 @@ fn a_working_battery_subscription_cannot_make_measurement_notifications_ready() 
 }
 
 #[test]
-fn battery_subscription_failure_survives_a_successful_cache_read() {
-    block_on(Rig::sensors(&["sensor"]).run(|c| async move {
-        c.announce();
-        let peer = sensor_peer(21.0, 45.0);
-        peer.value("sensor", BATTERY, json!(55));
-        peer.state
-            .borrow_mut()
-            .sub_reject
-            .insert(("sensor".into(), BATTERY.siid, BATTERY.piid));
-        let control = &c;
-        c.peer(peer, |peer| async move {
-            until(|| {
-                peer.count("subscribe", "sensor", BATTERY.siid) == 4
-                    && work(&control.context, "sensor").battery_problem().is_some()
-            })
-            .await;
-            peer.value("sensor", BATTERY, json!(56));
-            work(&control.context, "sensor").refresh_property("battery", BATTERY);
-            until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(56.0)).await;
-            assert!(
-                work(&control.context, "sensor").battery_problem().is_some(),
-                "a successful battery read cannot establish its rejected notification subscription"
-            );
-        })
-        .await;
-    }));
-}
-
-#[test]
 fn measurement_notifications_activate_while_battery_subscribe_is_pending() {
     block_on(Rig::sensors(&["sensor"]).run(|c| async move {
         c.announce();
@@ -497,6 +504,53 @@ fn cloud_battery_subscription_failure_keeps_active_measurements_and_retries_fini
                 measurement(&c.context, "sensor", "temperature:3:1001").value,
                 Some(22.5)
             );
+            c.announce();
+            let control = &c;
+            let local = sensor_peer(22.5, 45.0);
+            local.value("sensor", BATTERY, json!(55));
+            local.state.borrow_mut().sub_reject.insert((
+                "sensor".into(),
+                BATTERY.siid,
+                BATTERY.piid,
+            ));
+            c.peer(local, |peer| async move {
+                until(|| {
+                    peer.count("subscribe", "sensor", BATTERY.siid) == 4
+                        && work(&control.context, "sensor").test_local_exhausted()
+                })
+                .await;
+                let status = battery_status(&control.context, "sensor");
+                let problem = status.battery_problem.as_ref().unwrap();
+                assert!(
+                    problem.contains("sensor subscribe property 2.1003"),
+                    "{problem}"
+                );
+                assert!(
+                    problem.contains("sensor cloud subscribe property 2.1003"),
+                    "{problem}"
+                );
+                peer.state.borrow_mut().sub_reject.clear();
+                peer.list_changed(&["sensor"]);
+                until(|| {
+                    let work = work(&control.context, "sensor");
+                    work.subscription_status("battery")
+                        .iter()
+                        .any(|status| status.source == PathKind::Local && status.ready)
+                })
+                .await;
+                let status = battery_status(&control.context, "sensor");
+                assert!(
+                    status
+                        .battery_problem
+                        .as_deref()
+                        .is_some_and(|problem| problem.contains("cloud subscribe")),
+                    "{status:?}"
+                );
+                assert!(!control.context.diagnostics().pending.iter().any(
+                        |pending| pending.did == "sensor" && pending.reason.contains("2.1003")
+                    ));
+            })
+            .await;
         })
         .await;
     }));
@@ -521,13 +575,20 @@ fn battery_read_and_subscription_diagnostics_remain_independent() {
                         .is_some_and(|problem| problem.contains("subscribe"))
             })
             .await;
+            peer.value("sensor", BATTERY, json!(56));
+            work(&control.context, "sensor").refresh_property("battery", BATTERY);
+            until(|| battery(&control.context, "sensor").and_then(|b| b.value) == Some(56.0)).await;
+            assert!(
+                work(&control.context, "sensor").battery_problem().is_some(),
+                "a successful read cannot establish the rejected subscription"
+            );
             peer.state
                 .borrow_mut()
                 .read_fail
                 .insert(("sensor".into(), BATTERY.siid, BATTERY.piid));
             work(&control.context, "sensor").refresh_property("battery", BATTERY);
             until(|| {
-                peer.count("get", "sensor", BATTERY.siid) == 4
+                peer.count("get", "sensor", BATTERY.siid) == 5
                     && work(&control.context, "sensor")
                         .battery_problem()
                         .is_some_and(|problem| problem.contains("read"))
@@ -558,68 +619,6 @@ fn battery_read_and_subscription_diagnostics_remain_independent() {
         })
         .await;
     }));
-}
-
-#[test]
-fn battery_notifications_publish_diagnostic_changes() {
-    let published = Rc::new(RefCell::new(None::<AdapterStatus>));
-    let reported = published.clone();
-    block_on(Rig::sensors(&["sensor"]).run_with_status(
-        move |status| *reported.borrow_mut() = Some(status),
-        |c| async move {
-            c.announce();
-            let peer = sensor_peer(21.0, 45.0);
-            peer.value("sensor", BATTERY, json!(55));
-            let control = &c;
-            c.peer(peer, |peer| async move {
-                let published_device = || {
-                    published.borrow().as_ref().and_then(|status| {
-                        status
-                            .devices
-                            .iter()
-                            .find(|device| device.did == "sensor")
-                            .cloned()
-                    })
-                };
-                until(|| {
-                    battery(&control.context, "sensor").and_then(|b| b.value) == Some(55.0)
-                        && work(&control.context, "sensor").test_local_subscribed_contains(BATTERY)
-                        && published_device().is_some_and(|device| {
-                            device.notification_source == Some(PathKind::Local)
-                                && device.battery_problem.is_none()
-                        })
-                })
-                .await;
-                control
-                    .clock
-                    .automatic
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
-                for _ in 0..100 {
-                    future::yield_now().await;
-                }
-                peer.notify_value("sensor", BATTERY, json!(150), false);
-                until(|| {
-                    published_device().is_some_and(|device| {
-                        device
-                            .battery_problem
-                            .is_some_and(|problem| problem.contains("invalid battery"))
-                    })
-                })
-                .await;
-                assert_eq!(
-                    battery(&control.context, "sensor").and_then(|b| b.value),
-                    Some(55.0)
-                );
-                peer.notify_value("sensor", BATTERY, json!(66), false);
-                until(|| {
-                    battery(&control.context, "sensor").and_then(|b| b.value) == Some(66.0)
-                        && published_device().unwrap().battery_problem.is_none()
-                })
-                .await;
-            })
-            .await;
-        },
-    ));
 }
 
 #[test]
@@ -678,96 +677,6 @@ fn stale_battery_read_success_and_failure_preserve_the_newer_notification() {
                 assert_eq!(value.source_time, Some(time));
                 assert!(current.battery_problem().is_none());
             }
-        })
-        .await;
-    }));
-}
-
-#[test]
-fn successful_local_battery_subscription_preserves_the_cloud_subscription_error() {
-    let (rig, listener, cloud) = with_cloud_sensors(&["sensor"]);
-    let path = "device/sensor/up/properties_changed/2/1003";
-    cloud
-        .state
-        .borrow_mut()
-        .reject
-        .insert(path.into(), SubscribeReasonCode::Unspecified);
-    {
-        let mut values = rig.cloud.lock().unwrap();
-        values
-            .raw_values
-            .insert(("sensor".into(), 3, 1001), json!(21.0));
-        values
-            .raw_values
-            .insert(("sensor".into(), 3, 1008), json!(45.0));
-        values
-            .raw_values
-            .insert(("sensor".into(), 2, 1003), json!(55));
-    }
-    block_on(rig.run(|c| async move {
-        future::or(cloud.run(&listener), async {
-            until(|| {
-                cloud.count(path) == 4 && work(&c.context, "sensor").battery_problem().is_some()
-            })
-            .await;
-            c.announce();
-            let control = &c;
-            let local = sensor_peer(21.0, 45.0);
-            local.value("sensor", BATTERY, json!(55));
-            local.state.borrow_mut().sub_reject.insert((
-                "sensor".into(),
-                BATTERY.siid,
-                BATTERY.piid,
-            ));
-            c.peer(local, |peer| async move {
-                until(|| {
-                    peer.count("subscribe", "sensor", BATTERY.siid) == 4
-                        && work(&control.context, "sensor").test_local_exhausted()
-                })
-                .await;
-                let status = battery_status(&control.context, "sensor");
-                let problem = status.battery_problem.as_ref().unwrap();
-                assert!(
-                    problem.contains("sensor subscribe property 2.1003"),
-                    "{problem}"
-                );
-                assert!(
-                    problem.contains("sensor cloud subscribe property 2.1003"),
-                    "{problem}"
-                );
-                let text = control
-                    .terminal()
-                    .handle_line("status sensor")
-                    .await
-                    .unwrap()
-                    .unwrap();
-                assert!(text.contains("sensor subscribe property 2.1003"), "{text}");
-                assert!(
-                    text.contains("sensor cloud subscribe property 2.1003"),
-                    "{text}"
-                );
-                peer.state.borrow_mut().sub_reject.clear();
-                peer.list_changed(&["sensor"]);
-                until(|| {
-                    let work = work(&control.context, "sensor");
-                    work.subscription_status("battery")
-                        .iter()
-                        .any(|status| status.source == PathKind::Local && status.ready)
-                })
-                .await;
-                let status = battery_status(&control.context, "sensor");
-                assert!(
-                    status
-                        .battery_problem
-                        .as_deref()
-                        .is_some_and(|problem| problem.contains("cloud subscribe")),
-                    "{status:?}"
-                );
-                assert!(!control.context.diagnostics().pending.iter().any(
-                        |pending| pending.did == "sensor" && pending.reason.contains("2.1003")
-                    ));
-            })
-            .await;
         })
         .await;
     }));

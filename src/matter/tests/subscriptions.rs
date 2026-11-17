@@ -2,7 +2,7 @@ use super::super::{
     model::{self, basic_info},
     storage::StoreAdapter,
 };
-use super::support::{entry, model_handler, next_power, single_entry};
+use super::support::{entry, model_handler, single_entry};
 use crate::{
     device::{Availability, CommandError},
     storage::Store,

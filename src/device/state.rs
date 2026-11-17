@@ -484,5 +484,4 @@ impl FunctionChanges {
 }
 
 #[cfg(test)]
-#[path = "tests/identity.rs"]
-mod test_identity;
+mod tests;

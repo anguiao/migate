@@ -107,7 +107,7 @@ fn group_install_uses_the_latest_confirmed_name_after_a_held_description_load() 
 }
 
 #[test]
-fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry() {
+fn incomplete_member_or_group_description_holds_the_batch_until_both_recover() {
     let instance = generic_rgb();
     let rig = group_rig(
         &[
@@ -193,11 +193,37 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
         ));
         let mut revised = instance;
         revised["type"] = json!(urn);
+        c.cloud.lock().unwrap().catalog_groups[0]["spec_type"] = Value::Null;
+        c.context.request_sync();
+        until(|| {
+            c.context
+                .directory
+                .borrow()
+                .group("group-1")
+                .is_some_and(|group| group.instance_type.is_none())
+        })
+        .await;
         c.cloud
             .lock()
             .unwrap()
             .catalog_instances
             .insert(urn.into(), revised.clone());
+        c.context.request_sync();
+        until(|| {
+            let directory = c.context.directory.borrow();
+            directory.devices["member-a"]
+                .latest_description
+                .as_ref()
+                .is_some_and(|description| description.raw.instance_type == urn)
+                && directory
+                    .group("group-1")
+                    .is_some_and(|group| group.instance_type.is_none())
+        })
+        .await;
+        assert_eq!(c.store.devices().load_configuration().unwrap(), before);
+        assert_eq!(c.context.graph.borrow().rules, rules);
+        c.cloud.lock().unwrap().catalog_groups[0] =
+            group_record("group-record", "group-1", &["member-a"], false);
         c.context.request_sync();
         until(|| {
             c.publication
@@ -251,66 +277,6 @@ fn failed_member_description_fetch_keeps_the_committed_group_graph_until_retry()
         assert!(c.context.diagnostics().pending.iter().all(|pending| {
             pending.did != "member-a" || !pending.reason.contains("invalid MIoT description")
         }));
-    }));
-}
-
-#[test]
-fn missing_group_instance_type_retains_the_committed_relation_until_restored() {
-    let instance = generic_rgb();
-    let rig = group_rig(
-        &[
-            ("member-a", "example.rgb", instance.clone()),
-            ("member-b", "example.rgb", instance),
-        ],
-        false,
-    );
-    block_on(rig.run(|c| async move {
-        c.announce();
-        until(|| c.context.group_repair("group-1").is_some()).await;
-        let before = c.store.devices().load_configuration().unwrap();
-        {
-            let mut cloud = c.cloud.lock().unwrap();
-            let mut relation = group_record("group-record", "group-1", &["member-a"], false);
-            relation["spec_type"] = Value::Null;
-            cloud.catalog_groups = vec![relation];
-            cloud.members.push("two".into());
-        }
-        c.context.request_sync();
-        until(|| {
-            c.context
-                .directory
-                .borrow()
-                .group("group-1")
-                .is_some_and(|group| group.instance_type.is_none())
-        })
-        .await;
-        until(|| {
-            c.context
-                .directory
-                .borrow()
-                .devices
-                .get("two")
-                .is_some_and(|slot| slot.latest_description.is_some())
-        })
-        .await;
-        assert_eq!(c.store.devices().load_configuration().unwrap(), before);
-        assert_eq!(c.context.graph.borrow().rules["group-1"].members.len(), 2);
-        c.cloud.lock().unwrap().catalog_groups = vec![group_record(
-            "group-record",
-            "group-1",
-            &["member-a"],
-            false,
-        )];
-        c.context.request_sync();
-        until(|| {
-            c.context.graph.borrow().rules["group-1"].members.len() == 1
-                && c.publication
-                    .current()
-                    .derived
-                    .published
-                    .contains(&DeviceKey::new("xiaomi", "two"))
-        })
-        .await;
     }));
 }
 

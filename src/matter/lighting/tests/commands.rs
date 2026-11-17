@@ -69,7 +69,7 @@ fn level_commands_link_power_on_the_planned_start_and_final_frames() {
 }
 
 #[test]
-fn ct_command_interpolates_in_mireds_and_reports_its_final_frame() {
+fn ct_commands_preserve_mired_interpolation_clipping_and_boundary_rate() {
     use crate::device::{LightProfile, TemperatureInterval};
     use c::ClusterAsyncHandler as _;
     let profile = LightProfile::ColorTemperature(TemperatureInterval::new(2500, 6500).unwrap());
@@ -128,23 +128,8 @@ fn ct_command_interpolates_in_mireds_and_reports_its_final_frame() {
         let reports = collect_reports(&light);
         assert!(reports.contains(&(0x300, 7)));
         assert!(reports.contains(&(0x300, 2)));
-    });
-}
 
-#[test]
-fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
-    use c::ClusterAsyncHandler as _;
-    setup!(false, function, receiver, light, clock, ctx);
-    function
-        .observe_light(LightPatch {
-            power: Some(true),
-            temperature_kelvin: Some(5000),
-            mode: Some(LightMode::Temperature),
-            ..Default::default()
-        })
-        .unwrap();
-    block_on(async {
-        let handler = ColorHandler::<false>(&light);
+        // A zero wire target clips to the published minimum mired value.
         let data = TLVElement::new(&[
             0x15, 0x25, 0, 0, 0, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
         ]);
@@ -179,7 +164,7 @@ fn ct_wire_zero_clips_and_step_keeps_requested_rate_at_boundary() {
         let request = frame(&mut receiver).await;
         accept(&function, request);
         invoke.await.unwrap();
-        clock.set(5000);
+        clock.set(clock.now() + 5000);
         light.advance();
         let request = frame(&mut receiver).await;
         assert!(request.final_frame);

@@ -44,6 +44,7 @@ fn measurement_notification_sources_switch_and_recover_independently() {
     let (rig, listener, cloud) = with_cloud_sensors(&["sensor"]);
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
+            until(|| cloud_active(&c, "sensor")).await;
             c.announce();
             let peer = sensor_peer(21.0, 45.0);
             peer.value("sensor", BATTERY, json!(55));
@@ -66,8 +67,11 @@ fn measurement_notification_sources_switch_and_recover_independently() {
                 until(|| {
                     sources().get("temperature:3:1001") == Some(&Some(PathKind::Local))
                         && sources().get("humidity:3:1008") == Some(&Some(PathKind::Cloud))
+                        && work(&control.context, "sensor").test_local_exhausted()
                 })
                 .await;
+                assert_cloud_subscription_fallback(control, "sensor", "humidity:3:1008", HUMIDITY)
+                    .await;
                 peer.value("sensor", TEMPERATURE, json!(22.0));
                 peer.notify_value_at("sensor", TEMPERATURE, json!(22.0), Some(100), false);
                 cloud.property_at("sensor", 3, 1008, json!(46.0));

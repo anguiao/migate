@@ -5,10 +5,7 @@ use super::super::{View, read_commands};
 use crate::{
     RuntimeError,
     app::EffectiveConfiguration,
-    device::{
-        CommandReceiver, CommandRequest, DeviceKey, DeviceRequest, PhysicalDevice,
-        PhysicalDeviceDescription,
-    },
+    device::{DeviceKey, PhysicalDevice, PhysicalDeviceDescription},
     storage::{DeviceStore, StorageError, Store},
     terminal::AuthStatus,
     xiaomi::{
@@ -18,13 +15,6 @@ use crate::{
     },
 };
 use std::rc::Rc;
-
-pub(super) async fn next_power(receiver: &mut CommandReceiver) -> Option<CommandRequest> {
-    match receiver.next_operation().await? {
-        DeviceRequest::Power(request) => Some(request),
-        _ => panic!("unexpected lighting request"),
-    }
-}
 
 pub(super) fn add_device(store: &Store, description: &PhysicalDeviceDescription) {
     let mut configuration = store.devices().load_configuration().unwrap();

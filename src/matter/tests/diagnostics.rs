@@ -59,6 +59,11 @@ fn failed_reads_report_the_path_without_reporting_values_or_buffer_retries() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+            "child test did not execute exactly one assertion suite:\n{stdout}"
+        );
         return;
     }
     log::set_logger(&CAPTURE).unwrap();

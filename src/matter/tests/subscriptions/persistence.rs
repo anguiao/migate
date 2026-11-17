@@ -49,7 +49,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
         let services = async {
             let adapter = async {
                 loop {
-                    let request = next_power(&mut receiver).await.unwrap();
+                    let request = receiver.next_power().await.unwrap();
                     if let Some(error) = rejection.borrow_mut().take() {
                         request.reject(error);
                     } else {

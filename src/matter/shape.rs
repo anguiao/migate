@@ -139,5 +139,4 @@ pub(crate) fn fixed_shape_with_battery<'a>(
 }
 
 #[cfg(test)]
-#[path = "tests/shape.rs"]
 mod tests;

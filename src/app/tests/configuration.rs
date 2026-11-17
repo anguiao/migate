@@ -132,15 +132,8 @@ fn descriptions_from_the_previous_home_are_not_visible_for_the_same_did() {
     let source = AppSource::new(&store, Some(outlet()));
     let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
     source.scope(crate::configuration::Scope {
-        uid: app
-            .current()
-            .configuration
-            .scope
-            .as_ref()
-            .unwrap()
-            .uid
-            .clone(),
         home_id: "other-home".into(),
+        ..app.current().configuration.scope.clone().unwrap()
     });
     source.describe(outlet());
     assert!(app.accessible_descriptions(&app.current()).is_empty());

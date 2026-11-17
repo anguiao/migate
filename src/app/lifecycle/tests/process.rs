@@ -1,7 +1,8 @@
 //! Isolated processes exercise the ordinary application lifecycle and real Matter sockets.
-#[path = "../../../tests/support/process.rs"]
+// This helper file is shared by the two test crates.
+#[path = "../../../../tests/support/process.rs"]
 mod process_support;
-use super::outlet;
+use crate::app::tests::support::outlet;
 use crate::xiaomi::adapter::tests::app_source::AppSource;
 use process_support::{Stream, TestProcess};
 use std::{fs, net::UdpSocket, path::Path, process::Command, time::Duration};

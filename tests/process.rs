@@ -1,11 +1,11 @@
-#[path = "support/process.rs"]
-mod process_support;
-#[path = "support/xiaomi_fixture.rs"]
-mod xiaomi_fixture;
+mod support;
 use migate::storage::{TokenSet, XiaomiRecord};
-use process_support::{Stream, TIMEOUT, TestProcess};
 use rusqlite::Connection;
 use std::{process::Command, thread};
+use support::{
+    process::{Stream, TIMEOUT, TestProcess},
+    xiaomi_fixture,
+};
 
 #[test]
 fn invalid_arguments_exit_without_starting_services() {

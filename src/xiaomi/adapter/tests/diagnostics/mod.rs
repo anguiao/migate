@@ -5,14 +5,12 @@ mod deadlines;
 mod event_scope;
 mod history;
 mod publishing;
-mod subscriptions;
 
 fn recorded(c: &Control, did: &str) -> Option<String> {
     c.context.directory.borrow().devices[did]
         .routing_history
         .as_ref()
         .and_then(|history| history.reason.clone())
-        .clone()
 }
 
 #[test]

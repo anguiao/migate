@@ -1,4 +1,8 @@
 use super::*;
+use crate::xiaomi::{
+    adapter::model::SubscriptionBinding,
+    capability::{EventBinding, PropertyBinding},
+};
 
 #[test]
 fn cloud_notifications_activate_after_subscription_and_update_cloud_only_device() {
@@ -389,6 +393,13 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
                 async_io::Timer::after(Duration::from_millis(20)).await;
+                assert_cloud_subscription_fallback(
+                    control,
+                    "one",
+                    "outlet:2",
+                    PropertyBinding { siid: 2, piid: 1 },
+                )
+                .await;
                 local.state.borrow_mut().sub_reject.clear();
 
                 cloud.send(Packet::Disconnect(Disconnect::new()));
@@ -638,13 +649,44 @@ fn property_and_event_subscriptions_remain_ready_on_both_valid_sources() {
                         .is_some_and(|source| source.kind() == PathKind::Local)
                 })
                 .await;
-                let subscriptions = work.subscription_status("motion:2:1024");
-                assert!(subscriptions.iter().any(|status| matches!(
-                    status.binding,
-                    super::super::super::model::SubscriptionBinding::Event(_)
-                )));
+                let status = control.context.diagnostics();
+                let subscriptions = &status
+                    .devices
+                    .iter()
+                    .find(|device| device.did == "one")
+                    .unwrap()
+                    .functions
+                    .iter()
+                    .find(|function| function.function == "motion:2:1024")
+                    .unwrap()
+                    .subscriptions;
+                assert_eq!(subscriptions.len(), 4);
+                for source in [PathKind::Local, PathKind::Cloud] {
+                    for binding in [
+                        SubscriptionBinding::Property(PropertyBinding {
+                            siid: 2,
+                            piid: 1024,
+                        }),
+                        SubscriptionBinding::Event(EventBinding {
+                            siid: 2,
+                            eiid: 1008,
+                        }),
+                    ] {
+                        assert_eq!(
+                            subscriptions
+                                .iter()
+                                .filter(
+                                    |status| status.source == source && status.binding == binding
+                                )
+                                .count(),
+                            1
+                        );
+                    }
+                }
                 assert!(
-                    subscriptions.iter().all(|status| status.ready),
+                    subscriptions
+                        .iter()
+                        .all(|status| status.ready && status.problem.is_none()),
                     "{subscriptions:?}"
                 );
                 let local_count = local.count("subscribe", "one", 2);

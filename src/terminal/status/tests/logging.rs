@@ -5,24 +5,35 @@ use crate::{
     xiaomi::{auth::AuthService, cloud::CloudClient},
 };
 
+fn run_logger_child(test: &str) -> bool {
+    const CHILD: &str = "MIGATE_TEST_LOGGER_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        return false;
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let name = format!("{module}::{test}");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", &name, "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "logger child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("test result: ok. 1 passed; 0 failed; 0 ignored;"),
+        "child test did not run exactly once:\n{stdout}"
+    );
+    true
+}
+
 #[test]
 fn login_failure_preserves_the_report_in_logs_and_terminal() {
-    if std::env::var_os("MIGATE_TEST_LOGGER_CHILD").is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "terminal::status::tests::logging::login_failure_preserves_the_report_in_logs_and_terminal",
-                "--nocapture",
-            ])
-            .env("MIGATE_TEST_LOGGER_CHILD", "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "logger child failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if run_logger_child("login_failure_preserves_the_report_in_logs_and_terminal") {
         return;
     }
     use crate::{
@@ -87,22 +98,7 @@ fn login_failure_preserves_the_report_in_logs_and_terminal() {
 
 #[test]
 fn startup_login_command_is_a_single_prefixed_log_record() {
-    if std::env::var_os("MIGATE_TEST_LOGGER_CHILD").is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "terminal::status::tests::logging::startup_login_command_is_a_single_prefixed_log_record",
-                "--nocapture",
-            ])
-            .env("MIGATE_TEST_LOGGER_CHILD", "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "logger child failed:\n{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+    if run_logger_child("startup_login_command_is_a_single_prefixed_log_record") {
         return;
     }
     use crate::xiaomi::adapter::*;

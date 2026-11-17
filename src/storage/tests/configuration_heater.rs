@@ -64,27 +64,6 @@ fn v13_round_trips_light_and_heating_only_bindings() {
         ),
         (3, 8, 25, 45, 1)
     );
-    let stored: Value = serde_json::from_str(&raw(&store)).unwrap();
-    assert!(
-        stored["devices"][0]["native"]["functions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|function| function["kind"] == "heater")
-    );
-}
-
-#[test]
-fn stored_heater_rejects_float_target_temperature_encoding() {
-    let directory = tempfile::tempdir().unwrap();
-    let store = crate::storage::Store::open(directory.path()).unwrap();
-    let planned = next(
-        &CommittedConfiguration::empty(),
-        scope("account", "home"),
-        vec![SourceFixture::new("bath", MODEL, v13())],
-    )
-    .configuration;
-    save(&store, &planned);
     let mut stored: Value = serde_json::from_str(&raw(&store)).unwrap();
     stored["devices"][0]["native"]["functions"]
         .as_array_mut()

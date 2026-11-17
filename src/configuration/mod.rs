@@ -301,5 +301,4 @@ pub(crate) fn default_device_label(model: &str, id: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "tests/mod.rs"]
 mod tests;

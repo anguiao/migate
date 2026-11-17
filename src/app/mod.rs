@@ -368,3 +368,6 @@ fn installed_function(entries: &[Rc<SourceEntry>], key: &FunctionKey) -> Option<
         .physical
         .function(&key.id)
 }
+
+#[cfg(test)]
+mod tests;

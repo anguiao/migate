@@ -1,7 +1,7 @@
 mod heater;
 mod mcn02;
 pub(crate) mod support;
-use support::{add_device, handle_line, next_power, rename, run_input, saved_description};
+use support::{add_device, handle_line, rename, run_input, saved_description};
 
 use crate::{
     device::{
@@ -69,7 +69,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
             .unwrap();
         assert!(reply.contains("Available commands:"));
         for receiver in &mut receivers {
-            assert!(poll_once(next_power(receiver)).await.is_none());
+            assert!(poll_once(receiver.next_power()).await.is_none());
         }
         for invalid in [
             "on",
@@ -93,13 +93,13 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
                 "{invalid}: {result}"
             );
             for receiver in &mut receivers {
-                assert!(poll_once(next_power(receiver)).await.is_none());
+                assert!(poll_once(receiver.next_power()).await.is_none());
             }
         }
         let (result, ()) = future::zip(
             handle_line(&devices, &store.devices(), &status, "on one outlet:2"),
             async {
-                let request = next_power(&mut receivers[0]).await.unwrap();
+                let request = receivers[0].next_power().await.unwrap();
                 devices
                     .iter()
                     .find(|device| device.key() == &DeviceKey::new("xiaomi", "one"))
@@ -114,7 +114,7 @@ fn addressing_is_explicit_and_invalid_commands_produce_no_writes() {
         let (result, ()) = future::zip(
             handle_line(&devices, &store.devices(), &status, "off multi outlet:9"),
             async {
-                let request = next_power(&mut receivers[4]).await.unwrap();
+                let request = receivers[4].next_power().await.unwrap();
                 assert!(!request.target);
                 devices
                     .iter()
@@ -178,15 +178,15 @@ fn explicit_target_does_not_redirect_a_mixed_device_command() {
                 .unwrap()
                 .unwrap();
             assert!(result.contains(expected), "{line}: {result}");
-            assert!(poll_once(next_power(&mut receivers[0])).await.is_none());
+            assert!(poll_once(receivers[0].next_power()).await.is_none());
             for receiver in &mut existing_receivers {
-                assert!(poll_once(next_power(receiver)).await.is_none());
+                assert!(poll_once(receiver.next_power()).await.is_none());
             }
         }
         let (result, ()) = future::zip(
             handle_line(&devices, &store.devices(), &status, "on mixed outlet:2"),
             async {
-                let request = next_power(&mut receivers[0]).await.unwrap();
+                let request = receivers[0].next_power().await.unwrap();
                 assert!(request.target);
                 request.accept().unwrap();
             },
@@ -254,11 +254,7 @@ fn command_diagnostics_are_sampled_only_for_reports() {
             let (result, ()) = future::zip(
                 view.handle_words(&[verb, "one", "outlet:2"], &status, diagnostics),
                 async {
-                    next_power(&mut receivers[0])
-                        .await
-                        .unwrap()
-                        .accept()
-                        .unwrap();
+                    receivers[0].next_power().await.unwrap().accept().unwrap();
                 },
             )
             .await;
@@ -552,7 +548,7 @@ fn input_recovers_and_returns_at_eof() {
             ),
             async {
                 loop {
-                    let request = next_power(&mut receivers[0]).await.unwrap();
+                    let request = receivers[0].next_power().await.unwrap();
                     devices
                         .iter()
                         .find(|device| device.key() == &DeviceKey::new("xiaomi", "one"))

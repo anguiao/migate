@@ -225,23 +225,27 @@ async fn revoke_and_readmit(c: &Control, id: &str) -> crate::device::Function {
 
 #[test]
 fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_new_sink() {
-    for code in [0, -704] {
-        let rig = Rig::new(true, &["one"]);
-        {
-            let mut cloud = rig.cloud.lock().unwrap();
-            cloud.online.insert("one".into());
-            cloud.raw_values.insert(("one".into(), 2, 1), json!(false));
-            cloud.property_code = code;
-        }
-        let (release, gate) = flume::bounded(1);
-        block_on(rig.run(|c| async move {
-            until(|| c.cloud.lock().unwrap().homes > 0).await;
+    let rig = Rig::new(true, &["one"]);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.online.insert("one".into());
+        cloud.raw_values.insert(("one".into(), 2, 1), json!(false));
+    }
+    block_on(rig.run(|c| async move {
+        until(|| c.cloud.lock().unwrap().homes > 0).await;
+        for code in [0, -704] {
             let old = function(&c.context, "one", "outlet:2");
             until(|| old.snapshot().power() == Some(Power::Off)).await;
-            c.cloud.lock().unwrap().property_gate = Some(gate);
+            let (release, gate) = flume::bounded(1);
+            let writes = c.cloud.lock().unwrap().property_writes.len();
+            {
+                let mut cloud = c.cloud.lock().unwrap();
+                cloud.property_code = code;
+                cloud.property_gate = Some(gate);
+            }
             let mut command = Box::pin(old.execute(Command::On));
             assert!(poll_once(command.as_mut()).await.is_none());
-            until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
+            until(|| c.cloud.lock().unwrap().property_writes.len() == writes + 1).await;
             let mut queued = Box::pin(old.execute(Command::Off));
             assert!(poll_once(queued.as_mut()).await.is_none());
             let new = revoke_and_readmit(&c, "outlet:2").await;
@@ -253,7 +257,6 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
                 queued.await,
                 Err(crate::device::CommandError::Unavailable(_))
             ));
-            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
             c.cloud.lock().unwrap().property_gate = None;
             release.send(()).unwrap();
             let expected = if code == 0 {
@@ -275,45 +278,46 @@ fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_ne
             async_io::Timer::after(Duration::from_millis(20)).await;
             assert_eq!(old.snapshot().power(), Some(Power::Off));
             assert_eq!(new.snapshot().power(), Some(Power::Off));
-            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
-        }));
-    }
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), writes + 1);
+        }
+    }));
 }
 
 #[test]
 fn a_sent_local_power_receipt_settles_after_revocation_and_readmission() {
     for relay in [false, true] {
-        for code in [0, -704] {
-            let (rig, id) = if relay {
-                (
-                    Rig::profile_light(
-                        "zimi.switch.dhkg05",
-                        serde_json::from_str(include_str!(
-                            "../../../../tests/fixtures/miot/zimi-dhkg05.json"
-                        ))
-                        .unwrap(),
-                    ),
-                    "relay:2",
-                )
-            } else {
-                (Rig::new(true, &["one"]), "outlet:2")
-            };
-            block_on(rig.run(|c| async move {
-                c.announce();
-                let control = &c;
-                let peer = Rc::new(Peer::default());
-                if relay {
-                    for siid in [2, 3, 4] {
-                        peer.value("one", PropertyBinding { siid, piid: 2 }, json!(0));
-                    }
+        let (rig, id) = if relay {
+            (
+                Rig::profile_light(
+                    "zimi.switch.dhkg05",
+                    serde_json::from_str(include_str!(
+                        "../../../../tests/fixtures/miot/zimi-dhkg05.json"
+                    ))
+                    .unwrap(),
+                ),
+                "relay:2",
+            )
+        } else {
+            (Rig::new(true, &["one"]), "outlet:2")
+        };
+        block_on(rig.run(|c| async move {
+            c.announce();
+            let control = &c;
+            let peer = Rc::new(Peer::default());
+            if relay {
+                for siid in [2, 3, 4] {
+                    peer.value("one", PropertyBinding { siid, piid: 2 }, json!(0));
                 }
-                c.peer(peer, |peer| async move {
-                    initialized(control, &peer, &["one"]).await;
-                    peer.state.borrow_mut().hold_writes = true;
+            }
+            c.peer(peer, |peer| async move {
+                initialized(control, &peer, &["one"]).await;
+                peer.state.borrow_mut().hold_writes = true;
+                for code in [0, -704] {
                     let old = function(&control.context, "one", id);
+                    let writes = peer.count("rpcReq", "one", 2);
                     let mut command = Box::pin(old.execute(Command::On));
                     assert!(poll_once(command.as_mut()).await.is_none());
-                    until(|| peer.count("rpcReq", "one", 2) == 1).await;
+                    until(|| peer.count("rpcReq", "one", 2) == writes + 1).await;
                     let mut queued = Box::pin(old.execute(Command::Off));
                     assert!(poll_once(queued.as_mut()).await.is_none());
                     let new = revoke_and_readmit(control, id).await;
@@ -344,10 +348,10 @@ fn a_sent_local_power_receipt_settles_after_revocation_and_readmission() {
                     assert!(status[0].inflight.is_none());
                     assert_eq!(old.snapshot().power(), Some(Power::Off));
                     assert_eq!(new.snapshot().power(), Some(Power::Off));
-                    assert_eq!(peer.count("rpcReq", "one", 2), 1);
-                })
-                .await;
-            }));
-        }
+                    assert_eq!(peer.count("rpcReq", "one", 2), writes + 1);
+                }
+            })
+            .await;
+        }));
     }
 }

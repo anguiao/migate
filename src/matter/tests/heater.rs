@@ -1,4 +1,7 @@
-use super::support::{Context, attr, read_bytes, report_dataver, report_value, single_entry};
+use super::support::{
+    Context, assert_receipt_error, assert_unpublished_surface, attr, read_bytes, report_dataver,
+    report_value,
+};
 use super::*;
 use crate::device::{
     Availability, CommandReceiver, DeviceKey, DeviceRequest, FunctionDescription, FunctionKind,
@@ -48,53 +51,10 @@ fn observe(function: &crate::device::Function, power: bool, temperature: i16) {
 }
 
 #[test]
-fn request_entry_rejects_unpublished_thermostat_attributes_and_commands() {
+fn publishes_a_heating_only_thermostat_without_cooling_fan_or_running_state() {
     let (device, mut receiver) = heater();
     fan_model!(&device, handler, im);
-    block_on(async {
-        for attribute in [5, 6, 17, 19, 20, 21, 22, 23, 24, 25, 30, 41] {
-            let mut ctx = Context::new(&im, 0x201, attribute);
-            assert_eq!(
-                read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound
-            );
-            ctx.data = TLVElement::new(&[0x01, 0xc4, 0x09]);
-            assert_eq!(
-                handler.write(&ctx).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound
-            );
-        }
-        for command in [1, 2, 3, 255] {
-            let mut ctx = Context::new(&im, 0x201, 0);
-            ctx.command.cmd_id = command;
-            assert_eq!(
-                handler
-                    .invoke(
-                        &ctx,
-                        InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
-                    )
-                    .await
-                    .unwrap_err()
-                    .code(),
-                ErrorCode::CommandNotFound
-            );
-        }
-        let mut ctx = Context::new(&im, 0x201, 18);
-        ctx.data = TLVElement::new(&[0x01, 0xc4, 0x09]);
-        let mut write = pin!(handler.write(&ctx));
-        assert!(poll_once(write.as_mut()).await.is_none());
-        let request = next_heater(&mut receiver).await;
-        request.mark_sent().unwrap();
-        request.reject(crate::device::CommandError::UnknownState);
-        assert_eq!(write.await.unwrap_err().code(), ErrorCode::InvalidInState);
-    });
-}
-
-#[test]
-fn publishes_a_heating_only_thermostat_without_cooling_fan_or_running_state() {
-    let (device, _receiver) = heater();
-    fan_model!(&device, handler, im);
-    model_handler(vec![single_entry(&device)]).access(|node| {
+    handler.access(|node| {
         let endpoint = node.endpoint(2).unwrap();
         assert_eq!(
             endpoint
@@ -109,15 +69,21 @@ fn publishes_a_heating_only_thermostat_without_cooling_fan_or_running_state() {
         for id in [0, 3, 4, 18, 27, 28, 0xfff8, 0xfff9, 0xfffb, 0xfffc, 0xfffd] {
             assert!(thermostat.attribute(id).is_some(), "{id:#x}");
         }
-        for id in [5, 6, 17, 19, 20, 21, 22, 23, 24, 25, 30, 41] {
-            assert!(thermostat.attribute(id).is_none(), "{id:#x}");
-        }
         assert!(thermostat.command(0).is_some());
-        assert!(thermostat.command(1).is_none());
         assert!(endpoint.cluster(6).is_none());
         assert!(endpoint.cluster(0x202).is_none());
     });
-    let _ = &im;
+    block_on(async {
+        assert_unpublished_surface(
+            &handler,
+            &im,
+            0x201,
+            &[5, 6, 17, 19, 20, 21, 22, 23, 24, 25, 30, 41],
+            &[1, 2, 3, 255],
+        )
+        .await;
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
 }
 
 #[test]
@@ -155,20 +121,19 @@ fn reads_only_real_heating_values_and_writes_each_target_separately() {
                 .unwrap(),
             4500
         );
-        for id in [17, 5, 6, 25] {
-            initial.attribute = attr(0x201, id);
-            assert_eq!(
-                read_bytes(&handler, &initial).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound,
-                "{id}"
-            );
-        }
-        initial.attribute = attr(0x201, 25);
-        initial.data = TLVElement::new(&[0x00, 5]);
-        assert_eq!(
-            handler.write(&initial).await.unwrap_err().code(),
-            ErrorCode::AttributeNotFound
-        );
+        let mut target = Context::new(&im, 0x201, 18);
+        target.data = TLVElement::new(&[0x01, 0xc4, 0x09]);
+        assert_receipt_error(
+            handler.write(&target),
+            async {
+                let request = next_heater(&mut receiver).await;
+                assert_eq!(request.command, HeaterCommand::Temperature(25));
+                request.mark_sent().unwrap();
+                request.reject(crate::device::CommandError::UnknownState);
+            },
+            ErrorCode::InvalidInState,
+        )
+        .await;
         assert!(poll_once(receiver.next_operation()).await.is_none());
         observe(function, false, 25);
         initial.attribute = attr(0x201, 28);
@@ -203,12 +168,6 @@ fn reads_only_real_heating_values_and_writes_each_target_separately() {
             write.await.unwrap();
         }
 
-        let mut context = Context::new(&im, 0x201, 17);
-        context.data = TLVElement::new(&[0x01, 0xc4, 0x09]);
-        assert_eq!(
-            handler.write(&context).await.unwrap_err().code(),
-            ErrorCode::AttributeNotFound
-        );
         let mut context = Context::new(&im, 0x201, 18);
         context.data = TLVElement::new(&[0x01, 0xc4, 0x09]);
         let mut write = pin!(handler.write(&context));

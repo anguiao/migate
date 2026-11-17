@@ -5,34 +5,21 @@ fn retired_queued_lan_task_does_not_probe(recovery: bool, retire_work: bool) {
     use std::sync::atomic::Ordering;
 
     let did = "656878122";
-    let instance = serde_json::from_str(include_str!(
-        "../../../../../tests/fixtures/miot/dmaker-p5c.json"
-    ))
-    .unwrap();
-    let rig = Rig::custom_lights(&[(did, "dmaker.fan.p5c", instance)]);
-    let token = Token::parse("00112233445566778899aabbccddeeff").unwrap();
-    let peer = FakeDevice::new(token.clone(), token.clone());
-    let record = LanRecord {
-        scope: rig
-            .store
-            .devices()
-            .load_configuration()
-            .unwrap()
-            .scope
-            .unwrap(),
-        did: did.into(),
-        model: "dmaker.fan.p5c".into(),
-        address: "127.0.0.1".parse().unwrap(),
-        token: token.clone(),
-    };
-    rig.store.lan().save(&record).unwrap();
+    let (rig, peer) = cached_native_lan();
+    let scope = rig
+        .store
+        .devices()
+        .load_configuration()
+        .unwrap()
+        .scope
+        .unwrap();
+    let record = rig.store.lan().load(&scope, did).unwrap().unwrap();
     let context = rig.source.context.clone();
-    rig.network.lan_port.set(peer.address.port());
     if recovery {
         let client = Client::new(
             did.parse().unwrap(),
             peer.address,
-            token,
+            record.token.clone(),
             crate::xiaomi::lan::TIMEOUT,
         );
         {

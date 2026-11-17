@@ -536,3 +536,6 @@ impl Drop for LightRequest {
         self.finish(Err(CommandError::Cancelled), true);
     }
 }
+
+#[cfg(test)]
+mod tests;

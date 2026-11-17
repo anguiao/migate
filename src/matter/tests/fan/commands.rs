@@ -12,34 +12,6 @@ async fn next_fan(receiver: &mut CommandReceiver) -> FanRequest {
 }
 
 #[test]
-fn invalid_fan_mode_checks_data_version_before_constraint() {
-    for swing in [false, true] {
-        let (device, mut receiver) = fan_device("fan-version", swing);
-        fan_model!(&device, handler, im);
-        block_on(async {
-            let version = report_dataver(
-                &read_bytes(&handler, &Context::new(&im, 0x202, 4))
-                    .await
-                    .unwrap(),
-            );
-            for mode in [5, 7, 255] {
-                let bytes = [0x04, mode];
-                let mut ctx = Context::new(&im, 0x202, 0);
-                ctx.data = TLVElement::new(&bytes);
-                for (dataver, expected) in [
-                    (version.wrapping_add(1), ErrorCode::DataVersionMismatch),
-                    (version, ErrorCode::ConstraintError),
-                ] {
-                    ctx.attribute.dataver = Some(dataver);
-                    assert_eq!(handler.write(&ctx).await.unwrap_err().code(), expected);
-                    assert!(poll_once(receiver.next_operation()).await.is_none());
-                }
-            }
-        });
-    }
-}
-
-#[test]
 fn writes_dispatch_fan_commands_and_wait_for_all_receipts() {
     let (device, mut receiver) = fan_device("fan-command", true);
     device.set_availability(Availability::Available);
@@ -123,9 +95,6 @@ fn invalid_writes_are_rejected_without_queueing_or_changing_observations() {
             (5, &[0x14][..], ErrorCode::InvalidInState),
             (2, &[0x04, 101][..], ErrorCode::ConstraintError),
             (5, &[0x04, 255][..], ErrorCode::ConstraintError),
-            (0, &[0x04, 5][..], ErrorCode::ConstraintError),
-            (0, &[0x04, 7][..], ErrorCode::ConstraintError),
-            (0, &[0x04, 255][..], ErrorCode::ConstraintError),
             (8, &[0x04, 2][..], ErrorCode::ConstraintError),
             (8, &[0x04, 4][..], ErrorCode::ConstraintError),
             (8, &[0x04, 0x80][..], ErrorCode::ConstraintError),
@@ -161,13 +130,18 @@ fn write_failures_and_timeouts_are_returned_to_the_caller() {
             let bytes = [0x04, 42];
             let mut ctx = Context::new(&im, 0x202, 2);
             ctx.data = TLVElement::new(&bytes);
-            let mut write = pin!(handler.write(&ctx));
-            assert!(poll_once(write.as_mut()).await.is_none());
-            let request = next_fan(&mut receiver).await;
-            request.mark_sent(FanStep::Power(true)).unwrap();
-            request.reject(failure);
-            assert_eq!(write.await.unwrap_err().code(), expected);
+            assert_receipt_error(
+                handler.write(&ctx),
+                async {
+                    let request = next_fan(&mut receiver).await;
+                    request.mark_sent(FanStep::Power(true)).unwrap();
+                    request.reject(failure);
+                },
+                expected,
+            )
+            .await;
         }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
     });
 }
 

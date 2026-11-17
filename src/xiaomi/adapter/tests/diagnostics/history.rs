@@ -11,6 +11,11 @@ fn unavailable_first_admission_has_a_baseline_and_readmission_drops_the_old_hist
         rig.source.context.diagnostics().devices[0].last_switch_reason,
         None
     );
+    assert!(
+        rig.source.context.directory.borrow().devices["one"]
+            .routing_history
+            .is_some()
+    );
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         until(|| c.context.cloud_candidate("one", true).is_ok()).await;
@@ -30,6 +35,18 @@ fn unavailable_first_admission_has_a_baseline_and_readmission_drops_the_old_hist
         );
         let previous = recorded(&c, "one").unwrap();
         assert!(previous.contains("Mijia HTTP request failed"));
+        c.context.revoke("one", "confirmed removal").unwrap();
+        assert!(
+            c.context.directory.borrow().devices["one"]
+                .routing_history
+                .is_none()
+        );
+        c.context.update_device_routing("one", "late source event");
+        assert!(
+            c.context.directory.borrow().devices["one"]
+                .routing_history
+                .is_none()
+        );
         c.cloud.lock().unwrap().members.clear();
         c.context.request_sync();
         c.clock.advance(Duration::from_secs(1));
@@ -416,33 +433,4 @@ fn actual_member_light_handover_records_the_group_even_when_its_summary_stays_cl
         })
         .await;
     }));
-}
-
-#[test]
-fn revocation_clears_the_serving_history_before_any_replacement_commit() {
-    let rig = Rig::new(true, &["one"]);
-    let context = &rig.source.context;
-    assert!(
-        context.directory.borrow().devices["one"]
-            .routing_history
-            .as_ref()
-            .map(|history| history.selection)
-            .is_some()
-    );
-    context.revoke("one", "confirmed removal").unwrap();
-    assert!(
-        context.directory.borrow().devices["one"]
-            .routing_history
-            .as_ref()
-            .map(|history| history.selection)
-            .is_none()
-    );
-    context.update_device_routing("one", "late source event");
-    assert!(
-        context.directory.borrow().devices["one"]
-            .routing_history
-            .as_ref()
-            .map(|history| history.selection)
-            .is_none()
-    );
 }

@@ -34,17 +34,22 @@ fn curtain_dispatches_commands_and_waits_for_receipts() {
             (CommandError::Timeout, ErrorCode::RxTimeout),
         ] {
             let mut out = [0; 128];
-            let mut invoke = pin!(handler.invoke(
-                &ctx,
-                InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
-            ));
-            assert!(poll_once(invoke.as_mut()).await.is_none());
-            let request = next_curtain(&mut receiver).await;
-            assert_eq!(request.command, CurtainCommand::Stop);
-            request.mark_sent().unwrap();
-            request.reject(failure);
-            assert_eq!(invoke.await.unwrap_err().code(), expected);
+            assert_receipt_error(
+                handler.invoke(
+                    &ctx,
+                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out)),
+                ),
+                async {
+                    let request = next_curtain(&mut receiver).await;
+                    assert_eq!(request.command, CurtainCommand::Stop);
+                    request.mark_sent().unwrap();
+                    request.reject(failure);
+                },
+                expected,
+            )
+            .await;
         }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
         for bytes in [&[][..], &[0x15], &[0x09], &[0x15, 0x24]] {
             ctx.data = TLVElement::new(bytes);
             assert_eq!(

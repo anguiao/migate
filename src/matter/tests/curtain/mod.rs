@@ -1,5 +1,6 @@
 use super::support::{
-    Context, attr, model_handler, read_bytes, report_dataver, report_value, single_entry,
+    Context, assert_receipt_error, attr, model_handler, read_bytes, report_dataver, report_value,
+    single_entry,
 };
 use crate::{
     device::{

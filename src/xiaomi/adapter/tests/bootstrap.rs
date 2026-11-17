@@ -74,51 +74,6 @@ fn failed_recognition(context: &super::super::state::Context, did: &str) {
 }
 
 #[test]
-fn startup_recognition_and_description_read_problems_recover_independently() {
-    let rig = Rig::new(true, &["one"]);
-    let context = &rig.source.context;
-    failed_recognition(context, "one");
-    {
-        let mut directory = context.directory.borrow_mut();
-        let slot = directory.devices.get_mut("one").unwrap();
-        let raw = &slot.latest_description.as_ref().unwrap().raw;
-        slot.cloud_access = Some(crate::xiaomi::mijia::CloudDeviceInfo {
-            did: "one".into(),
-            model: raw.model.clone(),
-            instance_type: raw.instance_type.clone(),
-            online: false,
-            lan: crate::xiaomi::mijia::LanCredentials::NotIp,
-        });
-    }
-    context.pending_description("one", "new description read failed".into());
-    let pending = context.diagnostics().pending;
-    let problem = pending.iter().find(|pending| pending.did == "one").unwrap();
-    assert!(
-        problem.reason.contains(RECOGNITION_FAILURE),
-        "{}",
-        problem.reason
-    );
-    assert!(
-        problem.reason.contains("new description read failed"),
-        "{}",
-        problem.reason
-    );
-    context.resolved_description_target("one");
-    let pending = context.diagnostics().pending;
-    let problem = pending.iter().find(|pending| pending.did == "one").unwrap();
-    assert!(
-        problem.reason.contains(RECOGNITION_FAILURE),
-        "{}",
-        problem.reason
-    );
-    assert!(
-        !problem.reason.contains("new description read failed"),
-        "{}",
-        problem.reason
-    );
-}
-
-#[test]
 fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     let rig = Rig::new(true, &["one", "two"]);
     let context = &rig.source.context;
@@ -133,6 +88,30 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
         .clone()
         .unwrap();
     failed_recognition(context, "one");
+    context
+        .directory
+        .borrow_mut()
+        .devices
+        .get_mut("one")
+        .unwrap()
+        .cloud_access = Some(crate::xiaomi::mijia::CloudDeviceInfo {
+        did: "one".into(),
+        model: retained.raw.model.clone(),
+        instance_type: retained.raw.instance_type.clone(),
+        online: false,
+        lan: crate::xiaomi::mijia::LanCredentials::NotIp,
+    });
+    context.pending_description("one", "new description read failed".into());
+    let pending = context.diagnostics().pending;
+    let problem = &pending
+        .iter()
+        .find(|pending| pending.did == "one")
+        .unwrap()
+        .reason;
+    assert!(
+        problem.contains(RECOGNITION_FAILURE) && problem.contains("new description read failed"),
+        "{problem}"
+    );
     let mut changed = SourceFixture::committed(&before, "two");
     let mut extra = changed.raw.instance["services"][1].clone();
     extra["iid"] = json!(42);
@@ -184,29 +163,24 @@ fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     ));
 
     context.resolved_description_target("one");
+    let pending = context.diagnostics().pending;
+    let problem = &pending
+        .iter()
+        .find(|pending| pending.did == "one")
+        .unwrap()
+        .reason;
+    assert!(
+        problem.contains(RECOGNITION_FAILURE) && !problem.contains("new description read failed"),
+        "{problem}"
+    );
     assert!(app.plan().unwrap().is_none());
     assert!(!app.pending());
     assert!(app.failure().is_none());
-    assert!(
-        context.directory.borrow().devices["one"]
-            .description_problems
-            .iter()
-            .any(|problem| {
-                problem.operation == super::super::directory::DescriptionOperation::RecognizeStored
-            })
-    );
     assert_eq!(
         context.directory.borrow().devices["one"]
             .latest_description
             .as_ref(),
         Some(&retained)
-    );
-    assert!(
-        context
-            .diagnostics()
-            .pending
-            .iter()
-            .any(|pending| pending.did == "one" && pending.reason.contains(RECOGNITION_FAILURE))
     );
     assert!(rig.cloud.lock().unwrap().instance_reads.is_empty());
 

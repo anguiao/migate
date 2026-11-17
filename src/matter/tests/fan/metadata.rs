@@ -1,10 +1,9 @@
 use super::*;
-use rs_matter::{dm::InvokeReplyInstance, tlv::TLVElement, utils::storage::WriteBuf};
 
 #[test]
 fn global_lists_and_access_match_each_fan_shape() {
     for swing in [false, true] {
-        let device = fan_device("fan", swing).0;
+        let (device, mut receiver) = fan_device("fan", swing);
         fan_model!(&device, handler, im);
         let mut ctx = Context::new(&im, 0x202, 0);
         block_on(async {
@@ -38,36 +37,27 @@ fn global_lists_and_access_match_each_fan_shape() {
                     .unwrap(),
                 6
             );
-            for id in if swing {
-                vec![9, 10, 11]
-            } else {
-                vec![7, 8, 9, 10, 11]
-            } {
-                ctx.attribute = attr(0x202, id);
-                assert_eq!(
-                    read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                    ErrorCode::AttributeNotFound
-                );
-                ctx.data = TLVElement::new(&[0x04, 1]);
-                assert_eq!(
-                    handler.write(&ctx).await.unwrap_err().code(),
-                    ErrorCode::AttributeNotFound
-                );
-            }
-            for id in [0, 1, 255] {
-                ctx.command.cmd_id = id;
-                assert_eq!(
-                    handler
-                        .invoke(
-                            &ctx,
-                            InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
-                        )
-                        .await
-                        .unwrap_err()
-                        .code(),
-                    ErrorCode::CommandNotFound
-                );
-            }
+            assert_unpublished_surface(
+                &handler,
+                &im,
+                0x202,
+                if swing {
+                    &[9, 10, 11]
+                } else {
+                    &[7, 8, 9, 10, 11]
+                },
+                &[0, 1, 255],
+            )
+            .await;
+            observe_fan_state(&device.functions()[0], true, 40, 1, false);
+            assert_fan_mode_constraints(
+                &handler,
+                &im,
+                &mut receiver,
+                &device.functions()[0],
+                &[5, 7, 255],
+            )
+            .await;
         });
     }
 }

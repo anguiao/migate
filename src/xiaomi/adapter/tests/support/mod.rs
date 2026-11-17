@@ -58,6 +58,62 @@ pub(super) use network::TestNetwork;
 pub(super) use peer::{Peer, peer_run, response, topic_key};
 pub(super) use rig::{Control, Rig};
 
+pub(super) async fn assert_cloud_subscription_fallback(
+    control: &Control,
+    did: &str,
+    function: &str,
+    binding: crate::xiaomi::capability::PropertyBinding,
+) {
+    let status = control.context.diagnostics();
+    let function = status
+        .devices
+        .iter()
+        .find(|device| device.did == did)
+        .unwrap()
+        .functions
+        .iter()
+        .find(|current| current.function == function)
+        .unwrap();
+    let subscriptions = function
+        .subscriptions
+        .iter()
+        .chain(
+            function
+                .properties
+                .iter()
+                .flat_map(|property| &property.subscriptions),
+        )
+        .filter(|status| {
+            status.binding == super::super::model::SubscriptionBinding::Property(binding)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(subscriptions.len(), 2, "{function:?}");
+    let text = control
+        .terminal()
+        .handle_line(&format!("status {did}"))
+        .await
+        .unwrap()
+        .unwrap();
+    for (source, ready) in [
+        (super::PathKind::Local, false),
+        (super::PathKind::Cloud, true),
+    ] {
+        let subscription = subscriptions
+            .iter()
+            .find(|status| status.source == source)
+            .unwrap();
+        assert_eq!(subscription.ready, ready);
+        assert_eq!(subscription.problem.is_some(), !ready);
+        let expected = format!(
+            "{source} property {}.{}: {}",
+            binding.siid,
+            binding.piid,
+            if ready { "ready" } else { "not ready" }
+        );
+        assert_eq!(text.matches(&expected).count(), 1, "{text}");
+    }
+}
+
 /// Report the hub's explicit offline result through the production device path.
 pub(super) fn local_device_offline(
     context: &super::super::state::Context,

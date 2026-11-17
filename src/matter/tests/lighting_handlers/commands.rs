@@ -63,13 +63,7 @@ fn dispatch_keeps_missing_cluster_and_stale_write_statuses_for_each_light_profil
             {
                 ctx.attribute = attr(cluster, 15);
                 ctx.data = TLVElement::new(&[0x04, 2]);
-                for (dataver, expected) in [
-                    (version + 1, ErrorCode::DataVersionMismatch),
-                    (version, ErrorCode::ConstraintError),
-                ] {
-                    ctx.attribute.dataver = Some(dataver);
-                    assert_eq!(dispatch.write(&ctx).await.unwrap_err().code(), expected);
-                }
+                assert_constraint_after_data_version(&dispatch, &mut ctx, version).await;
             }
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
@@ -77,92 +71,36 @@ fn dispatch_keeps_missing_cluster_and_stale_write_statuses_for_each_light_profil
 }
 
 #[test]
-fn toggle_without_power_observation_returns_invalid_in_state() {
-    setup_light!(false, device, receiver, handler, ctx);
-    device.set_availability(Availability::Available);
-    ctx.command.cluster_id = 6;
-    ctx.command.cmd_id = 2;
-    block_on(async {
-        assert_eq!(
-            handler
-                .invoke(
-                    &ctx,
-                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
-                )
-                .await
-                .unwrap_err()
-                .code(),
-            ErrorCode::InvalidInState
-        );
-        assert!(poll_once(receiver.next_operation()).await.is_none());
-    });
-}
-
-#[test]
-fn color_temperature_light_rejects_unpublished_color_attributes() {
-    setup_light!(false, device, receiver, handler, ctx);
-    block_on(async {
-        for attribute in [0, 1, 3, 4, 19, 0x4000, 0x4010] {
-            ctx.attribute = attr(0x300, attribute);
-            assert_eq!(
-                read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound,
-                "attribute {attribute:#x}"
-            );
-            ctx.data = TLVElement::new(&[0x04, 1]);
-            assert_eq!(
-                handler.write(&ctx).await.unwrap_err().code(),
-                ErrorCode::AttributeNotFound,
-                "attribute {attribute:#x}"
-            );
-        }
-        assert!(poll_once(receiver.next_operation()).await.is_none());
-    });
-}
-
-#[test]
-fn light_receipt_preserves_the_device_error_status() {
-    setup_light!(false, device, receiver, handler, ctx);
-    device.set_availability(Availability::Available);
-    device.functions()[0].observe(true);
-    ctx.command.cluster_id = 8;
-    ctx.command.cmd_id = 0;
-    ctx.data = TLVElement::new(&[
-        0x15, 0x24, 0, 100, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
-    ]);
-    block_on(async {
-        for (failure, expected) in [
-            (
-                crate::device::CommandError::UnknownState,
-                ErrorCode::InvalidInState,
-            ),
-            (
-                crate::device::CommandError::Constraint,
-                ErrorCode::ConstraintError,
-            ),
-        ] {
-            let mut out = [0; 128];
-            let mut invoke = pin!(handler.invoke(
-                &ctx,
-                InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
-            ));
-            assert!(poll_once(invoke.as_mut()).await.is_none());
-            let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
-                panic!("expected lighting frame");
-            };
-            request.mark_sent().unwrap();
-            request.reject(failure);
-            assert_eq!(invoke.await.unwrap_err().code(), expected);
-        }
-    });
-}
-
-#[test]
-fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes() {
+fn real_light_handler_checks_unknown_state_and_published_surface() {
     for rgb in [false, true] {
         setup_light!(rgb, device, receiver, handler, ctx);
         device.set_availability(Availability::Available);
         block_on(async {
+            ctx.command.cluster_id = 6;
+            ctx.command.cmd_id = 2;
+            assert_eq!(
+                handler
+                    .invoke(
+                        &ctx,
+                        InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
+                    )
+                    .await
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::InvalidInState
+            );
+            assert_unpublished_surface(
+                &handler,
+                ctx.base,
+                0x300,
+                if rgb {
+                    &[19, 0x4000, 0x4010]
+                } else {
+                    &[0, 1, 3, 4, 19, 0x4000, 0x4010]
+                },
+                &[],
+            )
+            .await;
             assert!(
                 report_value(&read_bytes(&handler, &ctx).await.unwrap())
                     .null()
@@ -237,6 +175,49 @@ fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes(
             assert!(poll_once(receiver.next_operation()).await.is_none());
         });
     }
+}
+
+#[test]
+fn light_receipts_preserve_device_error_statuses() {
+    setup_light!(false, device, receiver, handler, ctx);
+    device.set_availability(Availability::Available);
+    device.functions()[0].observe(true);
+    ctx.command.cluster_id = 8;
+    ctx.command.cmd_id = 0;
+    ctx.data = TLVElement::new(&[
+        0x15, 0x24, 0, 100, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+    ]);
+    block_on(async {
+        for (failure, expected) in [
+            (
+                crate::device::CommandError::UnknownState,
+                ErrorCode::InvalidInState,
+            ),
+            (
+                crate::device::CommandError::Constraint,
+                ErrorCode::ConstraintError,
+            ),
+        ] {
+            let mut output = [0; 128];
+            assert_receipt_error(
+                handler.invoke(
+                    &ctx,
+                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut output)),
+                ),
+                async {
+                    let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap()
+                    else {
+                        panic!("expected lighting frame");
+                    };
+                    request.mark_sent().unwrap();
+                    request.reject(failure);
+                },
+                expected,
+            )
+            .await;
+        }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
 }
 
 #[test]

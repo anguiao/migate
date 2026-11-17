@@ -2,7 +2,7 @@ mod coalescing;
 mod receipts;
 mod takeover;
 
-use super::{new_device, next_power};
+use super::new_device;
 use crate::device::{
     Availability, Command, CommandError, CommandReceiver, DeviceKey, DeviceRequest, Function,
     FunctionDescription, FunctionKind, LightAction, LightDimension, LightPatch, LightProfile,

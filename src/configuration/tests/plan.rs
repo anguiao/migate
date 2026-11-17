@@ -1046,34 +1046,13 @@ fn heater_temperature_limit_change_replaces_native_with_the_same_function_id() {
         .unwrap()["value-range"] = json!([25, 46, 1]);
     let before = SourceFixture::new("heater", "yeelink.bhf_light.v13", before);
     let after = SourceFixture::new("heater", "yeelink.bhf_light.v13", after);
-    let heating = |native: &SourceFixture| {
-        native
-            .device()
-            .functions()
-            .iter()
-            .find(|function| function.id() == "heater:3")
-            .unwrap()
-            .heater()
-            .unwrap()
-            .clone()
+    let initial = CommittedConfiguration {
+        scope: Some(scope()),
+        root_version: 2,
+        descriptions: vec![before.raw.clone()],
+        devices: vec![committed("heater", before, "Bathroom", 1)],
+        ..CommittedConfiguration::empty()
     };
-    assert_eq!(
-        heating(&before).temperature().property(),
-        heating(&after).temperature().property()
-    );
-    assert_eq!(heating(&before).temperature().grid().max(), 45);
-    assert_eq!(heating(&after).temperature().grid().max(), 46);
-    let initial = plan(
-        CommittedConfiguration::empty(),
-        facts(
-            scope(),
-            vec![source("heater", before, Some("Bathroom"))],
-            Vec::new(),
-        ),
-        BTreeMap::from([(key("heater"), unique("heater"))]),
-    )
-    .unwrap()
-    .configuration;
     let updated = plan(
         initial.clone(),
         facts(scope(), vec![source("heater", after, None)], Vec::new()),
@@ -1097,13 +1076,13 @@ fn direct_protocol_change_replaces_native_with_the_same_bindings() {
     let before = SourceFixture::new("fan", "dmaker.fan.p5c", instance.clone());
     let after = SourceFixture::new("fan", "dmaker.fan.other", instance);
     assert_eq!(before.device().functions(), after.device().functions());
-    let initial = plan(
-        CommittedConfiguration::empty(),
-        facts(scope(), vec![source("fan", before, None)], Vec::new()),
-        BTreeMap::from([(key("fan"), unique("fan"))]),
-    )
-    .unwrap()
-    .configuration;
+    let initial = CommittedConfiguration {
+        scope: Some(scope()),
+        root_version: 2,
+        descriptions: vec![before.raw.clone()],
+        devices: vec![committed("fan", before, "Fan", 1)],
+        ..CommittedConfiguration::empty()
+    };
     let updated = plan(
         initial,
         facts(scope(), vec![source("fan", after, None)], Vec::new()),

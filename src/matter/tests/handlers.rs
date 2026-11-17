@@ -1,7 +1,6 @@
 use super::super::{bridged_info::BridgedHandler, model::basic_info, storage::StoreAdapter};
 use super::support::{
-    Context, entry, model_handler, next_power, read_bytes, report_dataver, report_value,
-    single_entry,
+    Context, entry, model_handler, read_bytes, report_dataver, report_value, single_entry,
 };
 use crate::{
     app::App,
@@ -67,7 +66,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             assert!(poll_once(invoke.as_mut()).await.is_none());
             assert_eq!(device.functions()[0].snapshot(), before);
             device.functions()[0].observe(power);
-            next_power(&mut receiver).await.unwrap().accept().unwrap();
+            receiver.next_power().await.unwrap().accept().unwrap();
             invoke.await.unwrap();
             assert_eq!(
                 device.functions()[0]
@@ -87,7 +86,7 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), ErrorCode::InvalidCommand);
-            assert!(poll_once(next_power(&mut receiver)).await.is_none());
+            assert!(poll_once(receiver.next_power()).await.is_none());
         }
         ctx.data = TLVElement::new(&[0x15, 0x18]);
         ctx.command.cmd_id = 1;
@@ -97,7 +96,8 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
             InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
         ));
         assert!(poll_once(invoke.as_mut()).await.is_none());
-        next_power(&mut receiver)
+        receiver
+            .next_power()
             .await
             .unwrap()
             .reject(CommandError::Rejected("denied".into()));
@@ -360,7 +360,8 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
                 ));
                 assert!(poll_once(invoke.as_mut()).await.is_none());
                 multi.functions()[index].observe(true);
-                next_power(&mut receivers[index])
+                receivers[index]
+                    .next_power()
                     .await
                     .unwrap()
                     .accept()
@@ -415,7 +416,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
                     .unwrap()
             );
             assert!(
-                poll_once(next_power(&mut single_receivers[0]))
+                poll_once(single_receivers[0].next_power())
                     .await
                     .flatten()
                     .is_none()
@@ -432,7 +433,8 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
             ));
             assert!(poll_once(invoke.as_mut()).await.is_none());
             rejoined.functions()[0].observe(true);
-            next_power(&mut replacement_receivers[0])
+            replacement_receivers[0]
+                .next_power()
                 .await
                 .unwrap()
                 .accept()

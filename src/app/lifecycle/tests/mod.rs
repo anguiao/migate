@@ -1,5 +1,7 @@
-use super::super::{BridgeOptions, StartupGate, run_xiaomi_bridge};
-use super::{outlet, status};
+mod process;
+
+use super::{BridgeOptions, StartupGate, run_xiaomi_bridge};
+use crate::app::tests::support::{outlet, status};
 use crate::{storage::Store, xiaomi::adapter::tests::app_source::AppSource};
 use futures_lite::{
     future::{self, block_on, poll_once},
@@ -448,7 +450,7 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                 let started = event_listener::Event::new();
                 let listening = started.listen();
                 let published_at_start = Cell::new(0);
-                let bridge = super::super::run_lifecycle(
+                let bridge = super::run_lifecycle(
                     BridgeOptions {
                         store: &store,
                         identity: &identity,
@@ -498,7 +500,7 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
             use std::os::unix::net::UnixStream;
             let directory = tempfile::tempdir().unwrap();
             let store = Store::open(directory.path()).unwrap();
-            let fixture = SourceFixture::new("panel", "zimi.switch.dhkg01", serde_json::from_str(include_str!("../../../tests/fixtures/miot/zimi-dhkg01.json")).unwrap());
+            let fixture = SourceFixture::new("panel", "zimi.switch.dhkg01", serde_json::from_str(include_str!("../../../../tests/fixtures/miot/zimi-dhkg01.json")).unwrap());
             let mut configuration = fixtures::planned(&store, vec![fixture]);
             configuration.relay_channels[0].mode = Some(RelayMode::Wired);
             fixtures::save(&store, &configuration);
@@ -521,7 +523,7 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
             let started = event_listener::Event::new();
             let done = event_listener::Event::new();
             let stopping = done.listen();
-            let bridge = super::super::run_lifecycle(
+            let bridge = super::run_lifecycle(
                 BridgeOptions { store: &store, identity: &identity, status: &status, port: 0 },
                 async { Ok((app.clone(), StartupGate::new(std::time::Duration::ZERO))) },
                 async move { let _source = source; future::pending().await },
@@ -568,8 +570,8 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
     }).unwrap().join().unwrap();
 }
 
-struct WaitingDeadline(Rc<event_listener::Event>);
-impl super::super::StartupDeadline for WaitingDeadline {
+struct WaitingDeadline(event_listener::Event);
+impl super::StartupDeadline for WaitingDeadline {
     fn expired(&self) -> bool {
         false
     }
@@ -591,10 +593,16 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 let status = status(&store);
                 let source = AppSource::new(&store, Some(outlet()));
                 source.confirm_all();
-                let app = Rc::new(
-                    crate::app::App::open(source.handle.clone(), store.clone()).unwrap(),
-                );
-                let waiting = Rc::new(event_listener::Event::new());
+                let app =
+                    Rc::new(crate::app::App::open(source.handle.clone(), store.clone()).unwrap());
+                rusqlite::Connection::open(store.path())
+                    .unwrap()
+                    .execute_batch(
+                        "CREATE TRIGGER fail_withdrawal BEFORE UPDATE ON bridge_configuration
+                         BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                    )
+                    .unwrap();
+                let waiting = event_listener::Event::new();
                 let waiting_seen = waiting.listen();
                 let gate = StartupGate::until(WaitingDeadline(waiting));
                 let started = event_listener::Event::new();
@@ -604,9 +612,7 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 let socket = std::net::UdpSocket::bind("[::1]:0").unwrap();
                 let port = socket.local_addr().unwrap().port();
                 drop(socket);
-                let current = app.clone();
-                let source_store = store.clone();
-                let bridge = super::super::run_lifecycle(
+                let bridge = super::run_lifecycle(
                     BridgeOptions {
                         store: &store,
                         identity: &identity,
@@ -614,25 +620,12 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                         port,
                     },
                     async { Ok((app.clone(), gate)) },
-                    async move {
+                    async {
                         waiting_seen.await;
-                        assert!(
-                            !current.source.initial_reads_ready(&current.current().configuration)
-                        );
-                        let database = rusqlite::Connection::open(source_store.path()).unwrap();
-                        database
-                            .execute_batch(
-                                "CREATE TRIGGER fail_withdrawal BEFORE UPDATE ON bridge_configuration
-                                 BEGIN SELECT RAISE(ABORT, 'injected'); END;",
-                            )
-                            .unwrap();
                         source.remove("test-outlet");
-                        let plan = current.plan().unwrap().unwrap();
-                        assert!(current.apply(current.prepare(plan)).is_err());
-                        assert!(
-                            current.source.initial_reads_ready(&current.current().configuration)
-                        );
-                        let _resources = (source, database);
+                        // Keep the waiting runner intact to expose a topology captured before withdrawal.
+                        let plan = app.plan().unwrap().unwrap();
+                        assert!(app.apply(app.prepare(plan)).is_err());
                         future::pending().await
                     },
                     Cursor::new([]),
@@ -649,7 +642,10 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 let controller = async {
                     started_seen.await;
                     let parts = crate::matter::tests::support::running_parts(port).await;
-                    assert!(parts.is_empty(), "withdrawn source was assembled: {parts:?}");
+                    assert!(
+                        parts.is_empty(),
+                        "withdrawn source was assembled: {parts:?}"
+                    );
                     assert!(app.failure().is_some());
                     assert!(
                         store

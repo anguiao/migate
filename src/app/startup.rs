@@ -79,5 +79,4 @@ impl<D: StartupDeadline> StartupGate<D> {
 }
 
 #[cfg(test)]
-#[path = "tests/startup.rs"]
 mod tests;

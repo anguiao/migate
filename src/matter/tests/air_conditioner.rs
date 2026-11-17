@@ -1,5 +1,6 @@
 use super::support::{
-    Context, attr, fan_model, model_handler, read_bytes, report_dataver, report_value, single_entry,
+    Context, assert_fan_mode_constraints, assert_receipt_error, assert_unpublished_surface, attr,
+    fan_model, read_bytes, report_dataver, report_value,
 };
 use crate::device::{
     AirConditionerCommand, AirConditionerFanSpeed as Speed, AirConditionerMode as Mode,
@@ -36,108 +37,6 @@ fn device(swing: bool) -> (PhysicalDevice, CommandReceiver) {
     (device, receivers.remove(0))
 }
 
-#[test]
-fn request_entry_uses_the_declared_thermal_and_fan_surface() {
-    for swing in [false, true] {
-        let (device, mut receiver) = device(swing);
-        fan_model!(&device, handler, im);
-        block_on(async {
-            for (cluster, attributes) in [
-                (0x201, vec![7, 8, 19, 20, 21, 22, 23, 24, 30, 41]),
-                (
-                    0x202,
-                    if swing {
-                        vec![9, 10, 11]
-                    } else {
-                        vec![7, 8, 9, 10, 11]
-                    },
-                ),
-            ] {
-                for attribute in attributes {
-                    let mut ctx = Context::new(&im, cluster, attribute);
-                    assert_eq!(
-                        read_bytes(&handler, &ctx).await.unwrap_err().code(),
-                        ErrorCode::AttributeNotFound
-                    );
-                    ctx.data = TLVElement::new(&[0x04, 1]);
-                    assert_eq!(
-                        handler.write(&ctx).await.unwrap_err().code(),
-                        ErrorCode::AttributeNotFound
-                    );
-                }
-                for command in if cluster == 0x201 {
-                    vec![1, 2, 3, 255]
-                } else {
-                    vec![0, 1, 255]
-                } {
-                    let mut ctx = Context::new(&im, cluster, 0);
-                    ctx.command.cmd_id = command;
-                    assert_eq!(
-                        handler
-                            .invoke(
-                                &ctx,
-                                InvokeReplyInstance::new(
-                                    &ctx.command,
-                                    WriteBuf::new(&mut [0; 128])
-                                )
-                            )
-                            .await
-                            .unwrap_err()
-                            .code(),
-                        ErrorCode::CommandNotFound
-                    );
-                }
-            }
-            let version = report_dataver(
-                &read_bytes(&handler, &Context::new(&im, 0x202, 4))
-                    .await
-                    .unwrap(),
-            );
-            for mode in [7, 255] {
-                let bytes = [0x04, mode];
-                let mut ctx = Context::new(&im, 0x202, 0);
-                ctx.data = TLVElement::new(&bytes);
-                for (dataver, expected) in [
-                    (version.wrapping_add(1), ErrorCode::DataVersionMismatch),
-                    (version, ErrorCode::ConstraintError),
-                ] {
-                    ctx.attribute.dataver = Some(dataver);
-                    assert_eq!(handler.write(&ctx).await.unwrap_err().code(), expected);
-                }
-            }
-            assert!(poll_once(receiver.next_operation()).await.is_none());
-        });
-    }
-}
-
-#[test]
-fn thermal_and_fan_write_receipts_share_device_error_mapping() {
-    let (device, mut receiver) = device(true);
-    fan_model!(&device, handler, im);
-    let function = &device.functions()[0];
-    function.observe_air_conditioner(Value::Power(true), Some(1), 1);
-    function.observe_air_conditioner(Value::Mode(Mode::Heat), Some(1), 1);
-    block_on(async {
-        for (cluster, attribute, bytes) in [
-            (0x201, 18, &[0x01, 0xc4, 0x09][..]),
-            (0x202, 0, &[0x04, 1][..]),
-        ] {
-            let mut ctx = Context::new(&im, cluster, attribute);
-            ctx.data = TLVElement::new(bytes);
-            let mut write = pin!(handler.write(&ctx));
-            assert!(poll_once(write.as_mut()).await.is_none());
-            let DeviceRequest::AirConditioner(request) = receiver.next_operation().await.unwrap()
-            else {
-                panic!("expected air-conditioner request");
-            };
-            let step = request.plan().unwrap()[0];
-            request.mark_sent(step).unwrap();
-            request.reject(crate::device::CommandError::UnknownState);
-            assert_eq!(write.await.unwrap_err().code(), ErrorCode::InvalidInState);
-        }
-    });
-}
-
 fn sensor() -> PhysicalDevice {
     PhysicalDevice::new(
         PhysicalDeviceDescription::new(
@@ -157,9 +56,9 @@ fn sensor() -> PhysicalDevice {
 #[test]
 fn publishes_thermostat_and_only_declared_features() {
     for swing in [false, true] {
-        let device = device(swing).0;
-        let model = model_handler(vec![single_entry(&device)]);
-        model.access(|node| {
+        let (device, mut receiver) = device(swing);
+        fan_model!(&device, handler, im);
+        handler.access(|node| {
             let endpoint = node.endpoint(2).unwrap();
             assert_eq!(
                 endpoint
@@ -175,11 +74,7 @@ fn publishes_thermostat_and_only_declared_features() {
             for id in [0, 3, 4, 5, 6, 17, 18, 25, 27, 28] {
                 assert!(thermostat.attribute(id).is_some());
             }
-            for id in [7, 8, 19, 20, 21, 22, 23, 24, 30, 41] {
-                assert!(thermostat.attribute(id).is_none());
-            }
             assert!(thermostat.command(0).is_some());
-            assert!(thermostat.command(1).is_none());
             let fan = endpoint.cluster(0x202).unwrap();
             assert_eq!(
                 (fan.revision, fan.feature_map),
@@ -187,6 +82,36 @@ fn publishes_thermostat_and_only_declared_features() {
             );
             assert_eq!(fan.attribute(7).is_some(), swing);
             assert_eq!(fan.attribute(8).is_some(), swing);
+        });
+        block_on(async {
+            assert_unpublished_surface(
+                &handler,
+                &im,
+                0x201,
+                &[7, 8, 19, 20, 21, 22, 23, 24, 30, 41],
+                &[1, 2, 3, 255],
+            )
+            .await;
+            assert_unpublished_surface(
+                &handler,
+                &im,
+                0x202,
+                if swing {
+                    &[9, 10, 11]
+                } else {
+                    &[7, 8, 9, 10, 11]
+                },
+                &[0, 1, 255],
+            )
+            .await;
+            assert_fan_mode_constraints(
+                &handler,
+                &im,
+                &mut receiver,
+                &device.functions()[0],
+                &[7, 255],
+            )
+            .await;
         });
     }
 }
@@ -396,6 +321,39 @@ fn writes_wait_for_receipts_null_is_noop_and_auto_is_not_off() {
     function.observe_air_conditioner(Value::Power(true), Some(1), 1);
     function.observe_air_conditioner(Value::Mode(Mode::Cool), Some(1), 1);
     block_on(async {
+        for (cluster, attribute, bytes, expected) in [
+            (
+                0x201,
+                18,
+                &[0x01, 0xc4, 0x09][..],
+                AirConditionerCommand::Temperature(25),
+            ),
+            (
+                0x202,
+                0,
+                &[0x04, 1][..],
+                AirConditionerCommand::Speed(Speed::Low),
+            ),
+        ] {
+            let mut ctx = Context::new(&im, cluster, attribute);
+            ctx.data = TLVElement::new(bytes);
+            assert_receipt_error(
+                handler.write(&ctx),
+                async {
+                    let DeviceRequest::AirConditioner(request) =
+                        receiver.next_operation().await.unwrap()
+                    else {
+                        panic!("expected air-conditioner request");
+                    };
+                    assert_eq!(request.command, expected);
+                    request.mark_sent(request.plan().unwrap()[0]).unwrap();
+                    request.reject(crate::device::CommandError::UnknownState);
+                },
+                ErrorCode::InvalidInState,
+            )
+            .await;
+        }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
         for id in [2, 5] {
             let mut ctx = Context::new(&im, 0x202, id);
             ctx.data = TLVElement::new(&[0x14]);

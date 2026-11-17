@@ -82,6 +82,11 @@ fn public_v13_description_yields_lightning_identity_and_only_heating_thermostat(
             crate::device::Capability::Heater,
         ]
     );
+    let target = heater.heater().unwrap().temperature();
+    let encoded = target.encode(26);
+    assert_eq!(encoded, json!(26));
+    assert!(encoded.is_i64());
+    assert_eq!(target.read_value(&encoded), Ok(26));
 }
 
 #[test]
@@ -216,18 +221,4 @@ fn another_standard_ptc_service_uses_the_same_contract() {
         .map(|function| function.id())
         .collect::<Vec<_>>();
     assert!(ids.contains(&HEATER));
-}
-
-#[test]
-fn heating_thermostat_uses_integer_temperature_encoding() {
-    let parsed = parse(&v13()).unwrap();
-    let heater = parsed
-        .functions()
-        .iter()
-        .find_map(|function| function.heater())
-        .unwrap();
-    let target = heater.temperature();
-    assert_eq!(target.encode(26), json!(26));
-    assert!(target.encode(26).is_i64());
-    assert_eq!(target.read_value(&json!(26)), Ok(26));
 }

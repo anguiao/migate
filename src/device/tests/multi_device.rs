@@ -1,5 +1,3 @@
-use super::next_power;
-
 use crate::device::{
     Availability, Command, CommandError, DeviceKey, FunctionDescription, FunctionKind,
     PhysicalDevice, PhysicalDeviceDescription, Power,
@@ -38,13 +36,9 @@ fn physical_availability_is_shared_but_power_revisions_and_queues_are_independen
         let mut second_command = Box::pin(second.execute(Command::Off));
         assert!(poll_once(first_command.as_mut()).await.is_none());
         assert!(poll_once(second_command.as_mut()).await.is_none());
-        let pending = next_power(&mut receivers[0]).await.unwrap();
+        let pending = receivers[0].next_power().await.unwrap();
         second.observe(false);
-        next_power(&mut receivers[1])
-            .await
-            .unwrap()
-            .accept()
-            .unwrap();
+        receivers[1].next_power().await.unwrap().accept().unwrap();
         assert_eq!(second_command.await.unwrap().power(), Some(Power::Off));
         assert_eq!(second.snapshot().revision, revision + 1);
         assert_eq!(first.snapshot().power(), Some(Power::Off));
@@ -79,7 +73,7 @@ fn closing_one_device_cancels_only_its_commands() {
         let mut other_command = Box::pin(other.execute(Command::Off));
         poll_once(command.as_mut()).await;
         poll_once(other_command.as_mut()).await;
-        let stale = next_power(&mut first_receivers[2]).await.unwrap();
+        let stale = first_receivers[2].next_power().await.unwrap();
         first.close();
         assert_eq!(command.await, Err(CommandError::Cancelled));
         assert_eq!(stale.accept(), Err(CommandError::Cancelled));
@@ -88,7 +82,8 @@ fn closing_one_device_cancels_only_its_commands() {
             Err(CommandError::Cancelled)
         );
         second.function("usb").unwrap().observe(false);
-        next_power(&mut second_receivers[2])
+        second_receivers[2]
+            .next_power()
             .await
             .unwrap()
             .accept()
@@ -109,13 +104,9 @@ fn cancelling_one_channel_does_not_withdraw_another_channel() {
         poll_once(cancelled.as_mut()).await;
         poll_once(surviving.as_mut()).await;
         drop(cancelled);
-        assert!(poll_once(next_power(&mut receivers[0])).await.is_none());
+        assert!(poll_once(receivers[0].next_power()).await.is_none());
         second.observe(false);
-        next_power(&mut receivers[1])
-            .await
-            .unwrap()
-            .accept()
-            .unwrap();
+        receivers[1].next_power().await.unwrap().accept().unwrap();
         assert_eq!(surviving.await.unwrap().power(), Some(Power::Off));
     });
 }
@@ -125,14 +116,10 @@ fn closing_a_device_wakes_and_ends_its_waiting_receivers() {
     block_on(async {
         let (device, mut receivers) = PhysicalDevice::new(description("removed"));
         let (_other, mut other_receivers) = PhysicalDevice::new(description("remaining"));
-        let mut waiting = Box::pin(next_power(&mut receivers[0]));
+        let mut waiting = Box::pin(receivers[0].next_power());
         assert!(poll_once(waiting.as_mut()).await.is_none());
         device.close();
         assert!(waiting.await.is_none());
-        assert!(
-            poll_once(next_power(&mut other_receivers[0]))
-                .await
-                .is_none()
-        );
+        assert!(poll_once(other_receivers[0].next_power()).await.is_none());
     });
 }

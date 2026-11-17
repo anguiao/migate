@@ -1,6 +1,7 @@
 use super::support::{
-    Context, attr, fan_device, fan_device_levels, fan_model, model_handler, observe_fan_state,
-    read_bytes, report_dataver, report_value, single_entry,
+    Context, assert_fan_mode_constraints, assert_receipt_error, assert_unpublished_surface, attr,
+    fan_device, fan_device_levels, fan_model, model_handler, observe_fan_state, read_bytes,
+    report_dataver, report_value, single_entry,
 };
 use crate::device::FanValue;
 use futures_lite::future::{block_on, poll_once};
@@ -10,11 +11,8 @@ use rs_matter::{
 };
 use std::pin::pin;
 
-#[path = "fan/commands.rs"]
 mod commands;
-#[path = "fan/metadata.rs"]
 mod metadata;
-#[path = "fan/reports.rs"]
 mod reports;
 
 #[test]

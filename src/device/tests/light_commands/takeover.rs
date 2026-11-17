@@ -9,7 +9,7 @@ fn light_toggle_requires_known_state_before_entering_the_send_queue() {
             poll_once(function.execute(Command::Toggle)).await,
             Some(Err(CommandError::UnknownState))
         );
-        assert!(poll_once(next_power(&mut receiver)).await.is_none());
+        assert!(poll_once(receiver.next_power()).await.is_none());
     });
 }
 

@@ -17,23 +17,19 @@ impl Bridge<'_> {
     }
 }
 
-pub(super) async fn next_power(
-    receiver: &mut crate::device::CommandReceiver,
-) -> Option<crate::device::CommandRequest> {
-    match receiver.next_operation().await? {
-        crate::device::DeviceRequest::Power(request) => Some(request),
-        _ => panic!("unexpected lighting request"),
-    }
-}
-
 mod context;
 mod fan;
 mod reports;
+mod requests;
 mod source;
 pub(in crate::matter) use context::Context;
 pub(super) use context::attr;
 pub(super) use fan::{fan_device, fan_device_levels, fan_model, observe_fan_state};
 pub(super) use reports::{read_bytes, report_dataver, report_value};
+pub(super) use requests::{
+    assert_constraint_after_data_version, assert_fan_mode_constraints, assert_receipt_error,
+    assert_unpublished_surface,
+};
 pub(crate) use source::{
     PublishedLightModel, PublishedRelayModel, persisted_root_version, running_parts,
 };
