@@ -5,9 +5,9 @@ use crate::device::Function;
 use rs_matter::{
     dm::{
         AsyncHandler, Dataver, HandlerContext, InvokeContext, InvokeReply, MatchContext,
-        ReadContext, ReadReply, WriteContext, clusters::decl::thermostat as th,
+        ReadContext, ReadReply, WriteContext,
     },
-    error::{Error, ErrorCode},
+    error::Error,
 };
 
 pub(super) type HeaterThermostat = Thermostat<HeaterProfile>;
@@ -25,35 +25,18 @@ impl Heater {
         self.thermostat.sync();
     }
     fn handler(&self) -> impl AsyncHandler + '_ {
-        th::HandlerAsyncAdaptor(&self.thermostat)
+        &self.thermostat
     }
 }
 impl AsyncHandler for Heater {
     fn bump_dataver(&self, _: impl MatchContext) {}
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if ctx.attr().cluster_id == 0x201
-            && <HeaterThermostat as th::ClusterAsyncHandler>::CLUSTER
-                .attribute(ctx.attr().attr_id)
-                .is_none()
-        {
-            return Err(ErrorCode::AttributeNotFound.into());
-        }
         self.handler().read(ctx, reply).await
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        if ctx.attr().cluster_id == 0x201
-            && <HeaterThermostat as th::ClusterAsyncHandler>::CLUSTER
-                .attribute(ctx.attr().attr_id)
-                .is_none()
-        {
-            return Err(ErrorCode::AttributeNotFound.into());
-        }
         self.handler().write(ctx).await
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        if ctx.cmd().cluster_id == 0x201 && ctx.cmd().cmd_id != 0 {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         self.handler().invoke(ctx, reply).await
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {

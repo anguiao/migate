@@ -1,6 +1,163 @@
 use super::*;
 
 #[test]
+fn dispatch_keeps_missing_cluster_and_stale_write_statuses_for_each_light_profile() {
+    use crate::device::{LightProfile, TemperatureInterval};
+    use rs_matter::dm::{Dataver, ReadReplyInstance};
+
+    let interval = TemperatureInterval::new(2700, 6500).unwrap();
+    for (profile, clusters) in [
+        (LightProfile::OnOff, vec![6]),
+        (LightProfile::Dimmable, vec![6, 8]),
+        (LightProfile::ColorTemperature(interval), vec![6, 8, 0x300]),
+        (LightProfile::ExtendedColor(interval), vec![6, 8, 0x300]),
+    ] {
+        setup_light!(@source crate::matter::tests::support::light_with(profile), device, receiver, handler, ctx);
+        let light = crate::matter::lighting::Lighting::new(
+            device.functions()[0].clone(),
+            2,
+            Dataver::new(10),
+            Dataver::new(20),
+            Dataver::new(30),
+        )
+        .unwrap();
+        let dispatch = crate::matter::lighting::Dispatch(&light);
+        block_on(async {
+            for cluster in [8, 0x300, 0xffff]
+                .into_iter()
+                .filter(|cluster| !clusters.contains(cluster))
+            {
+                ctx.attribute = attr(cluster, 0);
+                let mut out = [0; 128];
+                let mut write = WriteBuf::new(&mut out);
+                assert_eq!(
+                    dispatch
+                        .read(&ctx, ReadReplyInstance::new(&ctx.attribute, &mut write))
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    ErrorCode::AttributeNotFound
+                );
+                ctx.data = TLVElement::new(&[0x04, 2]);
+                assert_eq!(
+                    dispatch.write(&ctx).await.unwrap_err().code(),
+                    ErrorCode::UnsupportedAccess
+                );
+                ctx.command.cluster_id = cluster;
+                ctx.command.cmd_id = 0;
+                assert_eq!(
+                    dispatch
+                        .invoke(
+                            &ctx,
+                            InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
+                        )
+                        .await
+                        .unwrap_err()
+                        .code(),
+                    ErrorCode::CommandNotFound
+                );
+            }
+            for (cluster, version) in [(8, 20), (0x300, 30)]
+                .into_iter()
+                .filter(|(cluster, _)| clusters.contains(cluster))
+            {
+                ctx.attribute = attr(cluster, 15);
+                ctx.data = TLVElement::new(&[0x04, 2]);
+                for (dataver, expected) in [
+                    (version + 1, ErrorCode::DataVersionMismatch),
+                    (version, ErrorCode::ConstraintError),
+                ] {
+                    ctx.attribute.dataver = Some(dataver);
+                    assert_eq!(dispatch.write(&ctx).await.unwrap_err().code(), expected);
+                }
+            }
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+        });
+    }
+}
+
+#[test]
+fn toggle_without_power_observation_returns_invalid_in_state() {
+    setup_light!(false, device, receiver, handler, ctx);
+    device.set_availability(Availability::Available);
+    ctx.command.cluster_id = 6;
+    ctx.command.cmd_id = 2;
+    block_on(async {
+        assert_eq!(
+            handler
+                .invoke(
+                    &ctx,
+                    InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut [0; 128]))
+                )
+                .await
+                .unwrap_err()
+                .code(),
+            ErrorCode::InvalidInState
+        );
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+}
+
+#[test]
+fn color_temperature_light_rejects_unpublished_color_attributes() {
+    setup_light!(false, device, receiver, handler, ctx);
+    block_on(async {
+        for attribute in [0, 1, 3, 4, 19, 0x4000, 0x4010] {
+            ctx.attribute = attr(0x300, attribute);
+            assert_eq!(
+                read_bytes(&handler, &ctx).await.unwrap_err().code(),
+                ErrorCode::AttributeNotFound,
+                "attribute {attribute:#x}"
+            );
+            ctx.data = TLVElement::new(&[0x04, 1]);
+            assert_eq!(
+                handler.write(&ctx).await.unwrap_err().code(),
+                ErrorCode::AttributeNotFound,
+                "attribute {attribute:#x}"
+            );
+        }
+        assert!(poll_once(receiver.next_operation()).await.is_none());
+    });
+}
+
+#[test]
+fn light_receipt_preserves_the_device_error_status() {
+    setup_light!(false, device, receiver, handler, ctx);
+    device.set_availability(Availability::Available);
+    device.functions()[0].observe(true);
+    ctx.command.cluster_id = 8;
+    ctx.command.cmd_id = 0;
+    ctx.data = TLVElement::new(&[
+        0x15, 0x24, 0, 100, 0x25, 1, 0, 0, 0x24, 2, 0, 0x24, 3, 0, 0x18,
+    ]);
+    block_on(async {
+        for (failure, expected) in [
+            (
+                crate::device::CommandError::UnknownState,
+                ErrorCode::InvalidInState,
+            ),
+            (
+                crate::device::CommandError::Constraint,
+                ErrorCode::ConstraintError,
+            ),
+        ] {
+            let mut out = [0; 128];
+            let mut invoke = pin!(handler.invoke(
+                &ctx,
+                InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut out))
+            ));
+            assert!(poll_once(invoke.as_mut()).await.is_none());
+            let DeviceRequest::Light(request) = receiver.next_operation().await.unwrap() else {
+                panic!("expected lighting frame");
+            };
+            request.mark_sent().unwrap();
+            request.reject(failure);
+            assert_eq!(invoke.await.unwrap_err().code(), expected);
+        }
+    });
+}
+
+#[test]
 fn real_light_handler_reads_unknown_and_rejects_unsupported_commands_and_writes() {
     for rgb in [false, true] {
         setup_light!(rgb, device, receiver, handler, ctx);

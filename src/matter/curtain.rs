@@ -1,5 +1,5 @@
 //! Matter Window Covering projection of one native curtain function.
-use crate::device::{CommandError, CurtainCommand, CurtainMotion, Function};
+use crate::device::{CurtainCommand, CurtainMotion, Function};
 use rs_matter::{
     dm::{
         Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, WriteContext,
@@ -54,11 +54,10 @@ impl CurtainHandler {
         projection
     }
     async fn command(&self, command: CurtainCommand) -> Result<(), Error> {
-        let action: crate::device::CurtainAction = self
-            .function
-            .begin_curtain(command)
-            .map_err(command_error)?;
-        action.accepted().await.map_err(command_error)?;
+        let on_error = |error| super::command_error(&self.function, command, error);
+        let action: crate::device::CurtainAction =
+            self.function.begin_curtain(command).map_err(on_error)?;
+        action.accepted().await.map_err(on_error)?;
         Ok(())
     }
     async fn no_args(&self, ctx: impl InvokeContext, command: CurtainCommand) -> Result<(), Error> {
@@ -68,15 +67,6 @@ impl CurtainHandler {
             .map_err(|_| ErrorCode::InvalidCommand)?;
         self.command(command).await
     }
-}
-fn command_error(error: CommandError) -> Error {
-    log::warn!("Matter curtain command failed: {error}");
-    match error {
-        CommandError::Unsupported => ErrorCode::CommandNotFound,
-        CommandError::Timeout => ErrorCode::RxTimeout,
-        _ => ErrorCode::Failure,
-    }
-    .into()
 }
 fn percent100ths(value: Option<u32>) -> Nullable<u16> {
     Nullable::new(value.map(|v| ((100 - v) * 100) as u16))

@@ -1,43 +1,29 @@
 //! Matter projections for a single-target, standard-feedback air conditioner.
 
-use super::on_off::OnOffHandler;
-use crate::device::{AirConditionerCommand as Command, CommandError, Function};
+use super::{fan_control as fan_cluster, on_off::OnOffHandler};
+use crate::device::{AirConditionerCommand as Command, Function};
 use rs_matter::{
     dm::{
         AsyncHandler, ChainedHandler, Dataver, HandlerContext, InvokeContext, InvokeReply,
-        MatchContext, ReadContext, ReadReply, WriteContext,
-        clusters::{
-            app::on_off,
-            decl::{fan_control as fc, thermostat as th},
-        },
+        MatchContext, ReadContext, ReadReply, WriteContext, clusters::app::on_off,
     },
-    error::{Error, ErrorCode},
+    error::Error,
 };
 
 mod fan_control;
-mod thermostat;
 
 pub(super) use fan_control::AirConditionerFan;
-pub(super) use thermostat::Thermostat;
+pub(super) type Thermostat =
+    super::thermostat::Thermostat<super::thermostat::AirConditionerProfile>;
 
-fn command_error(error: CommandError) -> Error {
-    log::warn!("Matter air-conditioner command failed: {error}");
-    match error {
-        CommandError::Constraint => ErrorCode::ConstraintError,
-        CommandError::InvalidInState => ErrorCode::InvalidInState,
-        CommandError::Unsupported => ErrorCode::CommandNotFound,
-        CommandError::Timeout => ErrorCode::RxTimeout,
-        _ => ErrorCode::Failure,
-    }
-    .into()
-}
 async fn command(function: &Function, value: Command) -> Result<(), Error> {
+    let on_error = |error| super::command_error(function, value, error);
     function
         .begin_air_conditioner(value)
-        .map_err(command_error)?
+        .map_err(on_error)?
         .accepted()
         .await
-        .map_err(command_error)?;
+        .map_err(on_error)?;
     Ok(())
 }
 
@@ -77,8 +63,8 @@ impl<const ROCKING: bool> AirConditioner<ROCKING> {
             on_off::HandlerAsyncAdaptor(&self.on_off),
             ChainedHandler::new(
                 |_, cluster| cluster == 0x201,
-                th::HandlerAsyncAdaptor(&self.thermostat),
-                fc::HandlerAsyncAdaptor(&self.fan),
+                &self.thermostat,
+                fan_cluster::Handler(&self.fan),
             ),
         )
     }
@@ -86,39 +72,12 @@ impl<const ROCKING: bool> AirConditioner<ROCKING> {
 impl<const ROCKING: bool> AsyncHandler for AirConditioner<ROCKING> {
     fn bump_dataver(&self, _: impl MatchContext) {}
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        let cluster = match ctx.attr().cluster_id {
-            0x201 => Some(<Thermostat as th::ClusterAsyncHandler>::CLUSTER),
-            0x202 => Some(<AirConditionerFan<ROCKING> as fc::ClusterAsyncHandler>::CLUSTER),
-            _ => None,
-        };
-        if cluster.is_some_and(|cluster| cluster.attribute(ctx.attr().attr_id).is_none()) {
-            return Err(ErrorCode::AttributeNotFound.into());
-        }
         self.handler().read(ctx, reply).await
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        let cluster = match ctx.attr().cluster_id {
-            0x201 => Some(<Thermostat as th::ClusterAsyncHandler>::CLUSTER),
-            0x202 => Some(<AirConditionerFan<ROCKING> as fc::ClusterAsyncHandler>::CLUSTER),
-            _ => None,
-        };
-        if cluster.is_some_and(|cluster| cluster.attribute(ctx.attr().attr_id).is_none()) {
-            return Err(ErrorCode::AttributeNotFound.into());
-        }
-        if ctx.attr().cluster_id == 0x202
-            && ctx.attr().attr_id == 0
-            && ctx.data().u8().is_ok_and(|value| value > 6)
-        {
-            ctx.attr()
-                .check_dataver(fc::ClusterAsyncHandler::dataver(&self.fan))?;
-            return Err(ErrorCode::ConstraintError.into());
-        }
         self.handler().write(ctx).await
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        if ctx.cmd().cluster_id == 0x202 || ctx.cmd().cluster_id == 0x201 && ctx.cmd().cmd_id != 0 {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         self.handler().invoke(ctx, reply).await
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {

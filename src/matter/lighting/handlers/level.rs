@@ -1,4 +1,4 @@
-use super::super::{Lighting, plan, plan_error};
+use super::super::{Lighting, plan};
 use crate::device::LightDimension;
 use rs_matter::{
     dm::{Cluster, InvokeContext, ReadContext, WriteContext, clusters::decl::level_control as l},
@@ -8,12 +8,6 @@ use rs_matter::{
 };
 
 pub(in crate::matter) struct LevelHandler<'a>(pub(in crate::matter) &'a Lighting);
-
-impl LevelHandler<'_> {
-    async fn apply(&self, plan: Result<plan::Plan, plan::PlanError>) -> Result<(), Error> {
-        self.0.execute(plan.map_err(plan_error)?).await
-    }
-}
 
 macro_rules! level_to {
     ($name:ident,$request:ident,$with:expr) => {
@@ -29,14 +23,18 @@ macro_rules! level_to {
                 request.options_override()?.bits(),
             );
             let input = self.0.plan_input();
-            self.apply(plan::move_to_level(
-                level,
-                $with,
-                transition,
-                plan::Options::new(mask, override_),
-                &input,
-            ))
-            .await
+            self.0
+                .apply(
+                    stringify!($name),
+                    plan::move_to_level(
+                        level,
+                        $with,
+                        transition,
+                        plan::Options::new(mask, override_),
+                        &input,
+                    ),
+                )
+                .await
         }
     };
 }
@@ -57,14 +55,18 @@ macro_rules! level_move {
                 request.options_override()?.bits(),
             );
             let input = self.0.plan_input();
-            self.apply(plan::move_level(
-                $with,
-                mode,
-                rate,
-                plan::Options::new(mask, override_),
-                &input,
-            ))
-            .await
+            self.0
+                .apply(
+                    stringify!($name),
+                    plan::move_level(
+                        $with,
+                        mode,
+                        rate,
+                        plan::Options::new(mask, override_),
+                        &input,
+                    ),
+                )
+                .await
         }
     };
 }
@@ -86,15 +88,19 @@ macro_rules! level_step {
                 request.options_override()?.bits(),
             );
             let input = self.0.plan_input();
-            self.apply(plan::step(
-                $with,
-                mode,
-                size,
-                transition,
-                plan::Options::new(mask, override_),
-                &input,
-            ))
-            .await
+            self.0
+                .apply(
+                    stringify!($name),
+                    plan::step(
+                        $with,
+                        mode,
+                        size,
+                        transition,
+                        plan::Options::new(mask, override_),
+                        &input,
+                    ),
+                )
+                .await
         }
     };
 }
@@ -110,12 +116,12 @@ macro_rules! level_stop {
                 request.options_override()?.bits(),
             );
             let input = self.0.plan_input();
-            self.apply(plan::stop_level(
-                $with,
-                plan::Options::new(mask, override_),
-                &input,
-            ))
-            .await
+            self.0
+                .apply(
+                    stringify!($name),
+                    plan::stop_level($with, plan::Options::new(mask, override_), &input),
+                )
+                .await
         }
     };
 }

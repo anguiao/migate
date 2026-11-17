@@ -1,4 +1,4 @@
-use super::super::{Lighting, plan, plan_error};
+use super::super::{Lighting, plan};
 use crate::device::{LightDimension, lighting::hs};
 use rs_matter::{
     dm::{Cluster, InvokeContext, ReadContext, WriteContext, clusters::decl::color_control as c},
@@ -37,11 +37,6 @@ macro_rules! unsupported_color {
     ($($name:ident:$request:ident),* $(,)?) => {$ (
         async fn $name(&self,_ctx:impl InvokeContext,_request:c::$request<'_>)->Result<(),Error>{Err(ErrorCode::CommandNotFound.into())}
     )*};
-}
-impl<const RGB: bool> ColorHandler<'_, RGB> {
-    async fn apply(&self, plan: Result<plan::Plan, plan::PlanError>) -> Result<(), Error> {
-        self.0.execute(plan.map_err(plan_error)?).await
-    }
 }
 impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
     const CLUSTER: Cluster<'static> = if RGB {
@@ -193,14 +188,18 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (hue, direction, duration) = (r.hue()?, r.direction()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_to_hue(
-            hue,
-            hs_direction(direction),
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_to_hue",
+                plan::move_to_hue(
+                    hue,
+                    hs_direction(direction),
+                    duration,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_move_hue(
         &self,
@@ -210,13 +209,17 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (mode, rate) = (r.move_mode()?, r.rate()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_hue(
-            color_move_mode(mode),
-            rate,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_hue",
+                plan::move_hue(
+                    color_move_mode(mode),
+                    rate,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_step_hue(
         &self,
@@ -226,14 +229,18 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (mode, size, duration) = (r.step_mode()?, r.step_size()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::step_hue(
-            color_step_mode(mode),
-            size,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "step_hue",
+                plan::step_hue(
+                    color_step_mode(mode),
+                    size,
+                    duration,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_move_to_saturation(
         &self,
@@ -243,13 +250,17 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (saturation, duration) = (r.saturation()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_to_saturation(
-            saturation,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_to_saturation",
+                plan::move_to_saturation(
+                    saturation,
+                    duration,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_move_saturation(
         &self,
@@ -259,13 +270,17 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (mode, rate) = (r.move_mode()?, r.rate()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_saturation(
-            color_move_mode(mode),
-            rate,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_saturation",
+                plan::move_saturation(
+                    color_move_mode(mode),
+                    rate,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_step_saturation(
         &self,
@@ -275,14 +290,18 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (mode, size, duration) = (r.step_mode()?, r.step_size()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::step_saturation(
-            color_step_mode(mode),
-            size,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "step_saturation",
+                plan::step_saturation(
+                    color_step_mode(mode),
+                    size,
+                    duration,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_move_to_hue_and_saturation(
         &self,
@@ -292,14 +311,18 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (hue, saturation, duration) = (r.hue()?, r.saturation()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_to_hue_and_saturation(
-            hue,
-            saturation,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_to_hue_and_saturation",
+                plan::move_to_hue_and_saturation(
+                    hue,
+                    saturation,
+                    duration,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_move_to_color_temperature(
         &self,
@@ -309,13 +332,17 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (target, duration) = (r.color_temperature_mireds()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_to_color_temperature(
-            target,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_to_color_temperature",
+                plan::move_to_color_temperature(
+                    target,
+                    duration,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_move_to_color(
         &self,
@@ -325,14 +352,12 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (x, y, duration) = (r.color_x()?, r.color_y()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_to_color(
-            x,
-            y,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_to_color",
+                plan::move_to_color(x, y, duration, plan::Options::new(mask, override_), &input),
+            )
+            .await
     }
     async fn handle_move_color(
         &self,
@@ -342,13 +367,12 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (rate_x, rate_y) = (r.rate_x()?, r.rate_y()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::move_color(
-            rate_x,
-            rate_y,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_color",
+                plan::move_color(rate_x, rate_y, plan::Options::new(mask, override_), &input),
+            )
+            .await
     }
     async fn handle_step_color(
         &self,
@@ -358,14 +382,12 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
         let (x, y, duration) = (r.step_x()?, r.step_y()?, r.transition_time()?);
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::step_color(
-            x,
-            y,
-            duration,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "step_color",
+                plan::step_color(x, y, duration, plan::Options::new(mask, override_), &input),
+            )
+            .await
     }
     async fn handle_stop_move_step(
         &self,
@@ -374,11 +396,12 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
     ) -> Result<(), Error> {
         let (mask, override_) = (r.options_mask()?.bits(), r.options_override()?.bits());
         let input = self.0.plan_input();
-        self.apply(plan::stop_move_step(
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "stop_move_step",
+                plan::stop_move_step(plan::Options::new(mask, override_), &input),
+            )
+            .await
     }
     async fn handle_move_color_temperature(
         &self,
@@ -394,15 +417,19 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             r.options_override()?.bits(),
         );
         let input = self.0.plan_input();
-        self.apply(plan::move_color_temperature(
-            color_move_mode(mode),
-            rate,
-            min,
-            max,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "move_color_temperature",
+                plan::move_color_temperature(
+                    color_move_mode(mode),
+                    rate,
+                    min,
+                    max,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     async fn handle_step_color_temperature(
         &self,
@@ -419,16 +446,20 @@ impl<const RGB: bool> c::ClusterAsyncHandler for ColorHandler<'_, RGB> {
             r.options_override()?.bits(),
         );
         let input = self.0.plan_input();
-        self.apply(plan::step_color_temperature(
-            color_step_mode(mode),
-            size,
-            duration,
-            min,
-            max,
-            plan::Options::new(mask, override_),
-            &input,
-        ))
-        .await
+        self.0
+            .apply(
+                "step_color_temperature",
+                plan::step_color_temperature(
+                    color_step_mode(mode),
+                    size,
+                    duration,
+                    min,
+                    max,
+                    plan::Options::new(mask, override_),
+                    &input,
+                ),
+            )
+            .await
     }
     unsupported_color!(handle_enhanced_move_to_hue:EnhancedMoveToHueRequest,
         handle_enhanced_move_hue:EnhancedMoveHueRequest,handle_enhanced_step_hue:EnhancedStepHueRequest,

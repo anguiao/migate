@@ -7,7 +7,6 @@ use rs_matter::{
     },
     error::{Error, ErrorCode},
     tlv::Nullable,
-    with,
 };
 use std::cell::Cell;
 
@@ -108,22 +107,7 @@ impl<const ROCKING: bool> AirConditionerFan<ROCKING> {
     }
 }
 impl<const ROCKING: bool> fc::ClusterAsyncHandler for AirConditionerFan<ROCKING> {
-    const CLUSTER: Cluster<'static> = fc::FULL_CLUSTER
-        .with_revision(6)
-        .with_features(
-            fc::Feature::MULTI_SPEED.bits()
-                | fc::Feature::AUTO.bits()
-                | if ROCKING {
-                    fc::Feature::ROCKING.bits()
-                } else {
-                    0
-                },
-        )
-        .with_attrs(|a, _, _| {
-            matches!(a.id, 0..=6 | 0xfff8..=0xfffd) || ROCKING && matches!(a.id, 7 | 8)
-        })
-        .with_cmds(with!())
-        .with_events(with!());
+    const CLUSTER: Cluster<'static> = crate::matter::fan_control::cluster::<ROCKING>(true);
     fn dataver(&self) -> u32 {
         self.sync();
         self.dataver.get()

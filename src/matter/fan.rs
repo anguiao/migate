@@ -1,6 +1,6 @@
 //! Matter fan projection from independent native observations.
-use super::on_off::OnOffHandler;
-use crate::device::{CommandError, FanCommand, Function, FunctionKind};
+use super::{fan_control, on_off::OnOffHandler};
+use crate::device::{FanCommand, Function, FunctionKind};
 use rs_matter::{
     dm::{
         AsyncHandler, ChainedHandler, Cluster, Dataver, HandlerContext, InvokeContext, InvokeReply,
@@ -9,7 +9,6 @@ use rs_matter::{
     },
     error::{Error, ErrorCode},
     tlv::Nullable,
-    with,
 };
 use std::cell::Cell;
 
@@ -73,44 +72,19 @@ impl<const ROCKING: bool> Fan<ROCKING> {
         ChainedHandler::new(
             |_, cluster| cluster == 6,
             on_off::HandlerAsyncAdaptor(&self.on_off),
-            fc::HandlerAsyncAdaptor(&self.control),
+            fan_control::Handler(&self.control),
         )
     }
 }
 impl<const ROCKING: bool> AsyncHandler for Fan<ROCKING> {
     fn bump_dataver(&self, _: impl MatchContext) {}
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
-        if ctx.attr().cluster_id == 0x202
-            && <FanControl<ROCKING> as fc::ClusterAsyncHandler>::CLUSTER
-                .attribute(ctx.attr().attr_id)
-                .is_none()
-        {
-            return Err(ErrorCode::AttributeNotFound.into());
-        }
         self.handler().read(ctx, reply).await
     }
     async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
-        if ctx.attr().cluster_id == 0x202 {
-            if <FanControl<ROCKING> as fc::ClusterAsyncHandler>::CLUSTER
-                .attribute(ctx.attr().attr_id)
-                .is_none()
-            {
-                return Err(ErrorCode::AttributeNotFound.into());
-            }
-            // The generated enum decoder returns Invalid for unknown values.
-            // FanMode reserves those values as a protocol constraint instead.
-            if ctx.attr().attr_id == 0 && ctx.data().u8().is_ok_and(|value| value > 6) {
-                ctx.attr()
-                    .check_dataver(fc::ClusterAsyncHandler::dataver(&self.control))?;
-                return Err(ErrorCode::ConstraintError.into());
-            }
-        }
         self.handler().write(ctx).await
     }
     async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
-        if ctx.cmd().cluster_id == 0x202 {
-            return Err(ErrorCode::CommandNotFound.into());
-        }
         self.handler().invoke(ctx, reply).await
     }
     async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
@@ -156,8 +130,9 @@ impl<const ROCKING: bool> FanControl<ROCKING> {
         Ok((u16::from(self.speed()?) * 100 / u16::from(self.count())) as u8)
     }
     async fn command(&self, command: FanCommand) -> Result<(), Error> {
-        let action = self.function.begin_fan(command).map_err(command_error)?;
-        action.accepted().await.map_err(command_error)?;
+        let on_error = |error| super::command_error(&self.function, command, error);
+        let action = self.function.begin_fan(command).map_err(on_error)?;
+        action.accepted().await.map_err(on_error)?;
         Ok(())
     }
     async fn set_speed(&self, value: Nullable<u8>, percent: bool) -> Result<(), Error> {
@@ -174,31 +149,8 @@ impl<const ROCKING: bool> FanControl<ROCKING> {
         self.command(FanCommand::Speed(speed)).await
     }
 }
-fn command_error(error: CommandError) -> Error {
-    log::warn!("Matter fan command failed: {error}");
-    match error {
-        CommandError::Unsupported => ErrorCode::CommandNotFound,
-        CommandError::Timeout => ErrorCode::RxTimeout,
-        _ => ErrorCode::Failure,
-    }
-    .into()
-}
 impl<const ROCKING: bool> fc::ClusterAsyncHandler for FanControl<ROCKING> {
-    const CLUSTER: Cluster<'static> = fc::FULL_CLUSTER
-        .with_revision(6)
-        .with_features(
-            fc::Feature::MULTI_SPEED.bits()
-                | if ROCKING {
-                    fc::Feature::ROCKING.bits()
-                } else {
-                    0
-                },
-        )
-        .with_attrs(|a, _, _| {
-            matches!(a.id, 0..=6 | 0xfff8..=0xfffd) || ROCKING && matches!(a.id, 7 | 8)
-        })
-        .with_cmds(with!())
-        .with_events(with!());
+    const CLUSTER: Cluster<'static> = fan_control::cluster::<ROCKING>(false);
     fn dataver(&self) -> u32 {
         self.sync();
         self.dataver.get()

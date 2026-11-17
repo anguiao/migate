@@ -94,7 +94,7 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
                 invoke_status(&client, 1, false, IMStatusCode::InvalidCommand).await;
                 assert_eq!(accepted.get(), 0);
                 device.set_availability(Availability::Available);
-                invoke_status(&client, 2, true, IMStatusCode::Failure).await;
+                invoke_status(&client, 2, true, IMStatusCode::InvalidInState).await;
                 read_state(&client, None, true, &[true]).await;
                 device.functions()[0].observe(false);
                 *rejection.borrow_mut() = Some(CommandError::Rejected("denied".into()));

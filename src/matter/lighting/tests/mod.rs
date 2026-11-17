@@ -63,10 +63,11 @@ fn action_plan(task: LightingTask, power: Option<bool>) -> ActionPlan {
 
 async fn execute_color(light: &Lighting, task: ColorTask) -> Result<(), rs_matter::error::Error> {
     light
-        .begin(action_plan(LightingTask::Color(task), None))?
+        .begin(action_plan(LightingTask::Color(task), None))
+        .map_err(|error| crate::matter::command_error(&light.function, task, error))?
         .accepted()
         .await
-        .map_err(super::command_error)?;
+        .map_err(|error| crate::matter::command_error(&light.function, task, error))?;
     light.refresh();
     Ok(())
 }

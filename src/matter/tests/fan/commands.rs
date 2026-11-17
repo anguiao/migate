@@ -12,6 +12,34 @@ async fn next_fan(receiver: &mut CommandReceiver) -> FanRequest {
 }
 
 #[test]
+fn invalid_fan_mode_checks_data_version_before_constraint() {
+    for swing in [false, true] {
+        let (device, mut receiver) = fan_device("fan-version", swing);
+        fan_model!(&device, handler, im);
+        block_on(async {
+            let version = report_dataver(
+                &read_bytes(&handler, &Context::new(&im, 0x202, 4))
+                    .await
+                    .unwrap(),
+            );
+            for mode in [5, 7, 255] {
+                let bytes = [0x04, mode];
+                let mut ctx = Context::new(&im, 0x202, 0);
+                ctx.data = TLVElement::new(&bytes);
+                for (dataver, expected) in [
+                    (version.wrapping_add(1), ErrorCode::DataVersionMismatch),
+                    (version, ErrorCode::ConstraintError),
+                ] {
+                    ctx.attribute.dataver = Some(dataver);
+                    assert_eq!(handler.write(&ctx).await.unwrap_err().code(), expected);
+                    assert!(poll_once(receiver.next_operation()).await.is_none());
+                }
+            }
+        });
+    }
+}
+
+#[test]
 fn writes_dispatch_fan_commands_and_wait_for_all_receipts() {
     let (device, mut receiver) = fan_device("fan-command", true);
     device.set_availability(Availability::Available);
@@ -123,6 +151,10 @@ fn write_failures_and_timeouts_are_returned_to_the_caller() {
     fan_model!(&device, handler, im);
     block_on(async {
         for (failure, expected) in [
+            (CommandError::UnknownState, ErrorCode::InvalidInState),
+            (CommandError::InvalidInState, ErrorCode::InvalidInState),
+            (CommandError::Constraint, ErrorCode::ConstraintError),
+            (CommandError::Unsupported, ErrorCode::CommandNotFound),
             (CommandError::Timeout, ErrorCode::RxTimeout),
             (CommandError::Rejected("failed".into()), ErrorCode::Failure),
         ] {
@@ -141,7 +173,19 @@ fn write_failures_and_timeouts_are_returned_to_the_caller() {
 
 #[test]
 fn on_off_commands_remain_independent_and_toggle_requires_observation() {
-    let (device, mut receiver) = fan_device("fan-command", true);
+    let instance = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/miot/dmaker-p5c.json"
+    ))
+    .unwrap();
+    let parsed = crate::xiaomi::capability::parse_device_for_model(
+        crate::device::DeviceKey::new("xiaomi", "fan-command"),
+        "dmaker.fan.p5c",
+        &instance,
+    )
+    .unwrap();
+    let (device, mut receivers) =
+        crate::device::PhysicalDevice::new(parsed.physical_description("Fan"));
+    let mut receiver = receivers.remove(0);
     device.set_availability(Availability::Available);
     fan_model!(&device, handler, im);
     let function = &device.functions()[0];
@@ -158,7 +202,7 @@ fn on_off_commands_remain_independent_and_toggle_requires_observation() {
                 .await
                 .unwrap_err()
                 .code(),
-            ErrorCode::Failure
+            ErrorCode::InvalidInState
         );
         assert!(poll_once(receiver.next_operation()).await.is_none());
         function.observe_fan(FanValue::Power(true), Some(1), 1);

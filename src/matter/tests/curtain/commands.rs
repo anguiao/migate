@@ -28,7 +28,11 @@ fn curtain_dispatches_commands_and_waits_for_receipts() {
         }
         ctx.command.cmd_id = 2;
         ctx.data = TLVElement::new(&[0x15, 0x18]);
-        {
+        for (failure, expected) in [
+            (CommandError::UnknownState, ErrorCode::InvalidInState),
+            (CommandError::Constraint, ErrorCode::ConstraintError),
+            (CommandError::Timeout, ErrorCode::RxTimeout),
+        ] {
             let mut out = [0; 128];
             let mut invoke = pin!(handler.invoke(
                 &ctx,
@@ -38,8 +42,8 @@ fn curtain_dispatches_commands_and_waits_for_receipts() {
             let request = next_curtain(&mut receiver).await;
             assert_eq!(request.command, CurtainCommand::Stop);
             request.mark_sent().unwrap();
-            request.reject(CommandError::Timeout);
-            assert_eq!(invoke.await.unwrap_err().code(), ErrorCode::RxTimeout);
+            request.reject(failure);
+            assert_eq!(invoke.await.unwrap_err().code(), expected);
         }
         for bytes in [&[][..], &[0x15], &[0x09], &[0x15, 0x24]] {
             ctx.data = TLVElement::new(bytes);

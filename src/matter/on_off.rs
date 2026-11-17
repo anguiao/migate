@@ -1,4 +1,4 @@
-use crate::device::{Command, CommandError, Function, Power};
+use crate::device::{Command, Function, Power};
 use rs_matter::{
     dm::{Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, clusters::app::on_off},
     error::{Error, ErrorCode},
@@ -46,18 +46,7 @@ impl<const DEAD_FRONT: bool> OnOffHandler<DEAD_FRONT> {
         } else {
             self.function.execute(command).await
         };
-        result.map_err(|error| {
-            log::warn!(
-                "Matter {}/{} {command:?} failed: {error}",
-                self.function.function_key().device.id,
-                self.function.function_key().id,
-            );
-            match error {
-                CommandError::Unsupported => ErrorCode::CommandNotFound,
-                CommandError::Timeout => ErrorCode::RxTimeout,
-                _ => ErrorCode::Failure,
-            }
-        })?;
+        result.map_err(|error| super::command_error(&self.function, command, error))?;
         log::info!(
             "Matter {}/{} {command:?}: accepted",
             self.function.function_key().device.id,

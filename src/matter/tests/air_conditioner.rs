@@ -36,6 +36,108 @@ fn device(swing: bool) -> (PhysicalDevice, CommandReceiver) {
     (device, receivers.remove(0))
 }
 
+#[test]
+fn request_entry_uses_the_declared_thermal_and_fan_surface() {
+    for swing in [false, true] {
+        let (device, mut receiver) = device(swing);
+        fan_model!(&device, handler, im);
+        block_on(async {
+            for (cluster, attributes) in [
+                (0x201, vec![7, 8, 19, 20, 21, 22, 23, 24, 30, 41]),
+                (
+                    0x202,
+                    if swing {
+                        vec![9, 10, 11]
+                    } else {
+                        vec![7, 8, 9, 10, 11]
+                    },
+                ),
+            ] {
+                for attribute in attributes {
+                    let mut ctx = Context::new(&im, cluster, attribute);
+                    assert_eq!(
+                        read_bytes(&handler, &ctx).await.unwrap_err().code(),
+                        ErrorCode::AttributeNotFound
+                    );
+                    ctx.data = TLVElement::new(&[0x04, 1]);
+                    assert_eq!(
+                        handler.write(&ctx).await.unwrap_err().code(),
+                        ErrorCode::AttributeNotFound
+                    );
+                }
+                for command in if cluster == 0x201 {
+                    vec![1, 2, 3, 255]
+                } else {
+                    vec![0, 1, 255]
+                } {
+                    let mut ctx = Context::new(&im, cluster, 0);
+                    ctx.command.cmd_id = command;
+                    assert_eq!(
+                        handler
+                            .invoke(
+                                &ctx,
+                                InvokeReplyInstance::new(
+                                    &ctx.command,
+                                    WriteBuf::new(&mut [0; 128])
+                                )
+                            )
+                            .await
+                            .unwrap_err()
+                            .code(),
+                        ErrorCode::CommandNotFound
+                    );
+                }
+            }
+            let version = report_dataver(
+                &read_bytes(&handler, &Context::new(&im, 0x202, 4))
+                    .await
+                    .unwrap(),
+            );
+            for mode in [7, 255] {
+                let bytes = [0x04, mode];
+                let mut ctx = Context::new(&im, 0x202, 0);
+                ctx.data = TLVElement::new(&bytes);
+                for (dataver, expected) in [
+                    (version.wrapping_add(1), ErrorCode::DataVersionMismatch),
+                    (version, ErrorCode::ConstraintError),
+                ] {
+                    ctx.attribute.dataver = Some(dataver);
+                    assert_eq!(handler.write(&ctx).await.unwrap_err().code(), expected);
+                }
+            }
+            assert!(poll_once(receiver.next_operation()).await.is_none());
+        });
+    }
+}
+
+#[test]
+fn thermal_and_fan_write_receipts_share_device_error_mapping() {
+    let (device, mut receiver) = device(true);
+    fan_model!(&device, handler, im);
+    let function = &device.functions()[0];
+    function.observe_air_conditioner(Value::Power(true), Some(1), 1);
+    function.observe_air_conditioner(Value::Mode(Mode::Heat), Some(1), 1);
+    block_on(async {
+        for (cluster, attribute, bytes) in [
+            (0x201, 18, &[0x01, 0xc4, 0x09][..]),
+            (0x202, 0, &[0x04, 1][..]),
+        ] {
+            let mut ctx = Context::new(&im, cluster, attribute);
+            ctx.data = TLVElement::new(bytes);
+            let mut write = pin!(handler.write(&ctx));
+            assert!(poll_once(write.as_mut()).await.is_none());
+            let DeviceRequest::AirConditioner(request) = receiver.next_operation().await.unwrap()
+            else {
+                panic!("expected air-conditioner request");
+            };
+            let step = request.plan().unwrap()[0];
+            request.mark_sent(step).unwrap();
+            request.reject(crate::device::CommandError::UnknownState);
+            assert_eq!(write.await.unwrap_err().code(), ErrorCode::InvalidInState);
+        }
+    });
+}
+
 fn sensor() -> PhysicalDevice {
     PhysicalDevice::new(
         PhysicalDeviceDescription::new(

@@ -2,15 +2,15 @@
 
 use crate::{
     device::{
-        AirConditionerCommand, AirConditionerMode, CommandError, Function, FunctionKind,
-        HeaterCommand, HeaterMode, TemperatureGrid, TemperatureSourceState,
+        AirConditionerCommand, AirConditionerMode, Function, FunctionKind, HeaterCommand,
+        HeaterMode, TemperatureGrid, TemperatureSourceState,
     },
     matter::units,
 };
 use rs_matter::{
     dm::{
-        Cluster, Dataver, HandlerContext, InvokeContext, ReadContext, WriteContext,
-        clusters::decl::thermostat as th,
+        AsyncHandler, Cluster, Dataver, HandlerContext, InvokeContext, InvokeReply, MatchContext,
+        ReadContext, ReadReply, WriteContext, clusters::decl::thermostat as th,
     },
     error::{Error, ErrorCode},
     tlv::{Nullable, TLVBuilderParent},
@@ -120,18 +120,6 @@ impl Profile for HeaterProfile {
     const SETPOINTS: &'static [u32] = &[18];
 }
 
-fn command_error(error: CommandError) -> Error {
-    log::warn!("Matter thermostat command failed: {error}");
-    match error {
-        CommandError::Constraint => ErrorCode::ConstraintError,
-        CommandError::InvalidInState => ErrorCode::InvalidInState,
-        CommandError::Unsupported => ErrorCode::CommandNotFound,
-        CommandError::Timeout => ErrorCode::RxTimeout,
-        _ => ErrorCode::Failure,
-    }
-    .into()
-}
-
 pub(in crate::matter) struct Thermostat<P> {
     function: Function,
     endpoint: u16,
@@ -174,21 +162,23 @@ impl<P: Profile> Thermostat<P> {
         }
     }
     async fn air_conditioner(&self, command: AirConditionerCommand) -> Result<(), Error> {
+        let on_error = |error| super::command_error(&self.function, command, error);
         self.function
             .begin_air_conditioner(command)
-            .map_err(command_error)?
+            .map_err(on_error)?
             .accepted()
             .await
-            .map_err(command_error)?;
+            .map_err(on_error)?;
         Ok(())
     }
     async fn heater(&self, command: HeaterCommand) -> Result<(), Error> {
+        let on_error = |error| super::command_error(&self.function, command, error);
         self.function
             .begin_heater(command)
-            .map_err(command_error)?
+            .map_err(on_error)?
             .accepted()
             .await
-            .map_err(command_error)?;
+            .map_err(on_error)?;
         Ok(())
     }
     async fn temperature(&self, value: i16) -> Result<(), Error> {
@@ -239,6 +229,33 @@ impl<P: Profile> Thermostat<P> {
             }
             _ => unreachable!("thermostat handler has a thermostat function"),
         }
+    }
+}
+
+impl<P: Profile> AsyncHandler for Thermostat<P> {
+    fn bump_dataver(&self, ctx: impl MatchContext) {
+        th::HandlerAsyncAdaptor(self).bump_dataver(ctx);
+    }
+    async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
+        if P::CLUSTER.attribute(ctx.attr().attr_id).is_none() {
+            return Err(ErrorCode::AttributeNotFound.into());
+        }
+        th::HandlerAsyncAdaptor(self).read(ctx, reply).await
+    }
+    async fn write(&self, ctx: impl WriteContext) -> Result<(), Error> {
+        if P::CLUSTER.attribute(ctx.attr().attr_id).is_none() {
+            return Err(ErrorCode::AttributeNotFound.into());
+        }
+        th::HandlerAsyncAdaptor(self).write(ctx).await
+    }
+    async fn invoke(&self, ctx: impl InvokeContext, reply: impl InvokeReply) -> Result<(), Error> {
+        if P::CLUSTER.command(ctx.cmd().cmd_id).is_none() {
+            return Err(ErrorCode::CommandNotFound.into());
+        }
+        th::HandlerAsyncAdaptor(self).invoke(ctx, reply).await
+    }
+    async fn run(&self, ctx: impl HandlerContext) -> Result<(), Error> {
+        th::HandlerAsyncAdaptor(self).run(ctx).await
     }
 }
 

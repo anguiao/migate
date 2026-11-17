@@ -31,21 +31,16 @@ pub(super) struct Lighting {
     color_options: Cell<u8>,
     report: Report,
 }
-pub(super) fn command_error(error: CommandError) -> Error {
-    log::warn!("Matter lighting command failed: {error}");
-    match error {
-        CommandError::Unsupported => ErrorCode::CommandNotFound,
-        CommandError::Timeout => ErrorCode::RxTimeout,
-        CommandError::UnknownState => ErrorCode::InvalidState,
-        _ => ErrorCode::Failure,
-    }
-    .into()
-}
-fn plan_error(error: plan::PlanError) -> Error {
+fn plan_error(function: &Function, command: impl std::fmt::Debug, error: plan::PlanError) -> Error {
+    log::warn!(
+        "Matter {}/{} {command:?} planning failed: {error:?}",
+        function.function_key().device.id,
+        function.function_key().id,
+    );
     match error {
         plan::PlanError::InvalidCommand => ErrorCode::InvalidCommand,
         plan::PlanError::Constraint => ErrorCode::ConstraintError,
-        plan::PlanError::InvalidState => ErrorCode::InvalidState,
+        plan::PlanError::InvalidState => ErrorCode::InvalidInState,
         plan::PlanError::Unsupported => ErrorCode::CommandNotFound,
     }
     .into()
@@ -160,19 +155,28 @@ impl Lighting {
         self.report.sync_remaining(&self.scheduler);
         self.report.remaining_time(dimension)
     }
-    fn begin(&self, plan: ActionPlan) -> Result<Rc<LightAction>, Error> {
+    fn begin(&self, plan: ActionPlan) -> Result<Rc<LightAction>, CommandError> {
         self.refresh();
-        let action = self.scheduler.begin(plan).map_err(command_error)?;
+        let action = self.scheduler.begin(plan)?;
         self.report.sync_remaining(&self.scheduler);
         Ok(action)
     }
-    async fn execute(&self, plan: plan::Plan) -> Result<(), Error> {
+    async fn apply(
+        &self,
+        command: &str,
+        plan: Result<plan::Plan, plan::PlanError>,
+    ) -> Result<(), Error> {
+        self.execute(plan.map_err(|error| plan_error(&self.function, command, error))?)
+            .await
+            .map_err(|error| super::command_error(&self.function, command, error))
+    }
+    async fn execute(&self, plan: plan::Plan) -> Result<(), CommandError> {
         match plan {
             plan::Plan::Ignore => Ok(()),
             plan::Plan::Stop(dimension) => self.stop(dimension),
             plan::Plan::Execute(plan) => {
                 let action = self.begin(plan)?;
-                action.accepted().await.map_err(command_error)?;
+                action.accepted().await?;
                 if matches!(plan.task, Task::Color(_)) {
                     self.refresh();
                 }
@@ -181,22 +185,26 @@ impl Lighting {
         }
     }
     async fn power(&self, command: Command) -> Result<(), Error> {
-        match plan::power(command, &self.plan_input()).map_err(plan_error)? {
+        let on_error = |error| super::command_error(&self.function, command, error);
+        match plan::power(command, &self.plan_input())
+            .map_err(|error| plan_error(&self.function, command, error))?
+        {
             plan::PowerPlan::Execute(command) => {
-                self.function
-                    .execute(command)
-                    .await
-                    .map_err(command_error)?;
+                self.function.execute(command).await.map_err(on_error)?;
             }
             plan::PowerPlan::Begin(plan) => {
-                self.begin(plan)?.accepted().await.map_err(command_error)?;
+                self.begin(plan)
+                    .map_err(on_error)?
+                    .accepted()
+                    .await
+                    .map_err(on_error)?;
             }
         }
         Ok(())
     }
-    fn stop(&self, dimension: LightDimension) -> Result<(), Error> {
+    fn stop(&self, dimension: LightDimension) -> Result<(), CommandError> {
         self.refresh();
-        self.scheduler.stop(dimension).map_err(command_error)?;
+        self.scheduler.stop(dimension)?;
         self.report.sync_remaining(&self.scheduler);
         Ok(())
     }
