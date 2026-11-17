@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 const MIJIA_BASE_URL: &str = "https://api.io.mi.com";
+const SERVICE_TOKEN_EXPIRED: &str = "SERVICETOKEN_EXPIRED";
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -98,10 +99,16 @@ impl MijiaClient {
             return Err(CloudError::new(operation, CloudErrorKind::Unauthorized));
         }
         if status != 200 {
-            return Err(CloudError::new(
-                operation,
-                CloudErrorKind::HttpStatus(status),
-            ));
+            let kind = if status == 426
+                && let Ok(bytes) = response.bytes().await
+                && let Ok(body) = serde_json::from_slice::<Value>(&bytes)
+                && body["message"] == SERVICE_TOKEN_EXPIRED
+            {
+                CloudErrorKind::Unauthorized
+            } else {
+                CloudErrorKind::HttpStatus(status)
+            };
+            return Err(CloudError::new(operation, kind));
         }
         let bytes = response
             .bytes()
@@ -114,7 +121,7 @@ impl MijiaClient {
                 return Err(CloudError::invalid_signature(operation));
             }
             let kind = match envelope.message.as_str() {
-                Some("SERVICETOKEN_EXPIRED" | "auth err") => CloudErrorKind::Unauthorized,
+                Some(SERVICE_TOKEN_EXPIRED | "auth err") => CloudErrorKind::Unauthorized,
                 _ if matches!(envelope.code, 2 | 3) => CloudErrorKind::Unauthorized,
                 _ => CloudErrorKind::Business(envelope.code),
             };

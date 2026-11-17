@@ -60,6 +60,17 @@ fn authentication_protocol_and_http_errors_remain_distinct() {
     for (status, body, expected) in [
         (401, "{}", CloudErrorKind::Unauthorized),
         (
+            426,
+            r#"{"code":0,"message":"SERVICETOKEN_EXPIRED"}"#,
+            CloudErrorKind::Unauthorized,
+        ),
+        (
+            426,
+            r#"{"code":0,"message":"upgrade required"}"#,
+            CloudErrorKind::HttpStatus(426),
+        ),
+        (426, "Upgrade Required", CloudErrorKind::HttpStatus(426)),
+        (
             200,
             r#"{"code":3,"message":"SERVICETOKEN_EXPIRED"}"#,
             CloudErrorKind::Unauthorized,
