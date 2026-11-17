@@ -125,11 +125,6 @@ pub(super) enum RequestKind {
         did: String,
         binding: PropertyBinding,
     },
-    Write {
-        did: String,
-        binding: PropertyBinding,
-        value: bool,
-    },
     WriteProperties {
         did: String,
         properties: Vec<(PropertyBinding, Value)>,
@@ -150,11 +145,6 @@ impl RequestKind {
                 "master/proxy/get",
                 json!({"did":did,"siid":binding.siid,"piid":binding.piid}),
             ),
-            Self::Write {
-                did,
-                binding,
-                value,
-            } => write_payload(did, &[(*binding, json!(value))]),
             Self::WriteProperties { did, properties } => write_payload(did, properties),
             Self::Subscribe { .. } | Self::Unsubscribe { .. } => {
                 unreachable!("subscriptions do not publish MIPS requests")
@@ -177,7 +167,7 @@ impl RequestKind {
             Self::Subscribe { .. } => "subscribe",
             Self::Unsubscribe { .. } => "unsubscribe",
             Self::Read { .. } => "get",
-            Self::Write { .. } | Self::WriteProperties { .. } => "set",
+            Self::WriteProperties { .. } => "set",
         }
     }
     pub(super) fn did(&self) -> &str {
@@ -186,7 +176,6 @@ impl RequestKind {
             Self::Subscribe { did, .. }
             | Self::Unsubscribe { did, .. }
             | Self::Read { did, .. }
-            | Self::Write { did, .. }
             | Self::WriteProperties { did, .. } => did,
         }
     }
@@ -323,7 +312,8 @@ impl SessionHandle {
         )
     }
 
-    /// Cancel this device's existing work before the driver processes another frame.
+    /// Retire device work before another frame is processed. Writes that may
+    /// have been sent keep their original receipt; unsent writes are cancelled.
     pub fn cancel_device(&self, did: &str) -> Result<(), CentralError> {
         self.cancel(did, CancellationScope::Device)
     }
@@ -428,26 +418,6 @@ impl SessionHandle {
             move |outcome| on_result(outcome.result),
         );
         async move { submitted.await.result }
-    }
-    pub fn set_property_guarded<F: FnOnce(RequestOutcome<()>) + 'static>(
-        &self,
-        did: &str,
-        binding: PropertyBinding,
-        value: bool,
-        hooks: SendHooks,
-        on_result: F,
-    ) -> impl Future<Output = RequestOutcome<()>> + use<F> {
-        self.submit(
-            RequestKind::Write {
-                did: did.into(),
-                binding,
-                value,
-            },
-            self.timing.request,
-            Some(hooks),
-            |_| (),
-            on_result,
-        )
     }
     pub fn read_property_observation_with_timeout_guarded<
         F: FnOnce(RequestOutcome<PropertyReading>) + 'static,

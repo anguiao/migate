@@ -421,6 +421,20 @@ impl SessionHandle {
             on_result,
         )
     }
+    pub(crate) fn set_property_guarded<F: FnOnce(RequestOutcome<()>) + 'static>(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+        value: bool,
+        hooks: SendHooks,
+        on_result: F,
+    ) -> impl Future<Output = RequestOutcome<()>> + use<F> {
+        let submitted =
+            self.set_properties_guarded(did, &[(binding, json!(value))], hooks, move |outcome| {
+                on_result(single_write_outcome(outcome))
+            });
+        async move { single_write_outcome(submitted.await) }
+    }
     pub(crate) fn set_properties<
         F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static,
     >(
@@ -441,6 +455,22 @@ impl SessionHandle {
 fn value_outcome(outcome: RequestOutcome<PropertyReading>) -> RequestOutcome<Value> {
     RequestOutcome {
         result: outcome.result.map(|reading| reading.value),
+        stage: outcome.stage,
+        timeout: outcome.timeout,
+    }
+}
+
+fn single_write_outcome(
+    outcome: RequestOutcome<PropertyResults<(), CentralError>>,
+) -> RequestOutcome<()> {
+    RequestOutcome {
+        result: outcome.result.and_then(|results| {
+            if results.protocol_error {
+                Err(CentralError::Protocol)
+            } else {
+                results.items.into_iter().next().unwrap()
+            }
+        }),
         stage: outcome.stage,
         timeout: outcome.timeout,
     }

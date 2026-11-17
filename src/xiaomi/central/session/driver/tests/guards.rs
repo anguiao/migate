@@ -42,7 +42,7 @@ fn guarded_write_rechecks_after_pending_and_withdraws_without_sending() {
         reply(
             &mut driver,
             mid,
-            json!({"result":[{"did":"target","code":0}]}),
+            json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
         );
         driver.finish_all(CentralError::Cancelled);
         assert_eq!(callbacks.borrow().len(), 1);
@@ -128,7 +128,7 @@ fn guarded_write_locks_the_decision_and_reports_first_send_once() {
         reply(
             &mut driver,
             mid,
-            json!({"result":[{"did":"target","code":0}]}),
+            json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
         );
         let expected = RequestOutcome {
             result: Ok(()),

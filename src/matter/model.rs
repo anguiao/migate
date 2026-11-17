@@ -196,7 +196,6 @@ pub(super) fn handler_from(
                         endpoint,
                         Dataver::new(versions.on_off),
                         relay.scope.clone(),
-                        renamer.clone(),
                     ),
                     bridged: BridgedHandler::new(
                         device,

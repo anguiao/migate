@@ -299,20 +299,20 @@ fn a_closed_outlet_does_not_observe_a_late_cloud_write_receipt() {
             .admitted
             .clone()
             .unwrap();
-        record.physical().close();
+        record.current_sink().close();
+        assert!(poll_once(command.as_mut()).await.is_none());
         release.send(()).unwrap();
-        assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
-        // The closed future settles first; wait for the late HTTP receipt to
-        // pass through Observations::accept_write before checking the state.
+        command.await.unwrap();
         until(|| {
             let status = c
                 .context
                 .commands
                 .snapshot("one", ["outlet:2".to_owned()].into_iter());
             status[0].inflight.is_none()
-                && status[0].last.as_ref().is_some_and(|last| {
-                    last.result == Some(Err(crate::device::CommandError::Cancelled))
-                })
+                && status[0]
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| last.result == Some(Ok(())))
         })
         .await;
         assert_eq!(one.snapshot().power(), Some(Power::Off));

@@ -202,11 +202,12 @@ async fn member_task(
                 function_id: &member_id,
                 properties: properties.clone(),
                 retain_feedback: false,
-                gate: &gate,
+                gate: Some(&gate),
                 operation: &operation.0,
                 mark: &mark,
                 current: &current,
                 frame_current: None,
+                on_receipt: None,
             },
         )
         .await

@@ -197,10 +197,10 @@ impl SessionDriver {
                 .pending
                 .iter()
                 .filter_map(|(mid, request)| {
-                    request
-                        .kind
-                        .cancelled_for(&did, cancellation.scope)
-                        .then_some(*mid)
+                    (request.kind.cancelled_for(&did, cancellation.scope)
+                        && (request.stage == super::request::RequestStage::NotSent
+                            || !matches!(request.kind, RequestKind::WriteProperties { .. })))
+                    .then_some(*mid)
                 })
                 .collect::<Vec<_>>();
             for mid in &pending {

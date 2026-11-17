@@ -116,7 +116,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
                     reply(
                         &mut driver,
                         mid,
-                        json!({"result":[{"did":"target","code":0}]}),
+                        json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
                     );
                     RequestOutcome {
                         result: Ok(()),
@@ -145,7 +145,7 @@ fn detailed_outcomes_distinguish_response_timeout_from_transport_and_business_re
             reply(
                 &mut driver,
                 mid,
-                json!({"result":[{"did":"target","code":0}]}),
+                json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
             );
             assert_eq!(callbacks.borrow().len(), 1);
         }

@@ -168,11 +168,12 @@ pub(super) async fn send<R: StepRequest>(
                             properties: vec![(*binding, value.clone())],
                             retain_feedback: false,
                             after_write: None,
-                            gate: &gate,
+                            gate: Some(&gate),
                             operation: &operation.0,
                             mark: &mark,
                             current: &current,
                             frame_current: frame_current.as_ref(),
+                            on_receipt: None,
                         },
                     )
                     .await

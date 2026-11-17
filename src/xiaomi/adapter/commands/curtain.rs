@@ -67,11 +67,12 @@ pub(super) async fn send(
                 properties: vec![property.clone()],
                 retain_feedback: false,
                 after_write: None,
-                gate: &gate,
+                gate: Some(&gate),
                 operation: &operation.0,
                 mark: &mark,
                 current: &current,
                 frame_current: None,
+                on_receipt: None,
             },
         )
         .await

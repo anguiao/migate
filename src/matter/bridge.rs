@@ -63,7 +63,6 @@ pub(crate) trait LabelWriter {
         key: &FunctionKey,
         label: &str,
     ) -> Result<(), StorageError>;
-    fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool;
 }
 
 /// One frozen Matter instance and storage failures that outlive its run future.

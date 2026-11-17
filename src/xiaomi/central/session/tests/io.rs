@@ -27,7 +27,11 @@ fn short_writes_preserve_offsets_and_partial_timeout_closes_without_replay() {
                         };
                         broker.acknowledge(&write).await;
                         broker
-                            .reply(&write, json!({"result":[{"did":"target","code":0}]}), pkid)
+                            .reply(
+                                &write,
+                                json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
+                                pkid,
+                            )
                             .await;
                     }
                     async_io::Timer::after(Duration::from_millis(20)).await;

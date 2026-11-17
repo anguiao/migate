@@ -92,7 +92,7 @@ fn received_property_invalidation_keeps_subscriptions_and_business_requests() {
         reply(
             &mut driver,
             write_id,
-            json!({"result":[{"did":"target","code":0}]}),
+            json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
         );
         assert_eq!(read.await.result.unwrap(), json!(false));
         write.await.result.unwrap();
@@ -194,7 +194,7 @@ fn property_unsubscription_keeps_business_writes_and_retires_late_subacks() {
         reply(
             &mut driver,
             mid,
-            json!({"result":[{"did":"target","code":0}]}),
+            json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
         );
         assert_eq!(write.await.result, Ok(()));
         reply(&mut driver, read_id, json!({"value":false}));

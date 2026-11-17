@@ -154,13 +154,6 @@ impl LabelWriter for NoLabels {
     ) -> Result<(), StorageError> {
         panic!("relay label writes require an application fixture")
     }
-    fn relay_accessible(
-        &self,
-        _: &crate::configuration::Scope,
-        _: &crate::device::FunctionKey,
-    ) -> bool {
-        false
-    }
 }
 
 pub(super) fn startup_error(store: &Store) -> RuntimeError {

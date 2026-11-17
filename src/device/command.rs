@@ -169,7 +169,8 @@ impl CommandCoordinator {
         if light {
             self.cancel_pending_light(error);
         } else {
-            self.drain_all_power(error);
+            self.invalidate_active_power(error.clone());
+            self.drain_pending_power(error);
         }
     }
     /// Losing availability ends queued work and unsent flights; an original
@@ -370,15 +371,6 @@ impl CommandCoordinator {
     fn drain_pending_power(&mut self, error: CommandError) {
         for pending in self.power.drain(..) {
             pending.completion.finish(Err(error.clone()));
-        }
-    }
-    /// End every queued and active power command; used when a function closes.
-    fn drain_all_power(&mut self, error: CommandError) {
-        self.drain_pending_power(error.clone());
-        if let Some(flight) = self.flight.take()
-            && let Flight::Power(flight) = &*flight
-        {
-            flight.completion.finish(Err(error));
         }
     }
     fn enqueue_light(&mut self, action: Arc<Action>, mut target: LightTarget, final_frame: bool) {

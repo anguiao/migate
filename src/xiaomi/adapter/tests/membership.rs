@@ -479,7 +479,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
                     && !peer.state.borrow().unsubscribes.is_empty()
             })
             .await;
-            assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
+            assert!(poll_once(command.as_mut()).await.is_none());
             let subs = std::mem::take(&mut peer.state.borrow_mut().held_subs);
             for sub in subs {
                 peer.send(Packet::SubAck(SubAck::new(
@@ -489,6 +489,7 @@ fn removed_pending_reads_subscriptions_and_commands_cannot_revive_a_device() {
             }
             peer.release("one", 2, json!({"value":true})).await;
             peer.release("one", 2, accepted("one", 2, 0)).await;
+            command.await.unwrap();
             peer.notify("one", 2, true);
             peer.notify("multi", 4, true);
             until(|| {

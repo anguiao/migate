@@ -1,19 +1,15 @@
 use super::{
     model::{AdapterError, PathKind, StepReceipt},
-    routing::ControlPath,
     state::{Context, LogicalSink},
     work::DeviceWork,
 };
 use crate::{
-    device::{CommandError, CommandReceiver, CommandRequest, DeviceRequest},
-    xiaomi::central::{CentralError, RequestStage, SendDecision, SendHooks, SessionHandle},
+    device::{CommandError, CommandReceiver, DeviceRequest},
+    xiaomi::central::CentralError,
 };
 use event_listener::Event;
 use futures_lite::future;
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use std::{cell::Cell, rc::Rc};
 
 mod air_conditioner;
 mod curtain;
@@ -21,6 +17,8 @@ mod fan;
 mod feedback;
 mod gates;
 mod heater;
+mod lighting;
+mod power;
 mod properties;
 mod records;
 mod refresh;
@@ -44,128 +42,6 @@ fn command_error(error: CentralError) -> CommandError {
         CentralError::Cancelled => CommandError::Cancelled,
         error => CommandError::SendFailed(error.to_string()),
     }
-}
-
-/// Direct terminal writes do not carry a home relay restriction. Home writes
-/// must still belong to the admitted source and its latest confirmed mode at
-/// the transport boundary, even if the committed publication is older.
-fn relay_allowed(
-    context: &Rc<Context>,
-    work: &DeviceWork,
-    id: &str,
-    request: &CommandRequest,
-) -> bool {
-    let Some((uid, home_id)) = request.relay_home() else {
-        return true;
-    };
-    let scope = crate::configuration::Scope {
-        uid: uid.to_owned(),
-        home_id: home_id.to_owned(),
-    };
-    let key = crate::device::FunctionKey::new(work.key.clone(), id);
-    super::publication::SourceHandle(context.clone()).relay_accessible(&scope, &key)
-}
-/// Return ownership only when the request was withdrawn before transmission.
-async fn send_local_write(
-    context: &Rc<Context>,
-    handle: SessionHandle,
-    work: Rc<DeviceWork>,
-    sink: Rc<LogicalSink>,
-    id: &str,
-    request: CommandRequest,
-    operation: Rc<CommandOperation>,
-) -> Option<CommandRequest> {
-    let binding = work.binding(id);
-    let did = work.key.id.clone();
-    let target = request.target;
-    let pending = Rc::new(RefCell::new(Some(request)));
-    let completion = pending.clone();
-    let observing = work.clone();
-    let observing_sink = sink.clone();
-    let id = id.to_owned();
-    let stamp = Rc::new(RefCell::new(None));
-    let capture_stamp = stamp.clone();
-    let capture_work = work.clone();
-    let capture_id = id.clone();
-    let guard_work = work.clone();
-    let guard_sink = sink.clone();
-    let guard_context = context.clone();
-    let guard_handle = handle.clone();
-    let guard_did = did.clone();
-    let guard_id = id.clone();
-    let guard_request = pending.clone();
-    let result_context = context.clone();
-    let result_handle = handle.clone();
-    let submitted = operation.clone();
-    let hooks = SendHooks::new(
-        move || {
-            if guard_work.life.is_closed()
-                || guard_sink.life.is_closed()
-                || !guard_context.current_local(&guard_handle)
-                || guard_request.borrow().as_ref().is_none_or(|request| {
-                    request.current_result().is_err()
-                        || !relay_allowed(&guard_context, &guard_work, &guard_id, request)
-                })
-            {
-                SendDecision::Cancel
-            } else if matches!(guard_context.control_path_for(&guard_did, &guard_id), Some(ControlPath::Local(selected)) if selected.same_connection(&guard_handle))
-            {
-                SendDecision::Send
-            } else {
-                SendDecision::Withdraw
-            }
-        },
-        move || {
-            submitted.submitted(super::model::PathKind::Local);
-            capture_work.invalidate_shared_read_for_function(&capture_id);
-            let read_pending = capture_work.refresh.borrow().contains(&capture_id, binding);
-            *capture_stamp.borrow_mut() = Some(capture_work.observations.write_stamp(
-                &capture_id,
-                binding,
-                read_pending,
-            ));
-        },
-    );
-    handle
-        .set_property_guarded(&did, binding, target, hooks, move |outcome| {
-            result_context.local_device_outcome(&result_handle, &observing, &outcome);
-            if outcome.result == Err(CentralError::Withdrawn)
-                && outcome.stage == RequestStage::NotSent
-            {
-                return;
-            }
-            let request = completion.borrow_mut().take().unwrap();
-            match outcome.result {
-                Ok(()) => {
-                    operation.receipts(vec![StepReceipt::Accepted]);
-                    if let Some(stamp) = stamp.borrow_mut().take() {
-                        let result = observing.observations.accept_write(
-                            &observing,
-                            &observing_sink,
-                            &id,
-                            &stamp,
-                            !refresh::notifications_ready(&result_context, &observing, &id),
-                            request,
-                        );
-                        operation.schedule_feedback(&result_context, &observing, &observing_sink);
-                        operation.finish(result);
-                    } else {
-                        let error =
-                            CommandError::SendFailed("gateway accepted an unsent write".into());
-                        operation.reject(request, error);
-                    }
-                }
-                Err(error) => {
-                    if outcome.stage != RequestStage::NotSent {
-                        operation.receipts(vec![properties::local_receipt(&error)]);
-                    }
-                    operation.reject(request, command_error(error));
-                    operation.schedule_feedback(&result_context, &observing, &observing_sink);
-                }
-            }
-        })
-        .await;
-    pending.borrow_mut().take()
 }
 
 pub(super) async fn consume(
@@ -251,9 +127,9 @@ async fn send_owned(
             }
         } else {
             let DeviceRequest::Power(request) = request else {
-                unreachable!("only outlet commands have no device write gate")
+                unreachable!("only ordinary power commands have no device write gate")
             };
-            send_power(request, owner, work, sink, &id).await
+            power::send(request, owner, work, sink, &id).await
         };
         done.0.set(true);
         done.1.notify(usize::MAX);
@@ -268,211 +144,5 @@ async fn send_owned(
     }
 }
 
-async fn send_power(
-    request: CommandRequest,
-    context: Rc<Context>,
-    work: Rc<DeviceWork>,
-    sink: Rc<LogicalSink>,
-    function_id: &str,
-) -> Result<(), AdapterError> {
-    let did = work.key.id.clone();
-    let binding = work.binding(function_id);
-    let target = request.target;
-    let command = context
-        .commands
-        .begin(&did, function_id, binding, target, request.queued_at());
-    let mut request = request;
-    loop {
-        if work.life.is_closed() || sink.life.is_closed() {
-            command.0.reject(request, CommandError::Cancelled);
-            break;
-        }
-        if let Err(error) = request.current_result() {
-            command.0.reject(request, error);
-            break;
-        }
-        if !relay_allowed(&context, &work, function_id, &request) {
-            command.0.reject(
-                request,
-                CommandError::Unavailable("relay is not currently available to Home".into()),
-            );
-            break;
-        }
-        let Some(path) = context.control_path_for(&did, function_id) else {
-            command.0.reject(
-                request,
-                CommandError::Unavailable("no usable control path".into()),
-            );
-            break;
-        };
-        match path {
-            ControlPath::Local(handle) => {
-                let Some(withdrawn) = send_local_write(
-                    &context,
-                    handle,
-                    work.clone(),
-                    sink.clone(),
-                    function_id,
-                    request,
-                    command.0.clone(),
-                )
-                .await
-                else {
-                    break;
-                };
-                request = withdrawn;
-            }
-            ControlPath::Direct(client) => {
-                use crate::xiaomi::lan::{Failure, RequestError, SendStage};
-                let stamp = RefCell::new(None);
-                let invalidate_work = work.clone();
-                let invalidate_id = function_id.to_owned();
-                let result = super::lan::set_properties(
-                    &client,
-                    &did,
-                    &[(binding, serde_json::Value::Bool(target))],
-                    || {
-                        !work.life.is_closed()
-                            && !sink.life.is_closed()
-                            && request.current_result().is_ok()
-                            && relay_allowed(&context, &work, function_id, &request)
-                            && matches!(context.control_path_for(&did, function_id), Some(ControlPath::Direct(selected)) if selected.same(&client))
-                    },
-                    || {
-                        let _ = request.mark_sent();
-                        command.0.submitted(super::model::PathKind::Direct);
-                        invalidate_work.invalidate_shared_read_for_function(&invalidate_id);
-                        let read_pending = work.refresh.borrow().contains(function_id, binding);
-                        *stamp.borrow_mut() = Some(work.observations.write_stamp(function_id, binding, read_pending));
-                    },
-                ).await;
-                match result {
-                    Err(error)
-                        if error.stage == SendStage::BeforeSend
-                            && error.failure == Failure::Withdrawn =>
-                    {
-                        continue;
-                    }
-                    Err(error) => {
-                        context.lan_business_failure(&did, &client, &error)?;
-                        if error.stage == SendStage::BeforeSend {
-                            continue;
-                        }
-                        command.0.receipts(vec![properties::direct_receipt(&error)]);
-                        command
-                            .0
-                            .reject(request, properties::direct_command_error(&error));
-                        command.0.schedule_feedback(&context, &work, &sink);
-                    }
-                    Ok(results) => {
-                        command.0.receipts(
-                            results
-                                .items
-                                .iter()
-                                .map(|item| match item {
-                                    Ok(()) => StepReceipt::Accepted,
-                                    Err(error) => properties::direct_receipt(error),
-                                })
-                                .collect(),
-                        );
-                        let mut maintenance = None;
-                        if results.protocol_error {
-                            maintenance = context
-                                .lan_business_failure(
-                                    &did,
-                                    &client,
-                                    &RequestError {
-                                        stage: SendStage::Sent,
-                                        failure: Failure::InvalidResponse,
-                                    },
-                                )
-                                .err();
-                            command.0.reject(
-                                request,
-                                CommandError::SendFailed("invalid direct response".into()),
-                            );
-                        } else if let Some(error) =
-                            results.items.iter().find_map(|item| item.as_ref().err())
-                        {
-                            command
-                                .0
-                                .reject(request, properties::direct_command_error(error));
-                        } else {
-                            let result = work.observations.accept_write(
-                                &work,
-                                &sink,
-                                function_id,
-                                &stamp.into_inner().unwrap(),
-                                true,
-                                request,
-                            );
-                            command.0.finish(result);
-                        }
-                        command.0.schedule_feedback(&context, &work, &sink);
-                        if let Some(error) = maintenance {
-                            return Err(error);
-                        }
-                    }
-                }
-                break;
-            }
-            ControlPath::Cloud(credentials) => {
-                if !context.current_mijia(&credentials) {
-                    command.0.reject(
-                        request,
-                        CommandError::Unavailable("Mijia session changed".into()),
-                    );
-                    break;
-                }
-                let read_pending = work.refresh.borrow().contains(function_id, binding);
-                let stamp = work
-                    .observations
-                    .write_stamp(function_id, binding, read_pending);
-                work.invalidate_shared_read_for_function(function_id);
-                command.0.submitted(super::model::PathKind::Cloud);
-                match context
-                    .mijia
-                    .set_property(&credentials.session, &did, binding, target)
-                    .await
-                {
-                    Ok(()) => {
-                        command.0.receipts(vec![StepReceipt::Accepted]);
-                        let current = context.current_mijia(&credentials);
-                        let result = if current {
-                            work.observations.accept_write(
-                                &work,
-                                &sink,
-                                function_id,
-                                &stamp,
-                                !refresh::notifications_ready(&context, &work, function_id),
-                                request,
-                            )
-                        } else {
-                            request.accept().map(|_| ())
-                        };
-                        if current {
-                            command.0.schedule_feedback(&context, &work, &sink);
-                        }
-                        command.0.finish(result);
-                    }
-                    Err(error) => {
-                        command.0.receipts(vec![properties::cloud_receipt(&error)]);
-                        let command_error = properties::cloud_command_error(&error);
-                        command.0.reject(request, command_error);
-                        command.0.schedule_feedback(&context, &work, &sink);
-                        let current = !work.life.is_closed() && !sink.life.is_closed();
-                        // Account failures remain relevant after a binding is replaced.
-                        context.cloud_error(&credentials, current.then_some(did.as_str()), &error);
-                    }
-                }
-                break;
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests;
-
-mod lighting;

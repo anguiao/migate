@@ -643,3 +643,42 @@ fn cp7pd_matter_channels_and_master_trigger_preserve_the_outlet_layout() {
         .join()
         .unwrap();
 }
+
+#[test]
+fn single_power_receipt_preserves_correlated_acceptance_from_an_invalid_batch() {
+    use crate::xiaomi::adapter::StepReceipt;
+    block_on(Rig::new(true, &["one"]).run(|c| async move {
+        c.announce();
+        let peer = Rc::new(Peer::default());
+        let control = &c;
+        c.peer(peer, |peer| async move {
+            initialized(control, &peer, &["one"]).await;
+            peer.state.borrow_mut().hold_writes = true;
+            let outlet = function(&control.context.registry, "one", "outlet:2");
+            let mut action = Box::pin(outlet.execute(Command::On));
+            assert!(poll_once(action.as_mut()).await.is_none());
+            until(|| peer.count("rpcReq", "one", 2) == 1).await;
+            peer.release(
+                "one",
+                2,
+                json!({"result":[
+                    {"did":"one","siid":2,"piid":1,"code":0},
+                    {"did":"other","siid":2,"piid":1,"code":0}
+                ]}),
+            )
+            .await;
+            assert!(matches!(
+                action.await,
+                Err(crate::device::CommandError::SendFailed(_))
+            ));
+            assert_eq!(outlet.snapshot().power(), Some(Power::Off));
+            let status = control.context.diagnostics();
+            let last = status.devices[0].commands[0].last.as_ref().unwrap();
+            assert_eq!(last.actual_path, Some(PathKind::Local));
+            assert_eq!(last.steps.len(), 1);
+            assert_eq!(last.steps[0].receipt, StepReceipt::Accepted);
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
+        })
+        .await;
+    }));
+}

@@ -67,10 +67,10 @@ pub(super) fn alive(work: &DeviceWork, sink: &LogicalSink) -> bool {
     !work.life.is_closed() && !sink.life.is_closed()
 }
 
-/// One settled property batch: logical result plus a fallible cloud report.
+/// One settled property batch: logical result plus a transport maintenance report.
 pub(super) struct BatchReceipt {
     pub(super) result: Result<(), CommandError>,
-    /// A fallible cloud maintenance report after the receipt already settled.
+    /// A fallible transport maintenance report after the receipt already settled.
     pub(super) maintenance: Option<AdapterError>,
 }
 
@@ -97,11 +97,47 @@ pub(super) fn settle_direct_failure(
     }
 }
 
-fn settled(result: Result<(), CommandError>) -> BatchAttempt {
-    BatchAttempt::Settled(BatchReceipt {
-        result,
-        maintenance: None,
-    })
+/// Apply the caller's observation decision after shared receipt settlement.
+/// Local completion keeps this inside the response callback so later frames
+/// cannot overtake the accepted write's observation.
+pub(super) type ReceiptHandler = dyn Fn(Result<(), CommandError>, bool) -> Result<(), CommandError>;
+
+fn complete_receipt(
+    mut receipt: BatchReceipt,
+    on_receipt: Option<&Rc<ReceiptHandler>>,
+    observation_current: bool,
+) -> BatchReceipt {
+    if let Some(on_receipt) = on_receipt {
+        receipt.result = on_receipt(receipt.result, observation_current);
+    }
+    receipt
+}
+
+fn complete_attempt(
+    attempt: BatchAttempt,
+    on_receipt: Option<&Rc<ReceiptHandler>>,
+    observation_current: bool,
+) -> BatchAttempt {
+    match attempt {
+        BatchAttempt::Withdrawn => BatchAttempt::Withdrawn,
+        BatchAttempt::Settled(receipt) => {
+            BatchAttempt::Settled(complete_receipt(receipt, on_receipt, observation_current))
+        }
+    }
+}
+
+fn settled(
+    result: Result<(), CommandError>,
+    on_receipt: Option<&Rc<ReceiptHandler>>,
+) -> BatchAttempt {
+    BatchAttempt::Settled(complete_receipt(
+        BatchReceipt {
+            result,
+            maintenance: None,
+        },
+        on_receipt,
+        true,
+    ))
 }
 
 /// Concrete inputs for one attempt of one property batch.
@@ -110,13 +146,16 @@ pub(super) struct Batch<'a> {
     pub(super) properties: Vec<(PropertyBinding, Value)>,
     pub(super) retain_feedback: bool,
     pub(super) after_write: Option<AfterWrite>,
-    pub(super) gate: &'a Rc<super::DeviceWriteGate>,
+    pub(super) gate: Option<&'a Rc<super::DeviceWriteGate>>,
     pub(super) operation: &'a Rc<super::CommandOperation>,
     pub(super) mark: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
     /// Ownership and the exact error once the request is superseded.
     pub(super) current: &'a Rc<dyn Fn() -> Result<(), CommandError>>,
     /// An unsent property plan withdraws when its re-encode no longer matches.
     pub(super) frame_current: Option<&'a Rc<dyn Fn() -> bool>>,
+    /// Inline logical settlement after shared receipts. The flag permits
+    /// observations only while the originating credentials remain current.
+    pub(super) on_receipt: Option<&'a Rc<ReceiptHandler>>,
 }
 
 /// Submit one exact property batch over the device's current path. The sender
@@ -139,22 +178,24 @@ pub(super) async fn submit_properties(
         mark,
         current,
         frame_current,
+        on_receipt,
     } = batch;
     let did = work.key.id.clone();
-    let authority = gate.authority();
+    let gate = gate.map(|gate| (gate.clone(), gate.authority()));
     if let Err(error) = current() {
-        return settled(Err(error));
+        return settled(Err(error), on_receipt);
     }
     if !alive(work, sink) {
-        return settled(Err(CommandError::Cancelled));
+        return settled(Err(CommandError::Cancelled), on_receipt);
     }
     if frame_current.is_some_and(|frame| !frame()) {
         return BatchAttempt::Withdrawn;
     }
     let Some(path) = context.control_path_for(&did, function_id) else {
-        return settled(Err(CommandError::Unavailable(
-            "no usable control path".into(),
-        )));
+        return settled(
+            Err(CommandError::Unavailable("no usable control path".into())),
+            on_receipt,
+        );
     };
     match path {
         ControlPath::Local(handle) => {
@@ -180,6 +221,7 @@ pub(super) async fn submit_properties(
             let result_id = function_id.to_owned();
             let result_current = current.clone();
             let result_operation = operation.clone();
+            let result_on_receipt = on_receipt.cloned();
             let hooks = SendHooks::new(
                 move || {
                     if guard_work.life.is_closed()
@@ -204,8 +246,8 @@ pub(super) async fn submit_properties(
                     // failed mark can only mean the frame was retired.
                     let _ = guard_mark();
                     guard_operation.submitted(PathKind::Local);
-                    if retain_feedback {
-                        guard_gate.register_feedback_for(authority, &guard_properties);
+                    if retain_feedback && let Some((gate, authority)) = &guard_gate {
+                        gate.register_feedback_for(*authority, &guard_properties);
                     }
                 },
             );
@@ -216,7 +258,8 @@ pub(super) async fn submit_properties(
                     {
                         return;
                     }
-                    if let Some(after_write) = after_write
+                    if let (Some(after_write), Some((gate, authority))) =
+                        (after_write, &result_gate)
                         && outcome.stage != RequestStage::NotSent
                     {
                         after_write(
@@ -224,8 +267,8 @@ pub(super) async fn submit_properties(
                             &result_work,
                             &result_id,
                             &result_properties,
-                            &result_gate,
-                            authority,
+                            gate,
+                            *authority,
                         );
                     }
                     result_context.local_device_outcome(&result_handle, &result_work, &outcome);
@@ -241,12 +284,14 @@ pub(super) async fn submit_properties(
                                     })
                                     .collect(),
                             );
-                            result_gate.finish_feedback_for(
-                                authority,
-                                &result_properties,
-                                &results,
-                                retain_feedback,
-                            );
+                            if let Some((gate, authority)) = &result_gate {
+                                gate.finish_feedback_for(
+                                    *authority,
+                                    &result_properties,
+                                    &results,
+                                    retain_feedback,
+                                );
+                            }
                             for error in results.items.iter().filter_map(|item| item.as_ref().err())
                             {
                                 result_context.local_device_outcome(
@@ -277,7 +322,9 @@ pub(super) async fn submit_properties(
                                 result_operation
                                     .receipts(vec![local_receipt(&error); result_properties.len()]);
                             }
-                            result_gate.cancel_feedback();
+                            if let Some((gate, _)) = &result_gate {
+                                gate.cancel_feedback();
+                            }
                             let result = if outcome.stage == RequestStage::NotSent {
                                 // A cancelled not-sent request may already be
                                 // superseded; keep its actual error.
@@ -293,7 +340,8 @@ pub(super) async fn submit_properties(
                             }
                         }
                     };
-                    *result_slot.borrow_mut() = Some(receipt);
+                    *result_slot.borrow_mut() =
+                        Some(complete_receipt(receipt, result_on_receipt.as_ref(), true));
                 })
                 .await;
             match slot.borrow_mut().take() {
@@ -311,8 +359,8 @@ pub(super) async fn submit_properties(
             let on_sent = || {
                 let _ = mark();
                 operation.submitted(PathKind::Direct);
-                if retain_feedback {
-                    gate.register_feedback_for(authority, &properties);
+                if retain_feedback && let Some((gate, authority)) = &gate {
+                    gate.register_feedback_for(*authority, &properties);
                 }
             };
             let result = if let Some(mapping) = context.legacy_mapping(&did) {
@@ -327,9 +375,12 @@ pub(super) async fn submit_properties(
                 {
                     Ok(results) => Ok(results),
                     Err(super::super::legacy_miio::WriteError::Mapping) => {
-                        return settled(Err(CommandError::SendFailed(
-                            "invalid legacy miIO mapping input".into(),
-                        )));
+                        return settled(
+                            Err(CommandError::SendFailed(
+                                "invalid legacy miIO mapping input".into(),
+                            )),
+                            on_receipt,
+                        );
                     }
                     Err(super::super::legacy_miio::WriteError::Request(error)) => Err(error),
                 }
@@ -346,21 +397,21 @@ pub(super) async fn submit_properties(
             if matches!(&result, Err(error) if error.stage == SendStage::BeforeSend && error.failure == Failure::Withdrawn)
             {
                 if let Err(error) = current() {
-                    return settled(Err(error));
+                    return settled(Err(error), on_receipt);
                 }
                 return if alive(work, sink) {
                     BatchAttempt::Withdrawn
                 } else {
-                    settled(Err(CommandError::Cancelled))
+                    settled(Err(CommandError::Cancelled), on_receipt)
                 };
             }
             let sent = !result
                 .as_ref()
                 .is_err_and(|error| error.stage == SendStage::BeforeSend);
-            if sent && let Some(after_write) = after_write {
-                after_write(context, work, function_id, &properties, gate, authority);
+            if sent && let (Some(after_write), Some((gate, authority))) = (after_write, &gate) {
+                after_write(context, work, function_id, &properties, gate, *authority);
             }
-            match result {
+            let attempt = match result {
                 Ok(results) => {
                     operation.receipts(
                         results
@@ -372,7 +423,14 @@ pub(super) async fn submit_properties(
                             })
                             .collect(),
                     );
-                    gate.finish_feedback_for(authority, &properties, &results, retain_feedback);
+                    if let Some((gate, authority)) = &gate {
+                        gate.finish_feedback_for(
+                            *authority,
+                            &properties,
+                            &results,
+                            retain_feedback,
+                        );
+                    }
                     let maintenance = if results.protocol_error {
                         context
                             .lan_business_failure(
@@ -405,25 +463,29 @@ pub(super) async fn submit_properties(
                     if error.stage == SendStage::Sent {
                         operation.receipts(vec![direct_receipt(&error); properties.len()]);
                     }
-                    gate.cancel_feedback();
+                    if let Some((gate, _)) = &gate {
+                        gate.cancel_feedback();
+                    }
                     settle_direct_failure(context, &did, &client, &error)
                 }
-            }
+            };
+            complete_attempt(attempt, on_receipt, true)
         }
         ControlPath::Cloud(credentials) => {
             if !context.current_mijia(&credentials) {
-                return settled(Err(CommandError::Unavailable(
-                    "Mijia session changed".into(),
-                )));
+                return settled(
+                    Err(CommandError::Unavailable("Mijia session changed".into())),
+                    on_receipt,
+                );
             }
             if frame_current.is_some_and(|frame| !frame()) {
                 return BatchAttempt::Withdrawn;
             }
             if let Err(error) = mark() {
-                return settled(Err(error));
+                return settled(Err(error), on_receipt);
             }
-            if retain_feedback {
-                gate.register_feedback_for(authority, &properties);
+            if retain_feedback && let Some((gate, authority)) = &gate {
+                gate.register_feedback_for(*authority, &properties);
             }
             operation.submitted(PathKind::Cloud);
             let result = context
@@ -431,10 +493,12 @@ pub(super) async fn submit_properties(
                 .set_properties(&credentials.session, &did, &properties)
                 .await;
             let still_current = context.current_mijia(&credentials);
-            if still_current && let Some(after_write) = after_write {
-                after_write(context, work, function_id, &properties, gate, authority);
+            if still_current
+                && let (Some(after_write), Some((gate, authority))) = (after_write, &gate)
+            {
+                after_write(context, work, function_id, &properties, gate, *authority);
             }
-            if !still_current {
+            if !still_current && let Some((gate, _)) = &gate {
                 gate.cancel_feedback();
             }
             let receipt = match &result {
@@ -449,8 +513,8 @@ pub(super) async fn submit_properties(
                             })
                             .collect(),
                     );
-                    if still_current {
-                        gate.finish_feedback_for(authority, &properties, results, retain_feedback);
+                    if still_current && let Some((gate, authority)) = &gate {
+                        gate.finish_feedback_for(*authority, &properties, results, retain_feedback);
                     }
                     let current = still_current && alive(work, sink);
                     for error in results.items.iter().filter_map(|item| item.as_ref().err()) {
@@ -472,7 +536,9 @@ pub(super) async fn submit_properties(
                 }
                 Err(error) => {
                     operation.receipts(vec![cloud_receipt(error); properties.len()]);
-                    gate.cancel_feedback();
+                    if let Some((gate, _)) = &gate {
+                        gate.cancel_feedback();
+                    }
                     context.cloud_error(
                         &credentials,
                         alive(work, sink).then_some(did.as_str()),
@@ -484,7 +550,7 @@ pub(super) async fn submit_properties(
                     }
                 }
             };
-            BatchAttempt::Settled(receipt)
+            BatchAttempt::Settled(complete_receipt(receipt, on_receipt, still_current))
         }
     }
 }

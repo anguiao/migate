@@ -502,10 +502,6 @@ impl LabelWriter for App {
         self.committed.notify(usize::MAX);
         Ok(())
     }
-
-    fn relay_accessible(&self, scope: &Scope, key: &FunctionKey) -> bool {
-        self.source.relay_accessible(scope, key)
-    }
 }
 
 /// The initial serving set only keeps devices with a restored reference.

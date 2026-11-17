@@ -213,7 +213,7 @@ fn rejected_acknowledgements_and_wrong_packet_ids_never_accept_writes() {
 }
 
 #[test]
-fn strict_business_values_and_returned_identity_are_required() {
+fn strict_read_values_and_returned_identity_are_required() {
     let binding = PropertyBinding { siid: 2, piid: 1 };
     let read = RequestKind::Read {
         did: "target".into(),
@@ -236,26 +236,6 @@ fn strict_business_values_and_returned_identity_are_required() {
     assert!(matches!(
         parse_response(&read, &json!({"value":"P0_M0_T26_S0_D1"})),
         Ok(Response::PropertyValue(value)) if value.value == json!("P0_M0_T26_S0_D1")
-    ));
-    let write = RequestKind::Write {
-        did: "target".into(),
-        binding,
-        value: true,
-    };
-    for value in [
-        json!({"result":[{"did":"other","code":0}]}),
-        json!({"result":[{"code":1}]}),
-        json!({"result":[{"did":"target","piid":2,"code":0}]}),
-        json!({"result":[{"did":"target","code":false}]}),
-    ] {
-        assert!(matches!(
-            parse_response(&write, &value),
-            Err(CentralError::Protocol)
-        ));
-    }
-    assert!(matches!(
-        parse_response(&write, &json!({"result":[{"did":"target","code":-704}]})),
-        Err(CentralError::Rejected(-704))
     ));
 }
 

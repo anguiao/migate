@@ -48,7 +48,7 @@ fn cancellation_precedes_a_late_suback_in_the_same_received_buffer() {
 }
 
 #[test]
-fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other_devices() {
+fn cancel_and_unsubscribe_keep_sent_writes_and_retire_other_target_work() {
     let ready = Rc::new(Cell::new(false));
     let server_ready = ready.clone();
     block_on(pair(
@@ -91,7 +91,11 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
                 )))
                 .await;
             broker
-                .reply(&write, json!({"result":[{"did":"target","code":0}]}), 90)
+                .reply(
+                    &write,
+                    json!({"result":[{"did":"target","siid":2,"piid":1,"code":0}]}),
+                    90,
+                )
                 .await;
             broker.reply(&read, json!({"value":true}), 91).await;
             broker
@@ -150,13 +154,10 @@ fn cancel_and_unsubscribe_end_target_requests_ignore_late_results_and_keep_other
                 handle.cancel_device("target").unwrap();
                 let removed = handle.unsubscribe_device("target");
                 assert_eq!(subscribed.await, Err(CentralError::Cancelled));
-                assert_eq!(write.await.result, Err(CentralError::Cancelled));
+                assert_eq!(write.await.result, Ok(()));
                 assert_eq!(read.await.result, Err(CentralError::Cancelled));
                 removed.await.unwrap();
-                assert_eq!(
-                    *callbacks.borrow(),
-                    [Err(CentralError::Cancelled), Err(CentralError::Cancelled)]
-                );
+                assert_eq!(*callbacks.borrow(), [Err(CentralError::Cancelled), Ok(())]);
                 assert_eq!(*values.borrow(), [("other".to_owned(), false)]);
                 handle
                     .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})

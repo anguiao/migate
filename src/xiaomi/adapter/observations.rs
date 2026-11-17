@@ -215,8 +215,7 @@ impl Observations {
     ) -> Result<(), CommandError> {
         let binding = work.binding(id);
         if work.life.is_closed() || sink.life.is_closed() {
-            request.reject(CommandError::Cancelled);
-            return Err(CommandError::Cancelled);
+            return request.accept().map(|_| ());
         }
         // A closed or already settled request must never observe: acceptance
         // itself only settles, the source observation owns the target state.

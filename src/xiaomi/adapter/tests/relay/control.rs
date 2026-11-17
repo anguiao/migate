@@ -163,3 +163,49 @@ fn cloud_relay_reads_writes_and_notifications_use_parent_did_and_current_values(
         .await;
     }));
 }
+
+#[test]
+fn home_relay_writes_use_the_issuing_home_and_current_mode_at_the_send_entry() {
+    block_on(rig().run(|c| async move {
+        c.announce();
+        let control = &c;
+        c.peer(panel_peer(RelayMode::Wired), |peer| async move {
+            let relay = function(&control.context.registry, "one", "relay:2");
+            until(|| {
+                relay.snapshot().relay_mode() == Some(RelayMode::Wired)
+                    && relay.snapshot().power() == Some(Power::Off)
+                    && control
+                        .context
+                        .graph
+                        .borrow()
+                        .published_relays
+                        .contains(relay.function_key())
+            })
+            .await;
+            let scope = control.context.directory.borrow().scope.clone().unwrap();
+            assert!(matches!(
+                relay
+                    .execute_home_relay(Command::On, &scope.uid, "other-home")
+                    .await,
+                Err(crate::device::CommandError::Unavailable(_))
+            ));
+            assert_eq!(peer.count("rpcReq", "one", 2), 0);
+            relay
+                .execute_home_relay(Command::On, &scope.uid, &scope.home_id)
+                .await
+                .unwrap();
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
+            assert_eq!(relay.snapshot().power(), Some(Power::Off));
+            peer.notify_value("one", binding(2, 2), json!(1), false);
+            until(|| relay.snapshot().relay_mode() == Some(RelayMode::Wireless)).await;
+            assert!(matches!(
+                relay
+                    .execute_home_relay(Command::On, &scope.uid, &scope.home_id)
+                    .await,
+                Err(crate::device::CommandError::Unavailable(_))
+            ));
+            assert_eq!(peer.count("rpcReq", "one", 2), 1);
+        })
+        .await;
+    }));
+}

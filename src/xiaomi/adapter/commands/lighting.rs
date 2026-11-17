@@ -337,11 +337,12 @@ pub(super) async fn send(
                 properties,
                 retain_feedback,
                 after_write: Some(refresh_after_write),
-                gate: &gate,
+                gate: Some(&gate),
                 operation: &operation.0,
                 mark: &mark,
                 current: &current,
                 frame_current: Some(&frame_current),
+                on_receipt: None,
             },
         )
         .await

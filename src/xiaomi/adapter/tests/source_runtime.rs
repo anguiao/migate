@@ -188,98 +188,168 @@ fn logical_only_group_change_keeps_subscriptions_and_projects_to_the_new_sink() 
     }));
 }
 
-/// A sent outlet cloud write is a raw receipt owned outside the command
-/// consumer. Same-DID revocation re-admission keeps the native control
-/// description unchanged; the retired command settles early, but the raw
-/// receipt still completes and never writes back into the new sink.
-#[test]
-fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_new_sink() {
-    let rig = Rig::new(true, &["one"]);
+/// Re-admit the same native description after a real source revocation.
+async fn revoke_and_readmit(c: &Control, id: &str) -> crate::device::Function {
+    let before = c
+        .context
+        .registry
+        .get(&DeviceKey::new("xiaomi", "one"))
+        .unwrap();
+    let native = c.context.directory.borrow().devices["one"]
+        .admitted
+        .as_ref()
+        .unwrap()
+        .native
+        .clone();
+    let cloud_access = c.context.directory.borrow().devices["one"]
+        .cloud_access
+        .clone();
+    c.context.revoke("one", "test removal").unwrap();
     {
-        let mut cloud = rig.cloud.lock().unwrap();
-        cloud.online.insert("one".into());
-        cloud.raw_values.insert(("one".into(), 2, 1), json!(false));
+        let mut live = c.context.directory.borrow_mut();
+        let slot = live.devices.get_mut("one").unwrap();
+        slot.candidate.as_mut().unwrap().native = Some(native);
+        slot.confirmed = true;
+        slot.cloud_access = cloud_access;
     }
-    let (release, gate) = flume::bounded(1);
-    block_on(rig.run(|c| async move {
-        until(|| c.cloud.lock().unwrap().homes > 0).await;
-        let old = function(&c.context.registry, "one", "outlet:2");
-        until(|| old.snapshot().power() == Some(Power::Off)).await;
-
-        c.cloud.lock().unwrap().property_gate = Some(gate);
-        let mut command = Box::pin(old.execute(Command::On));
-        assert!(poll_once(command.as_mut()).await.is_none());
-        until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
-
-        // Same-DID revocation re-admission: the native description and its
-        // binding stay byte-for-byte identical.
-        let native = c.context.directory.borrow().devices["one"]
-            .admitted
-            .as_ref()
-            .unwrap()
-            .native
-            .clone();
-        let cloud_access = c.context.directory.borrow().devices["one"]
-            .cloud_access
-            .clone();
-        let before = c
-            .context
+    c.context.reconcile("one").unwrap();
+    until(|| {
+        c.context
             .registry
             .get(&DeviceKey::new("xiaomi", "one"))
-            .expect("the committed outlet is served");
-        c.context.revoke("one", "test removal").unwrap();
-        assert_eq!(command.await, Err(crate::device::CommandError::Cancelled));
+            .is_some_and(|now| !before.same_instance(&now))
+    })
+    .await;
+    let new = function(&c.context.registry, "one", id);
+    until(|| new.snapshot().power() == Some(Power::Off)).await;
+    new
+}
+
+#[test]
+fn a_sent_outlet_receipt_survives_revocation_readmission_without_touching_the_new_sink() {
+    for code in [0, -704] {
+        let rig = Rig::new(true, &["one"]);
         {
-            let mut live = c.context.directory.borrow_mut();
-            let slot = live.devices.get_mut("one").unwrap();
-            slot.candidate.as_mut().unwrap().native = Some(native);
-            slot.confirmed = true;
-            slot.cloud_access = cloud_access;
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.online.insert("one".into());
+            cloud.raw_values.insert(("one".into(), 2, 1), json!(false));
+            cloud.property_code = code;
         }
-        c.context.reconcile("one").unwrap();
-        until(|| {
-            c.context
-                .registry
-                .get(&DeviceKey::new("xiaomi", "one"))
-                .is_some_and(|now| !before.same_instance(&now))
-        })
-        .await;
-        let new = function(&c.context.registry, "one", "outlet:2");
-        assert!(new.snapshot().power() != Some(Power::On));
-        until(|| new.snapshot().power() == Some(Power::Off)).await;
-
-        // The original HTTP future is still in flight after the consumer and
-        // sink ended; releasing it must complete and settle that operation.
-        let inflight = || {
-            c.context
+        let (release, gate) = flume::bounded(1);
+        block_on(rig.run(|c| async move {
+            until(|| c.cloud.lock().unwrap().homes > 0).await;
+            let old = function(&c.context.registry, "one", "outlet:2");
+            until(|| old.snapshot().power() == Some(Power::Off)).await;
+            c.cloud.lock().unwrap().property_gate = Some(gate);
+            let mut command = Box::pin(old.execute(Command::On));
+            assert!(poll_once(command.as_mut()).await.is_none());
+            until(|| c.cloud.lock().unwrap().property_writes.len() == 1).await;
+            let mut queued = Box::pin(old.execute(Command::Off));
+            assert!(poll_once(queued.as_mut()).await.is_none());
+            let new = revoke_and_readmit(&c, "outlet:2").await;
+            assert!(
+                poll_once(command.as_mut()).await.is_none(),
+                "a sent write must wait for its original receipt after retirement"
+            );
+            assert!(matches!(
+                queued.await,
+                Err(crate::device::CommandError::Unavailable(_))
+            ));
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+            c.cloud.lock().unwrap().property_gate = None;
+            release.send(()).unwrap();
+            let expected = if code == 0 {
+                Ok(())
+            } else {
+                Err(crate::device::CommandError::Rejected(format!(
+                    "cloud code {code}"
+                )))
+            };
+            assert_eq!(command.await.map(|_| ()), expected);
+            let status = c
+                .context
                 .commands
-                .snapshot("one", ["outlet:2".to_owned()].into_iter())[0]
-                .inflight
-                .is_some()
-        };
-        assert!(
-            inflight(),
-            "the raw receipt must stay in flight after readmission"
-        );
-        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
-        c.cloud.lock().unwrap().property_gate = None;
-        release.send(()).unwrap();
-        until(|| !inflight()).await;
-        let last = &c
-            .context
-            .commands
-            .snapshot("one", ["outlet:2".to_owned()].into_iter())[0]
-            .last;
-        assert_eq!(
-            last.as_ref().and_then(|status| status.result.clone()),
-            Some(Err(crate::device::CommandError::Cancelled)),
-            "the late receipt settles the retired operation"
-        );
+                .snapshot("one", ["outlet:2".to_owned()].into_iter());
+            let last = status[0].last.as_ref().unwrap();
+            assert_eq!(last.actual_path, Some(PathKind::Cloud));
+            assert_eq!(last.result, Some(expected));
+            assert!(status[0].inflight.is_none());
+            async_io::Timer::after(Duration::from_millis(20)).await;
+            assert_eq!(old.snapshot().power(), Some(Power::Off));
+            assert_eq!(new.snapshot().power(), Some(Power::Off));
+            assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
+        }));
+    }
+}
 
-        // The late acceptance belongs to the retired sink; the new logical
-        // instance keeps the actual state and sends no second write.
-        async_io::Timer::after(Duration::from_millis(20)).await;
-        assert_eq!(new.snapshot().power(), Some(Power::Off));
-        assert_eq!(c.cloud.lock().unwrap().property_writes.len(), 1);
-    }));
+#[test]
+fn a_sent_local_power_receipt_settles_after_revocation_and_readmission() {
+    for relay in [false, true] {
+        for code in [0, -704] {
+            let (rig, id) = if relay {
+                (
+                    Rig::profile_light(
+                        "zimi.switch.dhkg05",
+                        serde_json::from_str(include_str!(
+                            "../../../../tests/fixtures/miot/zimi-dhkg05.json"
+                        ))
+                        .unwrap(),
+                    ),
+                    "relay:2",
+                )
+            } else {
+                (Rig::new(true, &["one"]), "outlet:2")
+            };
+            block_on(rig.run(|c| async move {
+                c.announce();
+                let control = &c;
+                let peer = Rc::new(Peer::default());
+                if relay {
+                    for siid in [2, 3, 4] {
+                        peer.value("one", PropertyBinding { siid, piid: 2 }, json!(0));
+                    }
+                }
+                c.peer(peer, |peer| async move {
+                    initialized(control, &peer, &["one"]).await;
+                    peer.state.borrow_mut().hold_writes = true;
+                    let old = function(&control.context.registry, "one", id);
+                    let mut command = Box::pin(old.execute(Command::On));
+                    assert!(poll_once(command.as_mut()).await.is_none());
+                    until(|| peer.count("rpcReq", "one", 2) == 1).await;
+                    let mut queued = Box::pin(old.execute(Command::Off));
+                    assert!(poll_once(queued.as_mut()).await.is_none());
+                    let new = revoke_and_readmit(control, id).await;
+                    assert!(
+                        poll_once(command.as_mut()).await.is_none(),
+                        "the gateway must retain a sent write until its own receipt"
+                    );
+                    assert!(matches!(
+                        queued.await,
+                        Err(crate::device::CommandError::Unavailable(_))
+                    ));
+                    peer.release("one", 2, accepted("one", 2, code)).await;
+                    let expected = if code == 0 {
+                        Ok(())
+                    } else {
+                        Err(crate::device::CommandError::Rejected(format!(
+                            "gateway code {code}"
+                        )))
+                    };
+                    assert_eq!(command.await.map(|_| ()), expected);
+                    let status = control
+                        .context
+                        .commands
+                        .snapshot("one", [id.to_owned()].into_iter());
+                    let last = status[0].last.as_ref().unwrap();
+                    assert_eq!(last.actual_path, Some(PathKind::Local));
+                    assert_eq!(last.result, Some(expected));
+                    assert!(status[0].inflight.is_none());
+                    assert_eq!(old.snapshot().power(), Some(Power::Off));
+                    assert_eq!(new.snapshot().power(), Some(Power::Off));
+                    assert_eq!(peer.count("rpcReq", "one", 2), 1);
+                })
+                .await;
+            }));
+        }
+    }
 }

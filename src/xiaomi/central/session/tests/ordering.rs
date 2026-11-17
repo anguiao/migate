@@ -19,7 +19,11 @@ fn business_acceptance_precedes_pubcomp_and_callbacks_preserve_notification_orde
             assert_eq!(request.payload["rpc"]["method"], "set_properties");
             broker.send(Packet::PubRec(PubRec::new(write.pkid))).await;
             broker
-                .reply(&write, json!({"result":[{"did":"target","code":1}]}), 10)
+                .reply(
+                    &write,
+                    json!({"result":[{"did":"target","siid":2,"piid":1,"code":1}]}),
+                    10,
+                )
                 .await;
             let mut notification = Publish::new(
                 format!("{}/appMsg/notify/iot/target/property/2.1", broker.client_id),

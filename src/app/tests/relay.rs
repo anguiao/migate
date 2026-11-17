@@ -26,7 +26,7 @@ fn saved_relay(store: &Store, mode: RelayMode) -> crate::configuration::Committe
 }
 
 #[test]
-fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads() {
+fn cold_restored_wired_relay_preserves_issuing_scope_before_new_mode_and_power_reads() {
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| {
@@ -56,7 +56,6 @@ fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads()
                 assert_eq!(model.label(endpoint).await, "Saved relay");
                 assert_eq!(model.unique_id(endpoint).await, unique_id);
                 assert!(model.power(endpoint).await.is_err());
-                assert!(model.invoke(endpoint, 1).await.is_err());
                 source.confirm_all();
                 let mut invoke = Box::pin(model.invoke(endpoint, 1));
                 assert!(poll_once(invoke.as_mut()).await.is_none());
@@ -69,28 +68,6 @@ fn cold_restored_wired_relay_can_be_controlled_before_new_mode_and_power_reads()
                 assert!(request.target);
                 request.accept().unwrap();
                 invoke.await.unwrap();
-
-                source.forbid("panel");
-                assert!(model.invoke(endpoint, 0).await.is_err());
-                assert!(
-                    poll_once(source.receivers[0].next_operation())
-                        .await
-                        .is_none()
-                );
-                source.allow("panel");
-                source.scope(crate::configuration::Scope {
-                    uid: "account".into(),
-                    home_id: "other".into(),
-                });
-                assert!(model.invoke(endpoint, 0).await.is_err());
-                assert!(
-                    poll_once(source.receivers[0].next_operation())
-                        .await
-                        .is_none()
-                );
-                source.scope(fixtures::scope());
-                source.remove("panel");
-                assert!(model.invoke(endpoint, 0).await.is_err());
             })
         })
         .unwrap()

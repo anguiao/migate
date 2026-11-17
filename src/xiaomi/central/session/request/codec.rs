@@ -38,9 +38,7 @@ pub(super) fn valid_request(kind: &RequestKind) -> bool {
                 )
                 && properties.iter().all(|(_, value)| valid_value(value));
         }
-        RequestKind::Read { did, binding } | RequestKind::Write { did, binding, .. } => {
-            (did, Some(binding))
-        }
+        RequestKind::Read { did, binding } => (did, Some(binding)),
     };
     valid_identifier(did) && binding.is_none_or(|binding| binding.siid > 0 && binding.piid > 0)
 }
@@ -129,26 +127,6 @@ pub(in crate::xiaomi::central::session) fn parse_response(
                     code => Err(CentralError::Rejected(code)),
                 },
             )))
-        }
-        RequestKind::Write { did, binding, .. } => {
-            let result = value
-                .get("result")
-                .and_then(Value::as_array)
-                .filter(|result| result.len() == 1)
-                .ok_or(CentralError::Protocol)?;
-            let result = &result[0];
-            if result.get("did").and_then(Value::as_str) != Some(did) {
-                return Err(CentralError::Protocol);
-            }
-            validate_identity(result, did, *binding, false)?;
-            match result
-                .get("code")
-                .and_then(Value::as_i64)
-                .ok_or(CentralError::Protocol)?
-            {
-                0 | 1 => Ok(Response::Unit),
-                code => Err(CentralError::Rejected(code)),
-            }
         }
         RequestKind::ListAll | RequestKind::ListFiltered { .. } => {
             let list = value
