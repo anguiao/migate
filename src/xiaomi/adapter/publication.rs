@@ -16,8 +16,8 @@ use super::{
 use crate::xiaomi::capability::NativeDescription;
 use crate::{
     configuration::{
-        CommittedConfiguration, GroupRelation, OperationKind, Plan, PlanOperation, Scope,
-        SourceDevice, SourceFacts,
+        CommittedConfiguration, DerivedConfiguration, GroupRelation, OperationKind, Plan,
+        PlanOperation, Scope, SourceDevice, SourceFacts,
     },
     device::{Availability, CommandReceiver, DeviceKey, FunctionKey, PhysicalDevice, RelayMode},
 };
@@ -77,8 +77,14 @@ impl SourceHandle {
         self.0.configuration.borrow().clone()
     }
 
-    pub(crate) fn set_configuration(&self, configuration: Rc<CommittedConfiguration>) {
+    /// Share the application's committed configuration and derived descriptions.
+    pub(crate) fn set_configuration(
+        &self,
+        configuration: Rc<CommittedConfiguration>,
+        derived: Rc<DerivedConfiguration>,
+    ) {
         *self.0.configuration.borrow_mut() = configuration;
+        *self.0.graph.borrow_mut() = derived;
     }
 
     pub(crate) fn accessible_groups(&self, scope: &Option<Scope>) -> BTreeSet<String> {
@@ -419,7 +425,7 @@ impl SourceHandle {
     /// prepare, commit and install.
     pub(crate) fn install(
         &self,
-        configuration: &CommittedConfiguration,
+        configuration: &Rc<CommittedConfiguration>,
         derived: &Rc<crate::configuration::DerivedConfiguration>,
         operations: &[PlanOperation],
         prepared: PreparedSources,
@@ -516,9 +522,9 @@ impl SourceHandle {
                     .and_then(|native| native.device().battery_issue()),
             );
         }
-        // Install every instance and the graph before starting consumers or
-        // deriving group feedback. Each group is recomputed once per commit.
-        *self.0.graph.borrow_mut() = derived.clone();
+        // Install the configuration and graph together before starting consumers
+        // or deriving group feedback. Each group is recomputed once per commit.
+        self.set_configuration(configuration.clone(), derived.clone());
         for source in started {
             let did = &source.key.id;
             self.0

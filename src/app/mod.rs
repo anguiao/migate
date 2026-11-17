@@ -6,6 +6,7 @@
 
 mod lifecycle;
 mod sensor_binding;
+mod settings;
 mod shutdown;
 mod startup;
 
@@ -15,12 +16,9 @@ pub use shutdown::shutdown_signal;
 use sensor_binding::activate_temperature_bindings;
 
 use crate::{
-    configuration::{
-        self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput, RelayType, Scope,
-        validate_label,
-    },
-    device::{DeviceKey, DeviceRegistry, FunctionKey, PhysicalDevice},
-    matter::{self, LabelWriter},
+    configuration::{self, CommittedConfiguration, DerivedConfiguration, Plan, PlanInput},
+    device::{DeviceKey, DeviceRegistry, Function, FunctionKey, PhysicalDevice},
+    matter,
     storage::{Identity, StorageError, Store},
     terminal::AuthStatus,
     xiaomi::adapter::publication::{PreparedSources, SourceEntry, SourceHandle},
@@ -107,7 +105,6 @@ impl App {
     }
 
     fn replace_current(&self, current: EffectiveConfiguration) {
-        self.source.set_configuration(current.configuration.clone());
         *self.current.borrow_mut() = Rc::new(current);
     }
 
@@ -367,162 +364,14 @@ impl App {
         self.rebuild_pending.set(false);
         Ok(())
     }
-
-    /// Rename one published or hidden device through the one application
-    /// configuration entry: persist, then switch the saved name and the
-    /// serving object together.
-    pub(crate) fn rename(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError> {
-        validate_label(label)
-            .map_err(|error| StorageError::new(self.store.path(), "write device label", error))?;
-        let current = self.current();
-        let mut configuration = (*current.configuration).clone();
-        let device = configuration
-            .devices
-            .iter_mut()
-            .find(|device| &device.key == key)
-            .ok_or_else(|| {
-                StorageError::new(
-                    self.store.path(),
-                    "write device label",
-                    "Device identity does not exist",
-                )
-            })?;
-        device.label = label.to_owned();
-        self.store
-            .devices()
-            .commit_configuration(&configuration, &[])?;
-        self.source.set_label(key, label);
-        let mut derived = (*current.derived).clone();
-        if let Some(served) = derived.served.get_mut(key) {
-            served.description.set_label(label);
-        }
-        self.replace_current(EffectiveConfiguration {
-            configuration: Rc::new(configuration),
-            derived: Rc::new(derived),
-            entries: current.entries.clone(),
-            published: current.published.clone(),
-        });
-        self.committed.notify(usize::MAX);
-        Ok(())
-    }
-
-    /// Save a mapping only after validating its current source authority.
-    /// A visible change wakes the lifecycle to replace the Matter instance.
-    pub(crate) fn map_relay_type(
-        &self,
-        key: &FunctionKey,
-        device_type: RelayType,
-    ) -> Result<bool, String> {
-        let current = self.current();
-        if !self
-            .source
-            .binding_accessible(&current.configuration.scope, &key.device)
-        {
-            return Err("Device is not in the current home or has no current access.".into());
-        }
-        let function = current
-            .entries
-            .iter()
-            .find(|entry| entry.physical.key() == &key.device)
-            .and_then(|entry| entry.physical.function(&key.id))
-            .ok_or("Function does not exist.")?;
-        if function.description().kind != crate::device::FunctionKind::Relay {
-            return Err("Function is not a relay.".into());
-        }
-        let scope = current
-            .configuration
-            .scope
-            .as_ref()
-            .expect("accessible device has a scope");
-        let mut configuration = (*current.configuration).clone();
-        let channel = configuration
-            .relay_channels
-            .iter_mut()
-            .find(|channel| &channel.scope == scope && &channel.key == key)
-            .ok_or("Relay is not recognized in the current home.")?;
-        if channel.device_type == device_type {
-            return Ok(false);
-        }
-        let visible = current.derived.published_relays.contains(key);
-        if visible {
-            channel.configuration_version = channel
-                .configuration_version
-                .checked_add(1)
-                .ok_or("Relay configuration version is exhausted.")?;
-            configuration.root_version = configuration
-                .root_version
-                .checked_add(1)
-                .ok_or("Root configuration version is exhausted.")?;
-        }
-        channel.device_type = device_type;
-        self.store
-            .devices()
-            .commit_configuration(&configuration, &[])
-            .map_err(|error| error.to_string())?;
-        self.replace_current(EffectiveConfiguration {
-            configuration: Rc::new(configuration),
-            derived: current.derived.clone(),
-            entries: current.entries.clone(),
-            published: current.published.clone(),
-        });
-        self.committed.notify(usize::MAX);
-        if visible {
-            self.rebuild_pending.set(true);
-            self.pending.set(true);
-            self.rebuild_requested.notify(usize::MAX);
-        }
-        Ok(true)
-    }
 }
 
-impl LabelWriter for App {
-    fn write_label(&self, key: &DeviceKey, label: &str) -> Result<(), StorageError> {
-        self.rename(key, label)
-    }
-
-    fn relay_label(&self, scope: &Scope, key: &FunctionKey) -> Option<String> {
-        self.current()
-            .configuration
-            .relay_channels
-            .iter()
-            .find(|channel| &channel.scope == scope && &channel.key == key)
-            .map(|channel| channel.label.clone())
-    }
-
-    fn write_relay_label(
-        &self,
-        scope: &Scope,
-        key: &FunctionKey,
-        label: &str,
-    ) -> Result<(), StorageError> {
-        validate_label(label)
-            .map_err(|error| StorageError::new(self.store.path(), "write relay label", error))?;
-        let current = self.current();
-        let mut configuration = (*current.configuration).clone();
-        let channel = configuration
-            .relay_channels
-            .iter_mut()
-            .find(|channel| &channel.scope == scope && &channel.key == key)
-            .ok_or_else(|| {
-                StorageError::new(
-                    self.store.path(),
-                    "write relay label",
-                    "Relay identity does not exist",
-                )
-            })?;
-        channel.label = label.to_owned();
-        self.store
-            .devices()
-            .commit_configuration(&configuration, &[])?;
-        self.replace_current(EffectiveConfiguration {
-            configuration: Rc::new(configuration),
-            derived: current.derived.clone(),
-            entries: current.entries.clone(),
-            published: current.published.clone(),
-        });
-        self.committed.notify(usize::MAX);
-        Ok(())
-    }
+fn installed_function(entries: &[Rc<SourceEntry>], key: &FunctionKey) -> Option<Function> {
+    entries
+        .iter()
+        .find(|entry| entry.physical.key() == &key.device)?
+        .physical
+        .function(&key.id)
 }
 
 /// The initial serving set only keeps devices with a restored reference.

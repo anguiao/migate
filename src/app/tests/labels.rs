@@ -3,8 +3,36 @@ use crate::{
     app::App, storage::Store, terminal::bridge::Context,
     xiaomi::adapter::tests::app_source::AppSource,
 };
-use futures_lite::future::block_on;
+use futures_lite::future::{block_on, poll_once};
 use std::rc::Rc;
+
+#[test]
+fn rename_installs_one_committed_graph_for_the_source_and_reopened_app() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let source = AppSource::new(&store, Some(outlet()));
+    let key = outlet().key().clone();
+    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+
+    app.rename(&key, "Renamed outlet").unwrap();
+
+    let current = app.current();
+    let source_graph = source.handle.committed_graph();
+    assert_eq!(
+        source_graph.served[&key].description.label(),
+        "Renamed outlet"
+    );
+    assert!(Rc::ptr_eq(&current.derived, &source_graph));
+    assert!(Rc::ptr_eq(
+        &current.configuration,
+        &source.handle.configuration()
+    ));
+    let reopened = App::open(source.handle.clone(), store).unwrap();
+    assert_eq!(
+        reopened.current().derived.served[&key].description.label(),
+        "Renamed outlet"
+    );
+}
 
 #[test]
 fn empty_saved_name_survives_restart_and_later_directory_names() {
@@ -87,12 +115,26 @@ fn failed_name_commit_keeps_the_saved_and_served_name() {
     let key = outlet().key().clone();
     let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
     let saved = store.devices().load_configuration().unwrap();
+    let before = app.current();
+    let committed = app.committed.listen();
+    let changed = app.listen();
     rusqlite::Connection::open(store.path()).unwrap().execute_batch(
         "CREATE TRIGGER reject_name AFTER UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected rename failure'); END;"
     ).unwrap();
     assert!(app.rename(&key, "Changed").is_err());
     assert_eq!(store.devices().load_configuration().unwrap(), saved);
     assert_eq!(*app.current().configuration, saved);
+    assert!(Rc::ptr_eq(&app.current(), &before));
+    assert!(Rc::ptr_eq(
+        &before.configuration,
+        &source.handle.configuration()
+    ));
+    assert!(Rc::ptr_eq(
+        &before.derived,
+        &source.handle.committed_graph()
+    ));
+    assert!(block_on(poll_once(committed)).is_none());
+    assert!(block_on(poll_once(changed)).is_none());
     assert_eq!(
         source.physical.as_ref().unwrap().description().label(),
         "Test Outlet"

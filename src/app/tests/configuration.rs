@@ -7,6 +7,31 @@ use futures_lite::future::block_on;
 use std::rc::Rc;
 
 #[test]
+fn source_install_shares_configuration_and_graph_before_app_updates_its_view() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let source = AppSource::new(&store, Some(outlet()));
+    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let before = app.current();
+    source.directory_name(outlet().key(), "Updated catalog name");
+    let plan = app.plan().unwrap().unwrap();
+    let prepared = source.handle.prepare(&plan);
+    store
+        .devices()
+        .commit_configuration(&plan.configuration, &plan.clear_revocations)
+        .unwrap();
+    let configuration = Rc::new(plan.configuration);
+
+    source
+        .handle
+        .install(&configuration, &plan.derived, &plan.operations, prepared);
+
+    assert!(Rc::ptr_eq(&app.current(), &before));
+    assert!(Rc::ptr_eq(&source.handle.configuration(), &configuration));
+    assert!(Rc::ptr_eq(&source.handle.committed_graph(), &plan.derived));
+}
+
+#[test]
 fn startup_revocation_overlay_keeps_committed_versions_for_the_removal_plan() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();

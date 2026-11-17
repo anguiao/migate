@@ -1,7 +1,7 @@
-use super::{App, EffectiveConfiguration};
+use super::{App, EffectiveConfiguration, installed_function};
 use crate::{
     configuration::CommittedConfiguration,
-    device::{Function, FunctionKey, FunctionKind},
+    device::{FunctionKey, FunctionKind},
     xiaomi::adapter::publication::SourceEntry,
 };
 use std::rc::Rc;
@@ -21,7 +21,10 @@ impl App {
         self.validate_binding_function(&current, &source, false)?;
         let mut configuration = (*current.configuration).clone();
         configuration.temperature_bindings.insert(target, source);
-        self.commit_temperature_bindings(&current, configuration)?;
+        self.commit_settings(&current, configuration, |next| {
+            activate_temperature_bindings(&next.configuration, &next.entries);
+        })
+        .map_err(|error| error.to_string())?;
         Ok(true)
     }
 
@@ -63,28 +66,11 @@ impl App {
         }
         let mut configuration = (*current.configuration).clone();
         configuration.temperature_bindings.remove(target);
-        self.commit_temperature_bindings(&current, configuration)?;
+        self.commit_settings(&current, configuration, |next| {
+            activate_temperature_bindings(&next.configuration, &next.entries);
+        })
+        .map_err(|error| error.to_string())?;
         Ok(true)
-    }
-
-    fn commit_temperature_bindings(
-        &self,
-        current: &EffectiveConfiguration,
-        configuration: CommittedConfiguration,
-    ) -> Result<(), String> {
-        self.store
-            .devices()
-            .commit_configuration(&configuration, &[])
-            .map_err(|error| error.to_string())?;
-        activate_temperature_bindings(&configuration, &current.entries);
-        self.replace_current(EffectiveConfiguration {
-            configuration: Rc::new(configuration),
-            derived: current.derived.clone(),
-            entries: current.entries.clone(),
-            published: current.published.clone(),
-        });
-        self.committed.notify(usize::MAX);
-        Ok(())
     }
 
     fn validate_binding_function(
@@ -102,7 +88,7 @@ impl App {
                 "{label} device is not in the current home or has no current access."
             ));
         }
-        let function = entry_function(&current.entries, key)
+        let function = installed_function(&current.entries, key)
             .ok_or_else(|| format!("{label} function does not exist."))?;
         let valid = if target {
             matches!(
@@ -124,14 +110,6 @@ impl App {
     }
 }
 
-fn entry_function(entries: &[Rc<SourceEntry>], key: &FunctionKey) -> Option<Function> {
-    entries
-        .iter()
-        .find(|entry| entry.physical.key() == &key.device)?
-        .physical
-        .function(&key.id)
-}
-
 /// Reconcile relationships only after committed sources have been installed.
 pub(super) fn activate_temperature_bindings(
     configuration: &CommittedConfiguration,
@@ -146,7 +124,7 @@ pub(super) fn activate_temperature_bindings(
                 let source = configuration
                     .temperature_bindings
                     .get(function.function_key())
-                    .map(|key| (key.clone(), entry_function(entries, key)));
+                    .map(|key| (key.clone(), installed_function(entries, key)));
                 function.set_ambient_temperature_source(source);
             }
         }

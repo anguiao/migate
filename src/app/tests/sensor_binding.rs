@@ -349,6 +349,9 @@ fn validation_multiple_targets_and_failed_saves_preserve_existing_projections() 
         rusqlite::Connection::open(store.path()).unwrap().execute_batch(
             "CREATE TRIGGER reject_binding AFTER UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected binding failure'); END;"
         ).unwrap();
+        let before = app.current();
+        let committed = app.committed.listen();
+        let changed = app.listen();
         assert!(
             run(
                 &terminal,
@@ -371,6 +374,9 @@ fn validation_multiple_targets_and_failed_saves_preserve_existing_projections() 
                 .contains("failed")
         );
         assert_eq!(store.devices().load_configuration().unwrap(), saved);
+        assert!(Rc::ptr_eq(&app.current(), &before));
+        assert!(futures_lite::future::poll_once(committed).await.is_none());
+        assert!(futures_lite::future::poll_once(changed).await.is_none());
         sensor.observe_measurement(22.0, Some(5), 6).unwrap();
         for did in ["ac", "ac2"] {
             let output = run(&terminal, &format!("status {did}")).await;

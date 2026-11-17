@@ -90,6 +90,9 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
             |command: &'static str| async { terminal.handle_line(command).await.unwrap().unwrap() };
         let database = rusqlite::Connection::open(store.path()).unwrap();
         database.execute_batch("CREATE TRIGGER fail_mapping BEFORE UPDATE ON bridge_configuration BEGIN SELECT RAISE(ABORT, 'injected'); END;").unwrap();
+        let before = app.current();
+        let committed = app.committed.listen();
+        let changed = app.listen();
         assert!(
             query("map-type panel relay:2 switch")
                 .await
@@ -102,6 +105,9 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
         );
         assert_eq!(*app.current().configuration, configuration);
         assert_eq!(store.devices().load_configuration().unwrap(), configuration);
+        assert!(Rc::ptr_eq(&app.current(), &before));
+        assert!(poll_once(committed).await.is_none());
+        assert!(poll_once(changed).await.is_none());
         assert!(!app.pending());
         assert!(app.plan().unwrap().is_none());
         source.forbid("panel");
