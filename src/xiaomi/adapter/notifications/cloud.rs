@@ -233,14 +233,10 @@ pub(super) async fn prepare_properties(
             };
             let result = match binding {
                 SubscriptionBinding::Property(binding) => {
-                    handle
-                        .subscribe_property_with_result(&did, binding, on_result)
-                        .await
+                    handle.subscribe_property(&did, binding, on_result).await
                 }
                 SubscriptionBinding::Event(binding) => {
-                    handle
-                        .subscribe_event_with_result(&did, binding, on_result)
-                        .await
+                    handle.subscribe_event(&did, binding, on_result).await
                 }
             };
             drop(permit);

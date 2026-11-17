@@ -1,7 +1,10 @@
 use super::super::*;
 
 impl CloudClient {
-    pub(crate) fn for_test(base_url: &str, timeout: Duration) -> Result<Self, CloudError> {
+    pub(in crate::xiaomi) fn for_test(
+        base_url: &str,
+        timeout: Duration,
+    ) -> Result<Self, CloudError> {
         assert_eq!(Url::parse(base_url).unwrap().host_str(), Some("127.0.0.1"));
         let mut client = Self::build(base_url, timeout)?;
         client.client = HttpClient::builder()

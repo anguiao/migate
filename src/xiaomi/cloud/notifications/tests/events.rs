@@ -50,7 +50,7 @@ fn event_notifications_match_eiid_and_ignore_retained_events() {
                     finished.send(()).unwrap();
                     stop.close();
                 }),
-                handle.subscribe_event("target", EVENT),
+                handle.subscribe_event_unobserved("target", EVENT),
             )
             .await;
             result.unwrap();
@@ -167,14 +167,23 @@ fn cloud_event_generations_and_scoped_unsubscription_preserve_properties() {
                 future::zip(
                     driver.run(move |event| collected.borrow_mut().push(event)),
                     async {
-                        handle.subscribe_event("target", EVENT).await.unwrap();
-                        handle.subscribe_property("target", POWER).await.unwrap();
+                        handle
+                            .subscribe_event_unobserved("target", EVENT)
+                            .await
+                            .unwrap();
+                        handle
+                            .subscribe_property_unobserved("target", POWER)
+                            .await
+                            .unwrap();
                         invalidating.recv_async().await.unwrap();
                         handle.invalidate_received_event("target", EVENT);
                         resume.send(()).unwrap();
                         resubscribing.recv_async().await.unwrap();
                         handle.unsubscribe_events("target").await.unwrap();
-                        handle.subscribe_event("target", EVENT).await.unwrap();
+                        handle
+                            .subscribe_event_unobserved("target", EVENT)
+                            .await
+                            .unwrap();
                         completion.recv_async().await.unwrap();
                         assert_eq!(
                             observed
@@ -252,11 +261,17 @@ fn cloud_device_unsubscription_includes_events_and_rejection_stays_isolated() {
         move |handle, driver| async move {
             let (result, ()) = future::zip(driver.run(|_| {}), async {
                 assert_eq!(
-                    handle.subscribe_event("target", EVENT).await,
+                    handle.subscribe_event_unobserved("target", EVENT).await,
                     Err(NotificationError::Unauthorized)
                 );
-                handle.subscribe_event("target", EVENT).await.unwrap();
-                handle.subscribe_property("target", POWER).await.unwrap();
+                handle
+                    .subscribe_event_unobserved("target", EVENT)
+                    .await
+                    .unwrap();
+                handle
+                    .subscribe_property_unobserved("target", POWER)
+                    .await
+                    .unwrap();
                 handle.subscribe_online("target").await.unwrap();
                 handle.unsubscribe_device("target").await.unwrap();
                 assert!(handle.shared.registrations.borrow().is_empty());
@@ -286,13 +301,13 @@ fn cloud_event_requests_validate_input_bound_capacity_and_cancel_on_close() {
                 ("bad/#", EVENT),
             ] {
                 assert_eq!(
-                    handle.subscribe_event(did, binding).await,
+                    handle.subscribe_event_unobserved(did, binding).await,
                     Err(NotificationError::InvalidInput)
                 );
             }
             let pending = (1..=super::super::LIMIT)
                 .map(|eiid| {
-                    handle.subscribe_event(
+                    handle.subscribe_event_unobserved(
                         "target",
                         EventBinding {
                             siid: 2,
@@ -302,7 +317,7 @@ fn cloud_event_requests_validate_input_bound_capacity_and_cancel_on_close() {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
-                handle.subscribe_event("other", EVENT).await,
+                handle.subscribe_event_unobserved("other", EVENT).await,
                 Err(NotificationError::QueueFull)
             );
             drop(driver);
@@ -311,7 +326,7 @@ fn cloud_event_requests_validate_input_bound_capacity_and_cancel_on_close() {
             }
             assert_eq!(handle.shared.outstanding.get(), 0);
             assert_eq!(
-                handle.subscribe_event("target", EVENT).await,
+                handle.subscribe_event_unobserved("target", EVENT).await,
                 Err(NotificationError::Cancelled)
             );
             finished.send(()).unwrap();
@@ -350,9 +365,12 @@ fn cloud_event_subscription_timeout_does_not_affect_existing_property_delivery()
             let (result, ()) = future::zip(
                 driver.run(move |event| collected.borrow_mut().push(event)),
                 async {
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                     assert_eq!(
-                        handle.subscribe_event("target", EVENT).await,
+                        handle.subscribe_event_unobserved("target", EVENT).await,
                         Err(NotificationError::Timeout)
                     );
                     timed_out.send(()).unwrap();

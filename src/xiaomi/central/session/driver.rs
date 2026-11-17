@@ -58,7 +58,7 @@ pub(super) enum SubscriptionKind {
 
 /// One driver owns all TLS I/O and protocol state. Poll it continuously alongside
 /// handle requests; callbacks and events execute in wire order on this driver.
-pub struct SessionDriver {
+pub(in crate::xiaomi) struct SessionDriver {
     stream: Box<dyn Transport>,
     frames: mqtt::Frames,
     pub(super) shared: Rc<Shared>,
@@ -124,7 +124,10 @@ impl SessionDriver {
         driver.subscribe_baseline(now)?;
         Ok((SessionHandle { shared, timing }, driver))
     }
-    pub async fn run(mut self, mut on_event: impl FnMut(CentralEvent)) -> Result<(), CentralError> {
+    pub(in crate::xiaomi) async fn run(
+        mut self,
+        mut on_event: impl FnMut(CentralEvent),
+    ) -> Result<(), CentralError> {
         let result = self.drive(&mut on_event).await;
         log::debug!(
             "Gateway session stopped: error={:?}, queued={}, pending={}, outgoing_qos2={}, incoming_qos2={}, subscriptions={}",

@@ -15,19 +15,19 @@ use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
-pub const MIJIA_BASE_URL: &str = "https://api.io.mi.com";
+const MIJIA_BASE_URL: &str = "https://api.io.mi.com";
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
-pub struct MijiaClient {
+pub(in crate::xiaomi) struct MijiaClient {
     client: HttpClient,
     pub(super) base_url: String,
     timeout: Duration,
 }
 
 impl MijiaClient {
-    pub fn new() -> Result<Self, CloudError> {
+    pub(in crate::xiaomi) fn new() -> Result<Self, CloudError> {
         Self::build(MIJIA_BASE_URL, READ_TIMEOUT)
     }
 

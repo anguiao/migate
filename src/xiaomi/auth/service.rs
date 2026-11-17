@@ -32,7 +32,7 @@ impl AuthService {
         })
     }
 
-    pub(crate) fn mijia_client(&self) -> MijiaClient {
+    pub(in crate::xiaomi) fn mijia_client(&self) -> MijiaClient {
         self.mijia.clone()
     }
 

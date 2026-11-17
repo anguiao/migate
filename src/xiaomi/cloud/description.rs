@@ -4,7 +4,10 @@ use serde_json::Value;
 use url::Url;
 
 impl CloudClient {
-    pub async fn get_instance(&self, instance_type: &str) -> Result<Value, CloudError> {
+    pub(in crate::xiaomi) async fn get_instance(
+        &self,
+        instance_type: &str,
+    ) -> Result<Value, CloudError> {
         let operation = "read MIoT instance description";
         if instance_type.is_empty() {
             return Err(CloudError::input(operation));

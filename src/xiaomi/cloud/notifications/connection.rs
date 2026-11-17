@@ -15,7 +15,7 @@ use std::time::Duration;
 const HOST: &str = "cn-ha.mqtt.io.mi.com";
 const PORT: u16 = 8883;
 
-pub async fn connect_notifications(
+pub(in crate::xiaomi) async fn connect_notifications(
     credentials: &XiaomiRecord,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
     let prepared = PreparedConnection::new(credentials, Timing::default())?;

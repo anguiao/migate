@@ -3,9 +3,9 @@ mod driver;
 mod request;
 mod tls;
 
-pub use connection::connect_notifications;
-pub use driver::NotificationDriver;
-pub use request::NotificationHandle;
+pub(in crate::xiaomi) use connection::connect_notifications;
+pub(in crate::xiaomi) use driver::NotificationDriver;
+pub(in crate::xiaomi) use request::NotificationHandle;
 
 use crate::xiaomi::capability::{EventBinding, PropertyBinding};
 use futures_lite::io::{AsyncRead, AsyncWrite};
@@ -14,7 +14,7 @@ use std::{error::Error, fmt, time::Duration};
 const LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum NotificationEvent {
+pub(in crate::xiaomi) enum NotificationEvent {
     EventOccurred {
         did: String,
         binding: EventBinding,
@@ -91,4 +91,4 @@ pub(super) trait Transport: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> Transport for T {}
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(in crate::xiaomi) mod tests;

@@ -6,7 +6,7 @@ use super::{
 use crate::device::{FunctionDescription, FunctionKind};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ParsedFunction {
+pub(crate) struct ParsedFunction {
     id: String,
     label: String,
     bindings: FunctionBindings,
@@ -127,7 +127,7 @@ impl ParsedFunction {
             bindings: FunctionBindings::Fan { fan },
         }
     }
-    pub fn fan(&self) -> Option<&FanBindings> {
+    pub(crate) fn fan(&self) -> Option<&FanBindings> {
         match &self.bindings {
             FunctionBindings::Fan { fan } => Some(fan),
             _ => None,
@@ -145,7 +145,7 @@ impl ParsedFunction {
             bindings: FunctionBindings::Curtain { curtain },
         }
     }
-    pub fn curtain(&self) -> Option<&CurtainBindings> {
+    pub(crate) fn curtain(&self) -> Option<&CurtainBindings> {
         match &self.bindings {
             FunctionBindings::Curtain { curtain } => Some(curtain),
             _ => None,
@@ -184,7 +184,7 @@ impl ParsedFunction {
             bindings: FunctionBindings::Occupancy { state },
         }
     }
-    pub fn state(&self) -> Option<&StateBinding> {
+    pub(crate) fn state(&self) -> Option<&StateBinding> {
         match &self.bindings {
             FunctionBindings::Contact { state } | FunctionBindings::Occupancy { state } => {
                 Some(state)
@@ -193,7 +193,7 @@ impl ParsedFunction {
             _ => None,
         }
     }
-    pub fn motion(&self) -> Option<&MotionBinding> {
+    pub(crate) fn motion(&self) -> Option<&MotionBinding> {
         match &self.bindings {
             FunctionBindings::Motion { motion } => Some(motion),
             _ => None,
@@ -298,13 +298,13 @@ impl ParsedFunction {
             FunctionBindings::Occupancy { state } => property_id("occupancy", state.property()),
         }
     }
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
-    pub fn label(&self) -> &str {
+    pub(crate) fn label(&self) -> &str {
         &self.label
     }
-    pub fn power(&self) -> Option<PropertyBinding> {
+    pub(crate) fn power(&self) -> Option<PropertyBinding> {
         match &self.bindings {
             FunctionBindings::Relay { power, .. }
             | FunctionBindings::Outlet { power }
@@ -322,7 +322,7 @@ impl ParsedFunction {
             | FunctionBindings::Occupancy { .. } => None,
         }
     }
-    pub fn lighting(&self) -> Option<&LightBindings> {
+    pub(crate) fn lighting(&self) -> Option<&LightBindings> {
         match &self.bindings {
             FunctionBindings::Relay { .. }
             | FunctionBindings::Outlet { .. }
@@ -340,7 +340,7 @@ impl ParsedFunction {
             FunctionBindings::Light { lighting, .. } => Some(lighting),
         }
     }
-    pub fn measurement(&self) -> Option<&MeasurementBinding> {
+    pub(crate) fn measurement(&self) -> Option<&MeasurementBinding> {
         match &self.bindings {
             FunctionBindings::Temperature { measurement }
             | FunctionBindings::Humidity { measurement }
@@ -358,7 +358,7 @@ impl ParsedFunction {
             | FunctionBindings::Occupancy { .. } => None,
         }
     }
-    pub fn kind(&self) -> FunctionKind {
+    pub(crate) fn kind(&self) -> FunctionKind {
         match &self.bindings {
             FunctionBindings::Contact { .. } => FunctionKind::Contact,
             FunctionBindings::Motion { .. } => FunctionKind::Motion,
@@ -393,7 +393,7 @@ impl ParsedFunction {
         }
     }
     /// The logical description derived from the real bindings on demand.
-    pub fn description(&self) -> FunctionDescription {
+    pub(crate) fn description(&self) -> FunctionDescription {
         FunctionDescription {
             id: self.id.clone(),
             label: self.label.clone(),

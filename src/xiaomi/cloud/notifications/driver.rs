@@ -34,7 +34,7 @@ struct Delivery {
 }
 /// Owns MQTT I/O. Subscription completions and notifications run on this driver
 /// in wire order while handle operations are polled alongside it.
-pub struct NotificationDriver {
+pub(in crate::xiaomi) struct NotificationDriver {
     stream: Box<dyn Transport>,
     frames: mqtt::Frames,
     shared: Rc<Shared>,
@@ -78,7 +78,7 @@ impl NotificationDriver {
         )
     }
 
-    pub async fn run(
+    pub(in crate::xiaomi) async fn run(
         mut self,
         mut on_event: impl FnMut(NotificationEvent),
     ) -> Result<(), NotificationError> {

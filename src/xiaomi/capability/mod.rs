@@ -22,7 +22,7 @@ pub(crate) use model::{
     HeaterBindings, HeaterFeedbackBinding, SharedFanChannel, SharedFanSpeedBinding,
     ThermostatTemperatureBinding,
 };
-pub use model::{
+pub(crate) use model::{
     AppliedPatch, BatteryBinding, BrightnessBinding, CapabilityError, ColorBinding,
     CurtainBindings, CurtainMotorBinding, CurtainPositionBinding, CurtainStatusBinding,
     FanBindings, FanModeBinding, FanSpeedBinding, LightBindings, MeasurementBinding,
@@ -42,7 +42,7 @@ fn is_load_panel_urn(urn: &description::Urn<'_>) -> bool {
     urn.standard("device", "switch", 0x0000a003)
         || urn.standard("device", "control-panel", 0x0000a099)
 }
-pub use state_sensor::{
+pub(crate) use state_sensor::{
     EventArgument, EventBinding, MotionBinding, StateBinding, StateMapping, StateValue,
 };
 
@@ -50,7 +50,7 @@ pub(crate) fn is_light_group(key: &crate::device::DeviceKey, model: &str) -> boo
     key.id.starts_with("group.") || model == "mijia.light.group3"
 }
 
-pub fn parse_device_for_model(
+pub(crate) fn parse_device_for_model(
     key: crate::device::DeviceKey,
     model: &str,
     instance: &serde_json::Value,

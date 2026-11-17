@@ -1,7 +1,7 @@
 use std::{error::Error, fmt};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CapabilityError {
+pub(crate) enum CapabilityError {
     InvalidDescription(&'static str),
     UnsupportedDevice,
     NoCapabilities(Vec<String>),
@@ -10,7 +10,6 @@ pub enum CapabilityError {
     MissingAccess(&'static str),
     AmbiguousMainPower,
     MissingFunction(&'static str),
-    MissingMeasurement(&'static str),
     InvalidMeasurement(&'static str),
     IncompatibleModel(&'static str),
     InvalidLight(&'static str),
@@ -40,9 +39,6 @@ impl fmt::Display for CapabilityError {
             }
             Self::MissingFunction(id) => {
                 write!(formatter, "required binding is missing: {id}")
-            }
-            Self::MissingMeasurement(id) => {
-                write!(formatter, "required measurement is missing: {id}")
             }
             Self::InvalidMeasurement(field) => {
                 write!(formatter, "invalid measurement capability: {field}")

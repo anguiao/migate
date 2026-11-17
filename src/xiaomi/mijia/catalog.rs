@@ -12,44 +12,44 @@ use std::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OwnedHome {
-    pub uid: String,
-    pub home_id: String,
-    pub group_id: String,
-    pub dids: Vec<String>,
+pub(in crate::xiaomi) struct OwnedHome {
+    pub(in crate::xiaomi) uid: String,
+    pub(in crate::xiaomi) home_id: String,
+    pub(in crate::xiaomi) group_id: String,
+    pub(in crate::xiaomi) dids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OwnedHomes {
-    pub uid: Option<String>,
-    pub homes: Vec<OwnedHome>,
+pub(in crate::xiaomi) struct OwnedHomes {
+    pub(in crate::xiaomi) uid: Option<String>,
+    pub(in crate::xiaomi) homes: Vec<OwnedHome>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloudDevice {
-    pub did: String,
-    pub name: Option<String>,
-    pub model: String,
-    pub instance_type: String,
+pub(in crate::xiaomi) struct CloudDevice {
+    pub(in crate::xiaomi) did: String,
+    pub(in crate::xiaomi) name: Option<String>,
+    pub(in crate::xiaomi) model: String,
+    pub(in crate::xiaomi) instance_type: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloudDeviceInfo {
-    pub did: String,
-    pub model: String,
-    pub instance_type: String,
-    pub online: bool,
-    pub(crate) lan: LanCredentials,
+pub(in crate::xiaomi) struct CloudDeviceInfo {
+    pub(in crate::xiaomi) did: String,
+    pub(in crate::xiaomi) model: String,
+    pub(in crate::xiaomi) instance_type: String,
+    pub(in crate::xiaomi) online: bool,
+    pub(in crate::xiaomi) lan: LanCredentials,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct LanCandidate {
-    pub(crate) address: Ipv4Addr,
-    pub(crate) token: Token,
+pub(in crate::xiaomi) struct LanCandidate {
+    pub(in crate::xiaomi) address: Ipv4Addr,
+    pub(in crate::xiaomi) token: Token,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum LanCredentials {
+pub(in crate::xiaomi) enum LanCredentials {
     Unknown,
     NotIp,
     Missing,
@@ -88,7 +88,7 @@ fn lan_credentials(details: &Map<String, Value>) -> LanCredentials {
     LanCredentials::Candidate(LanCandidate { address, token })
 }
 
-pub fn group_id(uid: &str, home_id: &str) -> String {
+pub(crate) fn group_id(uid: &str, home_id: &str) -> String {
     let digest = Sha1::digest(format!("{uid}central_service{home_id}"));
     digest[..8]
         .iter()
@@ -202,7 +202,7 @@ impl Pagination {
 impl MijiaClient {
     /// Read only owned homes. Other homes can be returned by the API, but no
     /// device details are requested while collecting this directory.
-    pub async fn get_owned_homes(
+    pub(in crate::xiaomi) async fn get_owned_homes(
         &self,
         credential: &MijiaSession,
     ) -> Result<OwnedHomes, CloudError> {
@@ -282,7 +282,7 @@ impl MijiaClient {
     /// Read every device-information page for the requested home members.
     /// Missing members remain absent from this result: only the owned-home
     /// directory establishes membership, and an absent record is not online.
-    pub async fn get_home_devices(
+    pub(in crate::xiaomi) async fn get_home_devices(
         &self,
         credential: &MijiaSession,
         home: &OwnedHome,
@@ -345,7 +345,7 @@ impl MijiaClient {
 
     /// The caller selects a home using local discovery before reaching this
     /// boundary. Restrict every page to the requested member DID.
-    pub async fn get_device(
+    pub(in crate::xiaomi) async fn get_device(
         &self,
         credential: &MijiaSession,
         home: &OwnedHome,

@@ -143,7 +143,7 @@ pub(super) fn received_property(pkid: u16, value: bool) -> Packet {
     Packet::Publish(publish)
 }
 
-pub(crate) async fn connect(
+pub(in crate::xiaomi) async fn connect(
     address: SocketAddr,
     credentials: &XiaomiRecord,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
@@ -170,4 +170,22 @@ async fn connect_with_timing(
         .await
         .map_err(|_| NotificationError::Io)?;
     prepared.start(Box::new(stream)).await
+}
+
+impl NotificationHandle {
+    pub(super) fn subscribe_property_unobserved(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        self.subscribe_property(did, binding, |_| {})
+    }
+
+    pub(super) fn subscribe_event_unobserved(
+        &self,
+        did: &str,
+        binding: crate::xiaomi::capability::EventBinding,
+    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
+        self.subscribe_event(did, binding, |_| {})
+    }
 }

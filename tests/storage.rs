@@ -20,6 +20,13 @@ fn initializes_and_restores_independent_identities() {
         let identity = store.load_identity().unwrap();
         assert_eq!(identity.bridge_id.len(), 32);
         let db = Connection::open(store.path()).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM bridge_configuration", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
         let columns = db
             .prepare("PRAGMA table_info(identity)")
             .unwrap()

@@ -164,14 +164,14 @@ impl Shared {
 }
 
 #[derive(Clone)]
-pub struct NotificationHandle {
+pub(in crate::xiaomi) struct NotificationHandle {
     pub(super) shared: Rc<Shared>,
     pub(super) timing: Timing,
 }
 
 impl NotificationHandle {
     /// Retire received event deliveries without changing subscription readiness.
-    pub(crate) fn invalidate_received_event(&self, did: &str, binding: EventBinding) {
+    pub(in crate::xiaomi) fn invalidate_received_event(&self, did: &str, binding: EventBinding) {
         for registration in self.shared.registrations.borrow_mut().values_mut() {
             if matches!(&registration.target, Target::Event { did: target, binding: event } if target == did && *event == binding)
             {
@@ -182,7 +182,11 @@ impl NotificationHandle {
 
     /// Retire received deliveries for one function's property while preserving
     /// other property generations, subscription readiness and online reports.
-    pub(crate) fn invalidate_received_property(&self, did: &str, binding: PropertyBinding) {
+    pub(in crate::xiaomi) fn invalidate_received_property(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+    ) {
         for registration in self.shared.registrations.borrow_mut().values_mut() {
             if matches!(&registration.target, Target::Property { did: target, binding: property } if target == did && *property == binding)
             {
@@ -191,19 +195,11 @@ impl NotificationHandle {
         }
     }
 
-    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+    pub(in crate::xiaomi) fn same_connection(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.shared, &other.shared)
     }
 
-    pub fn subscribe_property(
-        &self,
-        did: &str,
-        binding: PropertyBinding,
-    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        self.subscribe_property_with_result(did, binding, |_| {})
-    }
-
-    pub fn subscribe_online(
+    pub(in crate::xiaomi) fn subscribe_online(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
@@ -220,15 +216,7 @@ impl NotificationHandle {
         async move { completion?.wait().await }
     }
 
-    pub fn subscribe_event(
-        &self,
-        did: &str,
-        binding: EventBinding,
-    ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
-        self.subscribe_event_with_result(did, binding, |_| {})
-    }
-
-    pub(crate) fn subscribe_property_with_result<
+    pub(in crate::xiaomi) fn subscribe_property<
         F: FnOnce(Result<(), NotificationError>) + 'static,
     >(
         &self,
@@ -252,9 +240,7 @@ impl NotificationHandle {
         };
         Self::observed_subscription(completion, on_result)
     }
-    pub(crate) fn subscribe_event_with_result<
-        F: FnOnce(Result<(), NotificationError>) + 'static,
-    >(
+    pub(in crate::xiaomi) fn subscribe_event<F: FnOnce(Result<(), NotificationError>) + 'static>(
         &self,
         did: &str,
         binding: EventBinding,
@@ -346,7 +332,7 @@ impl NotificationHandle {
         Ok(completion)
     }
 
-    pub fn unsubscribe_properties(
+    pub(in crate::xiaomi) fn unsubscribe_properties(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
@@ -354,7 +340,7 @@ impl NotificationHandle {
         async move { completion?.wait().await }
     }
 
-    pub fn unsubscribe_events(
+    pub(in crate::xiaomi) fn unsubscribe_events(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
@@ -364,7 +350,7 @@ impl NotificationHandle {
 
     /// Retire only online notifications. Property subscriptions have their own
     /// lifecycle and survive an online reconcile.
-    pub fn unsubscribe_online(
+    pub(in crate::xiaomi) fn unsubscribe_online(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
@@ -372,7 +358,7 @@ impl NotificationHandle {
         async move { completion?.wait().await }
     }
 
-    pub fn unsubscribe_device(
+    pub(in crate::xiaomi) fn unsubscribe_device(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), NotificationError>> + use<> {
@@ -444,7 +430,7 @@ impl NotificationHandle {
         self.shared.event.notify(usize::MAX);
     }
 
-    pub fn close(&self) {
+    pub(in crate::xiaomi) fn close(&self) {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
     }

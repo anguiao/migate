@@ -11,18 +11,18 @@ use super::{AppliedPatch, ParsedDevice, RecognitionDiagnostic, description::Urn}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct BuiltinPatch {
-    pub id: &'static str,
-    pub stage: &'static str,
+    pub(super) id: &'static str,
+    pub(super) stage: &'static str,
 }
 impl BuiltinPatch {
-    pub fn applied(self, target: impl Into<String>) -> AppliedPatch {
+    pub(super) fn applied(self, target: impl Into<String>) -> AppliedPatch {
         AppliedPatch {
             id: self.id.into(),
             target: target.into(),
             stage: self.stage.into(),
         }
     }
-    pub fn failed(
+    pub(super) fn failed(
         self,
         target: impl Into<String>,
         reason: impl std::fmt::Display,

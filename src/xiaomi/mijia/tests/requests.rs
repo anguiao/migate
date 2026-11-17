@@ -1,3 +1,4 @@
+use super::super::rpc::RpcOutcome;
 use super::*;
 
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };

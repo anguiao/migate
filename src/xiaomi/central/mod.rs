@@ -1,8 +1,8 @@
 mod session;
 mod tls;
 mod wire;
-pub(crate) use session::SessionDriver;
-pub use session::{
+pub(in crate::xiaomi) use session::SessionDriver;
+pub(in crate::xiaomi) use session::{
     CentralEvent, DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout,
     SendDecision, SendHooks, SessionHandle, connect,
 };
@@ -47,4 +47,4 @@ impl fmt::Display for CentralError {
 impl Error for CentralError {}
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(in crate::xiaomi) mod tests;

@@ -5,7 +5,7 @@ use crate::xiaomi::mqtt::{self, HandshakeError};
 use mqttbytes::v5::{Connect, ConnectProperties};
 use std::{net::SocketAddr, time::Duration};
 
-pub async fn connect(
+pub(in crate::xiaomi) async fn connect(
     address: SocketAddr,
     credentials: &XiaomiRecord,
 ) -> Result<(SessionHandle, SessionDriver), CentralError> {

@@ -20,25 +20,25 @@ use std::{
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeviceAccess {
-    pub did: String,
-    pub name: Option<String>,
-    pub model: String,
-    pub instance_type: String,
-    pub online: bool,
-    pub spec_v2_access: bool,
-    pub push_available: bool,
+pub(in crate::xiaomi) struct DeviceAccess {
+    pub(in crate::xiaomi) did: String,
+    pub(in crate::xiaomi) name: Option<String>,
+    pub(in crate::xiaomi) model: String,
+    pub(in crate::xiaomi) instance_type: String,
+    pub(in crate::xiaomi) online: bool,
+    pub(in crate::xiaomi) spec_v2_access: bool,
+    pub(in crate::xiaomi) push_available: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DeviceEntry {
-    pub did: String,
-    pub access: Result<DeviceAccess, CentralError>,
+pub(in crate::xiaomi) struct DeviceEntry {
+    pub(in crate::xiaomi) did: String,
+    pub(in crate::xiaomi) access: Result<DeviceAccess, CentralError>,
 }
 
 /// The request's observed progress, independent of its completion error.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestStage {
+pub(in crate::xiaomi) enum RequestStage {
     /// No request bytes have been accepted by the socket.
     NotSent,
     /// At least one request byte was accepted; remote execution is uncertain.
@@ -48,7 +48,7 @@ pub enum RequestStage {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestTimeout {
+pub(in crate::xiaomi) enum RequestTimeout {
     /// The operation deadline elapsed before any request bytes were written.
     Queue,
     /// A sent business request did not receive a valid response in time.
@@ -60,25 +60,25 @@ pub enum RequestTimeout {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RequestOutcome<T> {
-    pub result: Result<T, CentralError>,
-    pub stage: RequestStage,
-    pub timeout: Option<RequestTimeout>,
+pub(in crate::xiaomi) struct RequestOutcome<T> {
+    pub(in crate::xiaomi) result: Result<T, CentralError>,
+    pub(in crate::xiaomi) stage: RequestStage,
+    pub(in crate::xiaomi) timeout: Option<RequestTimeout>,
 }
 
 /// A last check made while the operation has written no socket bytes.
-pub enum SendDecision {
+pub(in crate::xiaomi) enum SendDecision {
     Send,
     Withdraw,
     Cancel,
 }
 
-pub struct SendHooks {
+pub(in crate::xiaomi) struct SendHooks {
     pub(super) guard: Box<dyn FnMut() -> SendDecision>,
     pub(super) first_send: Box<dyn FnOnce()>,
 }
 impl SendHooks {
-    pub fn new(
+    pub(in crate::xiaomi) fn new(
         guard: impl FnMut() -> SendDecision + 'static,
         on_first_send: impl FnOnce() + 'static,
     ) -> Self {
@@ -246,19 +246,23 @@ impl NotificationBinding {
 /// waiters receive the same outcome, including send progress and timeout scope.
 /// Dropping the future does not cancel a sent write or suppress its callback.
 #[derive(Clone)]
-pub struct SessionHandle {
+pub(in crate::xiaomi) struct SessionHandle {
     pub(super) shared: Rc<Shared>,
     pub(super) timing: Timing,
 }
 impl SessionHandle {
     /// Retire already received event deliveries, preserving their subscriptions.
-    pub(crate) fn invalidate_received_event(&self, did: &str, binding: EventBinding) {
+    pub(in crate::xiaomi) fn invalidate_received_event(&self, did: &str, binding: EventBinding) {
         self.invalidate_received(did, NotificationBinding::Event(binding));
     }
 
     /// Retire deliveries already received for one real property while keeping
     /// subscriptions, other functions and business requests intact.
-    pub(crate) fn invalidate_received_property(&self, did: &str, binding: PropertyBinding) {
+    pub(in crate::xiaomi) fn invalidate_received_property(
+        &self,
+        did: &str,
+        binding: PropertyBinding,
+    ) {
         self.invalidate_received(did, NotificationBinding::Property(binding));
     }
     fn invalidate_received(&self, did: &str, binding: NotificationBinding) {
@@ -269,15 +273,15 @@ impl SessionHandle {
         self.shared.event.notify(usize::MAX);
     }
 
-    pub(crate) fn same_connection(&self, other: &Self) -> bool {
+    pub(in crate::xiaomi) fn same_connection(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.shared, &other.shared)
     }
 
-    pub fn close(&self) {
+    pub(in crate::xiaomi) fn close(&self) {
         self.shared.closed.set(true);
         self.shared.event.notify(usize::MAX);
     }
-    pub fn get_devices<F: FnOnce(RequestOutcome<Vec<DeviceEntry>>) + 'static>(
+    pub(in crate::xiaomi) fn get_devices<F: FnOnce(RequestOutcome<Vec<DeviceEntry>>) + 'static>(
         &self,
         on_result: F,
     ) -> impl Future<Output = RequestOutcome<Vec<DeviceEntry>>> + use<F> {
@@ -293,7 +297,9 @@ impl SessionHandle {
         )
     }
     /// Return only entries for the requested devices; missing entries stay absent.
-    pub fn get_devices_filtered<F: FnOnce(RequestOutcome<Vec<DeviceEntry>>) + 'static>(
+    pub(in crate::xiaomi) fn get_devices_filtered<
+        F: FnOnce(RequestOutcome<Vec<DeviceEntry>>) + 'static,
+    >(
         &self,
         dids: &[String],
         on_result: F,
@@ -314,7 +320,7 @@ impl SessionHandle {
 
     /// Retire device work before another frame is processed. Writes that may
     /// have been sent keep their original receipt; unsent writes are cancelled.
-    pub fn cancel_device(&self, did: &str) -> Result<(), CentralError> {
+    pub(in crate::xiaomi) fn cancel_device(&self, did: &str) -> Result<(), CentralError> {
         self.cancel(did, CancellationScope::Device)
     }
 
@@ -343,7 +349,7 @@ impl SessionHandle {
     }
 
     /// Also cancel pending subscriptions so a late SUBACK cannot restore routing.
-    pub fn unsubscribe_device(
+    pub(in crate::xiaomi) fn unsubscribe_device(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
@@ -358,7 +364,7 @@ impl SessionHandle {
 
     /// Retire property subscriptions without cancelling in-flight reads or writes.
     /// Late SUBACKs cannot reinstate the retired subscriptions.
-    pub fn unsubscribe_properties(
+    pub(in crate::xiaomi) fn unsubscribe_properties(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
@@ -372,7 +378,7 @@ impl SessionHandle {
     }
 
     /// Retire event subscriptions without cancelling properties or business requests.
-    pub fn unsubscribe_events(
+    pub(in crate::xiaomi) fn unsubscribe_events(
         &self,
         did: &str,
     ) -> impl Future<Output = Result<(), CentralError>> + use<> {
@@ -385,7 +391,7 @@ impl SessionHandle {
         async move { result?.await }
     }
 
-    pub fn subscribe_property<F: FnOnce(Result<(), CentralError>) + 'static>(
+    pub(in crate::xiaomi) fn subscribe_property<F: FnOnce(Result<(), CentralError>) + 'static>(
         &self,
         did: &str,
         binding: PropertyBinding,
@@ -393,7 +399,7 @@ impl SessionHandle {
     ) -> impl Future<Output = Result<(), CentralError>> + use<F> {
         self.subscribe(did, NotificationBinding::Property(binding), on_result)
     }
-    pub fn subscribe_event<F: FnOnce(Result<(), CentralError>) + 'static>(
+    pub(in crate::xiaomi) fn subscribe_event<F: FnOnce(Result<(), CentralError>) + 'static>(
         &self,
         did: &str,
         binding: EventBinding,
@@ -419,7 +425,7 @@ impl SessionHandle {
         );
         async move { submitted.await.result }
     }
-    pub fn read_property_observation_with_timeout_guarded<
+    pub(in crate::xiaomi) fn read_property_observation_with_timeout_guarded<
         F: FnOnce(RequestOutcome<PropertyReading>) + 'static,
     >(
         &self,
@@ -443,7 +449,7 @@ impl SessionHandle {
             on_result,
         )
     }
-    pub fn set_properties_guarded<
+    pub(in crate::xiaomi) fn set_properties_guarded<
         F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static,
     >(
         &self,

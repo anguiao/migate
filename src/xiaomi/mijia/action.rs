@@ -6,7 +6,7 @@ use std::fmt;
 impl MijiaClient {
     /// Returns the correlated native action code and output without treating
     /// acceptance as a state observation.
-    pub async fn action(
+    pub(in crate::xiaomi) async fn action(
         &self,
         session: &MijiaSession,
         did: &str,
@@ -42,9 +42,9 @@ impl MijiaClient {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub struct ActionResult {
-    pub code: i64,
-    pub result: Value,
+pub(in crate::xiaomi) struct ActionResult {
+    pub(in crate::xiaomi) code: i64,
+    pub(in crate::xiaomi) result: Value,
 }
 impl fmt::Debug for ActionResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

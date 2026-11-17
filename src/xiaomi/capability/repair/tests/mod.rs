@@ -11,19 +11,19 @@ fn fixture(path: &str) -> Value {
 
 fn group3() -> Value {
     fixture(include_str!(
-        "../../../../tests/fixtures/miot/group3-instance.json"
+        "../../../../../tests/fixtures/miot/group3-instance.json"
     ))
 }
 
 fn ls2307() -> Value {
     fixture(include_str!(
-        "../../../../tests/fixtures/miot/devcea-light-ls2307.json"
+        "../../../../../tests/fixtures/miot/devcea-light-ls2307.json"
     ))
 }
 
 fn light3() -> Value {
     fixture(include_str!(
-        "../../../../tests/fixtures/miot/yeelink-light-light3.json"
+        "../../../../../tests/fixtures/miot/yeelink-light-light3.json"
     ))
 }
 

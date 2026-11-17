@@ -11,31 +11,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 impl MijiaClient {
-    pub async fn read_property_value(
-        &self,
-        credential: &MijiaSession,
-        did: &str,
-        binding: PropertyBinding,
-    ) -> Result<Value, CloudError> {
-        Ok(self
-            .read_property_observation(credential, did, binding)
-            .await?
-            .value)
-    }
-
-    pub async fn read_property_observation(
-        &self,
-        credential: &MijiaSession,
-        did: &str,
-        binding: PropertyBinding,
-    ) -> Result<PropertyReading, CloudError> {
-        single_result(
-            "read Xiaomi property",
-            self.read_properties(credential, did, &[binding]).await?,
-        )
-    }
-
-    pub async fn read_properties(
+    pub(in crate::xiaomi) async fn read_properties(
         &self,
         credential: &MijiaSession,
         did: &str,
@@ -75,21 +51,7 @@ impl MijiaClient {
         ))
     }
 
-    pub async fn set_property(
-        &self,
-        credential: &MijiaSession,
-        did: &str,
-        binding: PropertyBinding,
-        value: bool,
-    ) -> Result<(), CloudError> {
-        single_result(
-            "write Xiaomi property",
-            self.set_properties(credential, did, &[(binding, json!(value))])
-                .await?,
-        )
-    }
-
-    pub async fn set_properties(
+    pub(in crate::xiaomi) async fn set_properties(
         &self,
         credential: &MijiaSession,
         did: &str,
@@ -140,20 +102,6 @@ fn accepted_code(
             CloudErrorKind::PropertyRejected(code),
         ))
     }
-}
-
-fn single_result<T>(
-    operation: &'static str,
-    result: PropertyResults<T, CloudError>,
-) -> Result<T, CloudError> {
-    if result.protocol_error {
-        return Err(CloudError::protocol(operation));
-    }
-    result
-        .items
-        .into_iter()
-        .next()
-        .expect("one property was requested")
 }
 
 fn validate_targets(

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FanModeBinding {
+pub(crate) struct FanModeBinding {
     property: PropertyBinding,
     format: NumericFormat,
     straight: u32,
@@ -35,19 +35,19 @@ impl FanModeBinding {
             values,
         })
     }
-    pub fn property(&self) -> PropertyBinding {
+    pub(crate) fn property(&self) -> PropertyBinding {
         self.property
     }
-    pub fn format(&self) -> NumericFormat {
+    pub(crate) fn format(&self) -> NumericFormat {
         self.format
     }
-    pub fn straight(&self) -> u32 {
+    pub(crate) fn straight(&self) -> u32 {
         self.straight
     }
-    pub fn values(&self) -> &[u32] {
+    pub(crate) fn values(&self) -> &[u32] {
         &self.values
     }
-    pub fn read_value(&self, value: &Value) -> Result<u32, CapabilityError> {
+    pub(crate) fn read_value(&self, value: &Value) -> Result<u32, CapabilityError> {
         let value = raw_integer(value)?;
         if self.values.contains(&value) {
             Ok(value)
@@ -65,7 +65,7 @@ pub(crate) enum FanSpeedEncoding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FanSpeedBinding {
+pub(crate) struct FanSpeedBinding {
     property: PropertyBinding,
     format: NumericFormat,
     encoding: FanSpeedEncoding,
@@ -122,19 +122,19 @@ impl FanSpeedBinding {
             count: count as u8,
         })
     }
-    pub fn property(&self) -> PropertyBinding {
+    pub(crate) fn property(&self) -> PropertyBinding {
         self.property
     }
-    pub fn format(&self) -> NumericFormat {
+    pub(crate) fn format(&self) -> NumericFormat {
         self.format
     }
     pub(crate) fn encoding(&self) -> &FanSpeedEncoding {
         &self.encoding
     }
-    pub fn count(&self) -> u8 {
+    pub(crate) fn count(&self) -> u8 {
         self.count
     }
-    pub fn read_value(&self, value: &Value) -> Result<u8, CapabilityError> {
+    pub(crate) fn read_value(&self, value: &Value) -> Result<u8, CapabilityError> {
         let raw = value
             .as_i64()
             .ok_or(CapabilityError::InvalidValue("fan speed"))?;
@@ -164,9 +164,9 @@ impl FanSpeedBinding {
 /// A no-argument MIoT action that is a real native operation, never a property.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ActionBinding {
-    pub siid: u32,
-    pub aiid: u32,
+pub(crate) struct ActionBinding {
+    pub(crate) siid: u32,
+    pub(crate) aiid: u32,
 }
 impl ActionBinding {
     pub(crate) fn new(siid: u32, aiid: u32) -> Result<Self, CapabilityError> {
@@ -188,12 +188,12 @@ pub enum SharedFanChannel {
 /// group. High speed is the real boolean power property; low speed is a native
 /// action or built-in command, so no synthetic speed property exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SharedFanSpeedBinding {
-    pub channel: SharedFanChannel,
-    pub cloud_action: Option<ActionBinding>,
+pub(crate) struct SharedFanSpeedBinding {
+    pub(crate) channel: SharedFanChannel,
+    pub(crate) cloud_action: Option<ActionBinding>,
 }
 impl SharedFanSpeedBinding {
-    pub const fn count(&self) -> u8 {
+    pub(crate) const fn count(&self) -> u8 {
         2
     }
 }
@@ -205,7 +205,7 @@ enum FanSpeedSource {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FanBindings {
+pub(crate) struct FanBindings {
     power: PropertyBinding,
     mode: Option<FanModeBinding>,
     speed: FanSpeedSource,
@@ -233,14 +233,14 @@ impl FanBindings {
             swing: None,
         }
     }
-    pub fn power(&self) -> PropertyBinding {
+    pub(crate) fn power(&self) -> PropertyBinding {
         self.power
     }
-    pub fn mode(&self) -> Option<&FanModeBinding> {
+    pub(crate) fn mode(&self) -> Option<&FanModeBinding> {
         self.mode.as_ref()
     }
     /// Only a standard native speed property can use this accessor.
-    pub fn speed(&self) -> &FanSpeedBinding {
+    pub(crate) fn speed(&self) -> &FanSpeedBinding {
         match &self.speed {
             FanSpeedSource::Property(speed) => speed,
             FanSpeedSource::Shared(_) => {
@@ -260,13 +260,13 @@ impl FanBindings {
             FanSpeedSource::Shared(speed) => Some(*speed),
         }
     }
-    pub fn speed_count(&self) -> u8 {
+    pub(crate) fn speed_count(&self) -> u8 {
         match &self.speed {
             FanSpeedSource::Property(speed) => speed.count(),
             FanSpeedSource::Shared(speed) => speed.count(),
         }
     }
-    pub fn swing(&self) -> Option<PropertyBinding> {
+    pub(crate) fn swing(&self) -> Option<PropertyBinding> {
         self.swing
     }
     pub(crate) fn bindings(&self) -> Vec<PropertyBinding> {

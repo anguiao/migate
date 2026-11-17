@@ -4,19 +4,19 @@ mod client;
 mod discovery;
 mod wire;
 
-pub(crate) use client::{Client, Failure, RequestError, SendStage};
-pub(crate) use discovery::Discovery;
+pub(in crate::xiaomi) use client::{Client, Failure, RequestError, SendStage};
+pub(in crate::xiaomi) use discovery::Discovery;
 
 use std::{fmt, time::Duration};
 
-pub(crate) const PORT: u16 = 54321;
-pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+pub(in crate::xiaomi) const PORT: u16 = 54321;
+pub(in crate::xiaomi) const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct Token([u8; 16]);
 
 impl Token {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub(in crate::xiaomi) fn parse(value: &str) -> Option<Self> {
         if value.len() != 32 || !value.is_ascii() {
             return None;
         }

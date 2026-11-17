@@ -172,7 +172,7 @@ impl AsyncWrite for PendingIo {
 }
 
 impl SessionDriver {
-    pub(crate) fn ready_for_test(
+    pub(in crate::xiaomi) fn ready_for_test(
         stream: impl AsyncRead + AsyncWrite + Unpin + 'static,
         request: std::time::Duration,
     ) -> (SessionHandle, Self) {

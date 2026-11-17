@@ -136,5 +136,4 @@ fn narrowed_profile(native: LightProfile, temperature: TemperatureInterval) -> L
 }
 
 #[cfg(test)]
-#[path = "tests/repair.rs"]
 mod tests;

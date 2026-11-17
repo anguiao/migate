@@ -7,14 +7,13 @@ mod response;
 mod rpc;
 mod session;
 
-pub use action::ActionResult;
-pub use catalog::{CloudDevice, CloudDeviceInfo, OwnedHome, OwnedHomes, group_id};
-pub(crate) use catalog::{LanCandidate, LanCredentials};
-pub use client::{MIJIA_BASE_URL, MijiaClient};
-pub use light_groups::{
+pub(crate) use catalog::group_id;
+pub(in crate::xiaomi) use catalog::{CloudDeviceInfo, OwnedHome};
+pub(in crate::xiaomi) use catalog::{LanCandidate, LanCredentials};
+pub(in crate::xiaomi) use client::MijiaClient;
+pub(in crate::xiaomi) use light_groups::{
     CloudCatalogDevice, CloudDeviceCatalog, CloudGroupMembership, CloudGroupStatus,
 };
-pub use rpc::RpcOutcome;
 pub use session::MijiaSession;
 
 #[cfg(test)]

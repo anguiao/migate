@@ -4,9 +4,9 @@ mod driver;
 mod mqtt;
 mod request;
 
-pub use connection::connect;
-pub use driver::SessionDriver;
-pub use request::{
+pub(in crate::xiaomi) use connection::connect;
+pub(in crate::xiaomi) use driver::SessionDriver;
+pub(in crate::xiaomi) use request::{
     DeviceAccess, DeviceEntry, RequestOutcome, RequestStage, RequestTimeout, SendDecision,
     SendHooks, SessionHandle,
 };
@@ -18,7 +18,7 @@ use std::time::Duration;
 const LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CentralEvent {
+pub(in crate::xiaomi) enum CentralEvent {
     EventOccurred {
         did: String,
         binding: EventBinding,
@@ -60,4 +60,4 @@ pub(super) trait Transport: AsyncRead + AsyncWrite + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Unpin> Transport for T {}
 
 #[cfg(test)]
-pub(crate) mod tests;
+pub(in crate::xiaomi) mod tests;

@@ -11,34 +11,34 @@ use std::{
     time::Duration,
 };
 
-pub(crate) struct FakeDevice {
-    pub(crate) address: SocketAddr,
-    pub(crate) packets: Arc<AtomicUsize>,
-    pub(crate) business: Arc<AtomicUsize>,
-    pub(crate) reads: Arc<AtomicUsize>,
-    pub(crate) writes: Arc<Mutex<Vec<Value>>>,
-    pub(crate) values: Arc<Mutex<BTreeMap<(u64, u64), Value>>>,
-    pub(crate) write_codes: Arc<Mutex<BTreeMap<(u64, u64), i64>>>,
-    pub(crate) reverse_write_results: Arc<AtomicBool>,
-    pub(crate) omit_write_result: Arc<AtomicBool>,
-    pub(crate) hold_hello: Arc<AtomicBool>,
-    pub(crate) hold_read: Arc<AtomicBool>,
-    pub(crate) hold_write: Arc<AtomicBool>,
-    pub(crate) drop_write: Arc<AtomicBool>,
-    pub(crate) reject_write: Arc<AtomicBool>,
-    pub(crate) drop_business: Arc<AtomicBool>,
-    pub(crate) reject_read: Arc<AtomicBool>,
-    pub(crate) accept_replacement: Arc<AtomicBool>,
-    pub(crate) drop_replacement: Arc<AtomicBool>,
+pub(in crate::xiaomi) struct FakeDevice {
+    pub(in crate::xiaomi) address: SocketAddr,
+    pub(in crate::xiaomi) packets: Arc<AtomicUsize>,
+    pub(in crate::xiaomi) business: Arc<AtomicUsize>,
+    pub(in crate::xiaomi) reads: Arc<AtomicUsize>,
+    pub(in crate::xiaomi) writes: Arc<Mutex<Vec<Value>>>,
+    pub(in crate::xiaomi) values: Arc<Mutex<BTreeMap<(u64, u64), Value>>>,
+    pub(in crate::xiaomi) write_codes: Arc<Mutex<BTreeMap<(u64, u64), i64>>>,
+    pub(in crate::xiaomi) reverse_write_results: Arc<AtomicBool>,
+    pub(in crate::xiaomi) omit_write_result: Arc<AtomicBool>,
+    pub(in crate::xiaomi) hold_hello: Arc<AtomicBool>,
+    pub(in crate::xiaomi) hold_read: Arc<AtomicBool>,
+    pub(in crate::xiaomi) hold_write: Arc<AtomicBool>,
+    pub(in crate::xiaomi) drop_write: Arc<AtomicBool>,
+    pub(in crate::xiaomi) reject_write: Arc<AtomicBool>,
+    pub(in crate::xiaomi) drop_business: Arc<AtomicBool>,
+    pub(in crate::xiaomi) reject_read: Arc<AtomicBool>,
+    pub(in crate::xiaomi) accept_replacement: Arc<AtomicBool>,
+    pub(in crate::xiaomi) drop_replacement: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 impl FakeDevice {
-    pub(crate) fn new(token: Token, replacement: Token) -> Self {
+    pub(in crate::xiaomi) fn new(token: Token, replacement: Token) -> Self {
         Self::with_did(token, replacement, 656878122)
     }
 
-    pub(crate) fn with_did(token: Token, replacement: Token, did: u64) -> Self {
+    pub(in crate::xiaomi) fn with_did(token: Token, replacement: Token, did: u64) -> Self {
         let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
         socket
             .set_read_timeout(Some(Duration::from_millis(25)))
@@ -257,29 +257,29 @@ enum LegacyKind {
     BhfV13,
 }
 
-pub(crate) struct LegacyDevice {
-    pub(crate) address: SocketAddr,
-    pub(crate) requests: Arc<Mutex<Vec<Value>>>,
-    pub(crate) values: Arc<Mutex<Vec<Value>>>,
+pub(in crate::xiaomi) struct LegacyDevice {
+    pub(in crate::xiaomi) address: SocketAddr,
+    pub(in crate::xiaomi) requests: Arc<Mutex<Vec<Value>>>,
+    pub(in crate::xiaomi) values: Arc<Mutex<Vec<Value>>>,
     /// Standard MIoT properties for the bath-heater fixture.
-    pub(crate) properties: Arc<Mutex<BTreeMap<(u32, u32), Value>>>,
-    pub(crate) ack: Arc<Mutex<Value>>,
-    pub(crate) rejected: Arc<Mutex<BTreeMap<String, i64>>>,
-    pub(crate) rejected_properties: Arc<Mutex<BTreeMap<(u32, u32), i64>>>,
-    pub(crate) drop_write: Arc<AtomicBool>,
-    pub(crate) hold_read: Arc<AtomicBool>,
+    pub(in crate::xiaomi) properties: Arc<Mutex<BTreeMap<(u32, u32), Value>>>,
+    pub(in crate::xiaomi) ack: Arc<Mutex<Value>>,
+    pub(in crate::xiaomi) rejected: Arc<Mutex<BTreeMap<String, i64>>>,
+    pub(in crate::xiaomi) rejected_properties: Arc<Mutex<BTreeMap<(u32, u32), i64>>>,
+    pub(in crate::xiaomi) drop_write: Arc<AtomicBool>,
+    pub(in crate::xiaomi) hold_read: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl LegacyDevice {
-    pub(crate) fn new(token: Token, did: u64) -> Self {
+    pub(in crate::xiaomi) fn new(token: Token, did: u64) -> Self {
         Self::build(token, did, LegacyKind::Mcn02)
     }
 
     /// The bath-heater model serves standard properties, the shared legacy
     /// group and `set_bh_mode` over the same authenticated connection.
-    pub(crate) fn bhf_v13(token: Token, did: u64) -> Self {
+    pub(in crate::xiaomi) fn bhf_v13(token: Token, did: u64) -> Self {
         Self::build(token, did, LegacyKind::BhfV13)
     }
 

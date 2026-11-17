@@ -10,13 +10,13 @@ use serde_json::{Value, json};
 use std::{fmt, time::Duration};
 use url::Url;
 
-pub const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
+const CLOUD_BASE_URL: &str = "https://ha.api.io.mi.com";
 
 #[derive(Clone, Deserialize, Eq, PartialEq)]
-pub struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_in: i64,
+pub(in crate::xiaomi) struct TokenResponse {
+    pub(in crate::xiaomi) access_token: String,
+    pub(in crate::xiaomi) refresh_token: String,
+    pub(in crate::xiaomi) expires_in: i64,
 }
 
 impl fmt::Debug for TokenResponse {
@@ -31,8 +31,8 @@ impl fmt::Debug for TokenResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HomePage {
-    pub uid: Option<String>,
+pub(in crate::xiaomi) struct HomePage {
+    pub(in crate::xiaomi) uid: Option<String>,
 }
 
 #[derive(Clone)]
@@ -65,7 +65,7 @@ impl CloudClient {
         })
     }
 
-    pub async fn exchange_token(
+    pub(in crate::xiaomi) async fn exchange_token(
         &self,
         attempt: &AuthorizationAttempt,
         code: &str,
@@ -85,7 +85,7 @@ impl CloudClient {
         .await
     }
 
-    pub async fn refresh_token(
+    pub(in crate::xiaomi) async fn refresh_token(
         &self,
         redirect_uri: &str,
         refresh_token: &str,
@@ -130,7 +130,10 @@ impl CloudClient {
         Ok(result)
     }
 
-    pub async fn get_home(&self, access_token: &str) -> Result<HomePage, CloudError> {
+    pub(in crate::xiaomi) async fn get_home(
+        &self,
+        access_token: &str,
+    ) -> Result<HomePage, CloudError> {
         #[derive(Deserialize)]
         struct ProbeHomes {
             homelist: Vec<ProbeHome>,
@@ -159,7 +162,7 @@ impl CloudClient {
         Ok(HomePage { uid })
     }
 
-    pub async fn get_certificate(
+    pub(in crate::xiaomi) async fn get_certificate(
         &self,
         access_token: &str,
         csr_pem: &str,

@@ -14,7 +14,7 @@ static RPC_IDS: OnceLock<AtomicU32> = OnceLock::new();
 
 impl MijiaClient {
     /// Sends exactly one RPC request and preserves its native result or error.
-    pub async fn rpc(
+    pub(in crate::xiaomi) async fn rpc(
         &self,
         session: &MijiaSession,
         did: &str,
@@ -67,7 +67,7 @@ impl MijiaClient {
 }
 
 #[derive(Clone, Eq, PartialEq)]
-pub enum RpcOutcome {
+pub(in crate::xiaomi) enum RpcOutcome {
     Result(Value),
     Error(Value),
 }
@@ -82,7 +82,7 @@ impl fmt::Debug for RpcOutcome {
 
 impl MijiaClient {
     /// Read the physical device's shared legacy feedback group exactly once.
-    pub async fn read_legacy_group(
+    pub(in crate::xiaomi) async fn read_legacy_group(
         &self,
         session: &MijiaSession,
         did: &str,

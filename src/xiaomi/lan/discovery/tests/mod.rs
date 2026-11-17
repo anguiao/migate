@@ -41,7 +41,7 @@ fn simultaneous_recovery_requests_share_one_scan() {
 }
 
 impl Discovery {
-    pub(crate) async fn address_at(
+    pub(in crate::xiaomi) async fn address_at(
         &self,
         did: u64,
         target: SocketAddr,

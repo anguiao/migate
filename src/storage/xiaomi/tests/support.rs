@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 
 pub(crate) trait XiaomiTestFixture {
     fn fixture_replace(&self, record: &XiaomiRecord) -> Result<(), StorageError>;

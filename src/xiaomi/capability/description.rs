@@ -6,15 +6,15 @@ use super::{CapabilityError, NumericFormat, PropertyBinding};
 
 #[derive(Clone, Copy)]
 pub(super) struct Urn<'a> {
-    pub namespace: &'a str,
-    pub entity: &'a str,
-    pub name: &'a str,
-    pub type_id: u32,
-    pub vendor: &'a str,
+    pub(super) namespace: &'a str,
+    pub(super) entity: &'a str,
+    pub(super) name: &'a str,
+    pub(super) type_id: u32,
+    pub(super) vendor: &'a str,
 }
 
 impl<'a> Urn<'a> {
-    pub fn parse(value: &'a str) -> Result<Self, CapabilityError> {
+    pub(super) fn parse(value: &'a str) -> Result<Self, CapabilityError> {
         let fields = value.split(':').collect::<Vec<_>>();
         let [
             prefix,
@@ -62,14 +62,14 @@ impl<'a> Urn<'a> {
         })
     }
 
-    pub fn matches(&self, namespace: &str, entity: &str, name: &str, type_id: u32) -> bool {
+    pub(super) fn matches(&self, namespace: &str, entity: &str, name: &str, type_id: u32) -> bool {
         self.namespace == namespace
             && self.entity == entity
             && self.name == name
             && self.type_id == type_id
     }
 
-    pub fn standard(&self, entity: &str, name: &str, type_id: u32) -> bool {
+    pub(super) fn standard(&self, entity: &str, name: &str, type_id: u32) -> bool {
         self.matches("miot-spec-v2", entity, name, type_id)
     }
 }
@@ -88,38 +88,38 @@ fn token(value: &str) -> bool {
 }
 
 pub(super) struct Description<'a> {
-    pub urn: Urn<'a>,
-    pub services: Vec<Service<'a>>,
+    pub(super) urn: Urn<'a>,
+    pub(super) services: Vec<Service<'a>>,
 }
 
 pub(super) struct Service<'a> {
-    pub iid: u32,
-    pub urn: Urn<'a>,
-    pub properties: Vec<Property<'a>>,
-    pub actions: Vec<Action<'a>>,
-    pub events: Vec<Event<'a>>,
+    pub(super) iid: u32,
+    pub(super) urn: Urn<'a>,
+    pub(super) properties: Vec<Property<'a>>,
+    pub(super) actions: Vec<Action<'a>>,
+    pub(super) events: Vec<Event<'a>>,
 }
 
 pub(super) struct Action<'a> {
-    pub iid: u32,
-    pub urn: Urn<'a>,
-    pub value: &'a Value,
+    pub(super) iid: u32,
+    pub(super) urn: Urn<'a>,
+    pub(super) value: &'a Value,
 }
 
 pub(super) struct Event<'a> {
-    pub iid: u32,
-    pub urn: Urn<'a>,
-    pub arguments: Vec<u32>,
+    pub(super) iid: u32,
+    pub(super) urn: Urn<'a>,
+    pub(super) arguments: Vec<u32>,
 }
 
 pub(super) struct Property<'a> {
-    pub iid: u32,
-    pub urn: Urn<'a>,
-    pub value: &'a Value,
+    pub(super) iid: u32,
+    pub(super) urn: Urn<'a>,
+    pub(super) value: &'a Value,
 }
 
 impl<'a> Description<'a> {
-    pub fn parse(value: &'a Value) -> Result<Self, CapabilityError> {
+    pub(super) fn parse(value: &'a Value) -> Result<Self, CapabilityError> {
         let urn = typed_urn(value, "device")?;
         let mut service_ids = HashSet::new();
         let mut services = Vec::new();
@@ -240,7 +240,7 @@ pub(super) fn binding(service: &Service<'_>, property: &Property<'_>) -> Propert
 }
 
 impl<'a> Service<'a> {
-    pub fn property(
+    pub(super) fn property(
         &self,
         name: &'static str,
         type_id: u32,
@@ -249,7 +249,7 @@ impl<'a> Service<'a> {
             .ok_or(CapabilityError::MissingFunction(name))
     }
 
-    pub fn optional_property(
+    pub(super) fn optional_property(
         &self,
         name: &str,
         type_id: u32,
@@ -257,7 +257,7 @@ impl<'a> Service<'a> {
         self.matching_property(|property| property.urn.standard("property", name, type_id))
     }
 
-    pub fn matching_property(
+    pub(super) fn matching_property(
         &self,
         matches: impl Fn(&Property<'_>) -> bool,
     ) -> Result<Option<&Property<'a>>, CapabilityError> {
@@ -273,13 +273,13 @@ impl<'a> Service<'a> {
 pub(super) struct Access<'a>(&'a [Value]);
 
 impl Access<'_> {
-    pub fn contains(&self, permission: &str) -> bool {
+    pub(super) fn contains(&self, permission: &str) -> bool {
         self.0.iter().any(|item| item.as_str() == Some(permission))
     }
 }
 
 impl<'a> Property<'a> {
-    pub fn access(&self, required: &[&'static str]) -> Result<Access<'a>, CapabilityError> {
+    pub(super) fn access(&self, required: &[&'static str]) -> Result<Access<'a>, CapabilityError> {
         let values = array(self.value, "access")?;
         if values.iter().any(|item| item.as_str().is_none()) {
             return Err(CapabilityError::InvalidDescription("access"));
@@ -293,12 +293,12 @@ impl<'a> Property<'a> {
         Ok(access)
     }
 
-    pub fn control_access(&self) -> Result<(), CapabilityError> {
+    pub(super) fn control_access(&self) -> Result<(), CapabilityError> {
         self.access(&["read", "write", "notify"])?;
         Ok(())
     }
 
-    pub fn boolean_control(&self) -> Result<(), CapabilityError> {
+    pub(super) fn boolean_control(&self) -> Result<(), CapabilityError> {
         self.control_access()?;
         if string(self.value, "format")? != "bool" {
             return Err(CapabilityError::InvalidDescription(
@@ -308,7 +308,7 @@ impl<'a> Property<'a> {
         Ok(())
     }
 
-    pub fn integer_format(&self) -> Result<NumericFormat, CapabilityError> {
+    pub(super) fn integer_format(&self) -> Result<NumericFormat, CapabilityError> {
         match string(self.value, "format")? {
             "uint8" => Ok(NumericFormat::Uint8),
             "uint16" => Ok(NumericFormat::Uint16),
@@ -322,7 +322,7 @@ impl<'a> Property<'a> {
         }
     }
 
-    pub fn numeric_format(&self) -> Result<NumericFormat, CapabilityError> {
+    pub(super) fn numeric_format(&self) -> Result<NumericFormat, CapabilityError> {
         if string(self.value, "format")? == "float" {
             Ok(NumericFormat::Float)
         } else {

@@ -2,6 +2,7 @@ use super::support::*;
 use super::*;
 use crate::xiaomi::{
     capability::PropertyBinding,
+    property::{PropertyReading, PropertyResults},
     tests::support::{MockResponse, mock_server},
 };
 use futures_lite::future;
@@ -542,4 +543,58 @@ fn property_reads_preserve_a_supplied_upstream_update_time() {
             .unwrap();
     assert_eq!(reading.value, json!(22.5));
     assert_eq!(reading.update_time, None);
+}
+
+impl MijiaClient {
+    async fn read_property_value(
+        &self,
+        credential: &MijiaSession,
+        did: &str,
+        binding: PropertyBinding,
+    ) -> Result<Value, CloudError> {
+        Ok(self
+            .read_property_observation(credential, did, binding)
+            .await?
+            .value)
+    }
+
+    pub(in crate::xiaomi) async fn read_property_observation(
+        &self,
+        credential: &MijiaSession,
+        did: &str,
+        binding: PropertyBinding,
+    ) -> Result<PropertyReading, CloudError> {
+        single_result(
+            "read Xiaomi property",
+            self.read_properties(credential, did, &[binding]).await?,
+        )
+    }
+
+    async fn set_property(
+        &self,
+        credential: &MijiaSession,
+        did: &str,
+        binding: PropertyBinding,
+        value: bool,
+    ) -> Result<(), CloudError> {
+        single_result(
+            "write Xiaomi property",
+            self.set_properties(credential, did, &[(binding, json!(value))])
+                .await?,
+        )
+    }
+}
+
+fn single_result<T>(
+    operation: &'static str,
+    result: PropertyResults<T, CloudError>,
+) -> Result<T, CloudError> {
+    if result.protocol_error {
+        return Err(CloudError::protocol(operation));
+    }
+    result
+        .items
+        .into_iter()
+        .next()
+        .expect("one property was requested")
 }

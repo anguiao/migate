@@ -5,7 +5,7 @@ use crate::device::{DeviceKey, FunctionKind, PhysicalDeviceDescription};
 /// Source recognition facts are persisted for explanation, but never decide routing.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecognitionMetadata {
+pub(crate) struct RecognitionMetadata {
     pub(crate) category: String,
     pub(crate) core: Vec<String>,
     pub(crate) patches: Vec<AppliedPatch>,
@@ -14,7 +14,7 @@ pub struct RecognitionMetadata {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AppliedPatch {
+pub(crate) struct AppliedPatch {
     pub(crate) id: String,
     pub(crate) target: String,
     pub(crate) stage: String,
@@ -22,41 +22,41 @@ pub struct AppliedPatch {
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RecognitionDiagnostic {
+pub(crate) struct RecognitionDiagnostic {
     pub(crate) target: String,
     pub(crate) reason: String,
 }
 
 impl RecognitionMetadata {
-    pub fn category(&self) -> &str {
+    pub(crate) fn category(&self) -> &str {
         &self.category
     }
-    pub fn core(&self) -> &[String] {
+    pub(crate) fn core(&self) -> &[String] {
         &self.core
     }
-    pub fn patches(&self) -> &[AppliedPatch] {
+    pub(crate) fn patches(&self) -> &[AppliedPatch] {
         &self.patches
     }
-    pub fn diagnostics(&self) -> &[RecognitionDiagnostic] {
+    pub(crate) fn diagnostics(&self) -> &[RecognitionDiagnostic] {
         &self.diagnostics
     }
 }
 impl AppliedPatch {
-    pub fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         &self.id
     }
-    pub fn target(&self) -> &str {
+    pub(crate) fn target(&self) -> &str {
         &self.target
     }
-    pub fn stage(&self) -> &str {
+    pub(crate) fn stage(&self) -> &str {
         &self.stage
     }
 }
 impl RecognitionDiagnostic {
-    pub fn target(&self) -> &str {
+    pub(crate) fn target(&self) -> &str {
         &self.target
     }
-    pub fn reason(&self) -> &str {
+    pub(crate) fn reason(&self) -> &str {
         &self.reason
     }
 }
@@ -64,7 +64,7 @@ impl RecognitionDiagnostic {
 /// A parsed device description with non-empty, uniquely keyed functions and
 /// uniquely owned real bindings and source-anchored identities.
 #[derive(Clone, Debug)]
-pub struct ParsedDevice {
+pub(crate) struct ParsedDevice {
     key: DeviceKey,
     functions: Vec<ParsedFunction>,
     refresh_trigger: Option<PropertyBinding>,
@@ -228,13 +228,13 @@ impl ParsedDevice {
             recognition,
         })
     }
-    pub fn recognition(&self) -> &RecognitionMetadata {
+    pub(crate) fn recognition(&self) -> &RecognitionMetadata {
         &self.recognition
     }
-    pub fn key(&self) -> &DeviceKey {
+    pub(crate) fn key(&self) -> &DeviceKey {
         &self.key
     }
-    pub fn functions(&self) -> &[ParsedFunction] {
+    pub(crate) fn functions(&self) -> &[ParsedFunction] {
         &self.functions
     }
     /// A group relation without a specific function can address only one light.
@@ -246,16 +246,16 @@ impl ParsedDevice {
         let light = lights.next()?;
         lights.next().is_none().then_some(light)
     }
-    pub fn refresh_trigger(&self) -> Option<PropertyBinding> {
+    pub(crate) fn refresh_trigger(&self) -> Option<PropertyBinding> {
         self.refresh_trigger
     }
-    pub fn battery(&self) -> Option<&BatteryBinding> {
+    pub(crate) fn battery(&self) -> Option<&BatteryBinding> {
         self.battery.as_ref()
     }
-    pub fn battery_issue(&self) -> Option<&str> {
+    pub(crate) fn battery_issue(&self) -> Option<&str> {
         self.battery_issue.as_deref()
     }
-    pub fn is_read_only(&self) -> bool {
+    pub(crate) fn is_read_only(&self) -> bool {
         !self.functions.is_empty()
             && self
                 .functions

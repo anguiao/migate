@@ -5,11 +5,12 @@ mod notifications;
 mod oauth;
 mod response;
 
-pub use client::{CLOUD_BASE_URL, CloudClient, HomePage, TokenResponse};
+pub use client::CloudClient;
+pub(in crate::xiaomi) use client::TokenResponse;
 pub use error::{CloudError, CloudErrorKind};
-pub use notifications::{
-    NotificationDriver, NotificationError, NotificationEvent, NotificationHandle,
-    connect_notifications,
+pub use notifications::NotificationError;
+pub(in crate::xiaomi) use notifications::{
+    NotificationDriver, NotificationEvent, NotificationHandle, connect_notifications,
 };
 
 pub use oauth::{AUTHORIZATION_URL, AuthorizationAttempt, validate_saved_redirect_uri};

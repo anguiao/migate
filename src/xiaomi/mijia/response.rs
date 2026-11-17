@@ -35,7 +35,7 @@ pub(super) struct Room {
 }
 
 impl Members {
-    pub fn into_dids(self) -> impl Iterator<Item = String> {
+    pub(in crate::xiaomi) fn into_dids(self) -> impl Iterator<Item = String> {
         self.dids
             .into_iter()
             .chain(self.roomlist.into_iter().flat_map(|room| room.dids))

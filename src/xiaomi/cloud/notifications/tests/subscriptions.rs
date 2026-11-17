@@ -17,7 +17,7 @@ fn exhausted_unacknowledged_subscriptions_close_the_connection() {
         move |handle, driver| async move {
             let pending: Vec<_> = (1..=super::super::LIMIT)
                 .map(|siid| {
-                    handle.subscribe_property(
+                    handle.subscribe_property_unobserved(
                         "target",
                         PropertyBinding {
                             siid: siid as u32,
@@ -31,7 +31,7 @@ fn exhausted_unacknowledged_subscriptions_close_the_connection() {
                     assert_eq!(subscription.await, Err(NotificationError::Timeout));
                 }
                 assert_eq!(
-                    handle.subscribe_property("other", POWER).await,
+                    handle.subscribe_property_unobserved("other", POWER).await,
                     Err(NotificationError::Timeout)
                 );
             };
@@ -75,10 +75,13 @@ fn mismatched_subscription_ack_finishes_the_request_before_disconnecting() {
             move |handle, driver| async move {
                 let work = async {
                     if unsubscribe {
-                        handle.subscribe_property("target", POWER).await.unwrap();
+                        handle
+                            .subscribe_property_unobserved("target", POWER)
+                            .await
+                            .unwrap();
                         handle.unsubscribe_device("target").await
                     } else {
-                        handle.subscribe_property("target", POWER).await
+                        handle.subscribe_property_unobserved("target", POWER).await
                     }
                 };
                 let (driver_result, request_result) = future::zip(driver.run(|_| {}), work).await;
@@ -117,12 +120,15 @@ fn subscription_rejection_is_per_request_and_ble_online_is_skipped() {
         move |handle, driver| async move {
             let (result, ()) = future::zip(driver.run(|_| {}), async {
                 assert_eq!(
-                    handle.subscribe_property("target", POWER).await,
+                    handle.subscribe_property_unobserved("target", POWER).await,
                     Err(NotificationError::Unauthorized)
                 );
                 handle.subscribe_online("blt.123").await.unwrap();
                 handle.subscribe_online("proxy.123").await.unwrap();
-                handle.subscribe_property("other", POWER).await.unwrap();
+                handle
+                    .subscribe_property_unobserved("other", POWER)
+                    .await
+                    .unwrap();
                 handle.close();
             })
             .await;
@@ -167,10 +173,13 @@ fn late_suback_after_timeout_does_not_restore_retired_subscription() {
                 }),
                 async {
                     assert_eq!(
-                        handle.subscribe_property("target", POWER).await,
+                        handle.subscribe_property_unobserved("target", POWER).await,
                         Err(NotificationError::Timeout)
                     );
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                 },
             )
             .await;
@@ -202,7 +211,7 @@ fn pending_subscriptions_finish_on_disconnect() {
         |handle, driver| async move {
             let (result, sub) = future::zip(
                 driver.run(|_| {}),
-                handle.subscribe_property("target", POWER),
+                handle.subscribe_property_unobserved("target", POWER),
             )
             .await;
             assert_eq!(result, Err(NotificationError::Disconnected));
@@ -221,22 +230,22 @@ fn retiring_queued_subscriptions_keeps_the_request_queue_bounded() {
         mqtt::MAX_FRAME_SIZE,
     );
     for siid in 1..=64 {
-        drop(handle.subscribe_property("target", PropertyBinding { siid, piid: 1 }));
+        drop(handle.subscribe_property_unobserved("target", PropertyBinding { siid, piid: 1 }));
     }
     assert_eq!(
-        future::block_on(handle.subscribe_property("other", POWER)),
+        future::block_on(handle.subscribe_property_unobserved("other", POWER)),
         Err(NotificationError::QueueFull)
     );
     drop(handle.unsubscribe_device("target"));
     assert_eq!(handle.shared.queue.borrow().len(), 1);
     assert_eq!(handle.shared.outstanding.get(), 1);
     for siid in 1..64 {
-        drop(handle.subscribe_property("other", PropertyBinding { siid, piid: 1 }));
+        drop(handle.subscribe_property_unobserved("other", PropertyBinding { siid, piid: 1 }));
     }
     assert_eq!(handle.shared.queue.borrow().len(), 64);
     assert_eq!(handle.shared.outstanding.get(), 64);
     assert_eq!(
-        future::block_on(handle.subscribe_property("full", POWER)),
+        future::block_on(handle.subscribe_property_unobserved("full", POWER)),
         Err(NotificationError::QueueFull)
     );
     drop(driver);
@@ -303,7 +312,10 @@ fn unsubscribe_burst_revokes_delivery_synchronously_even_above_wire_capacity() {
                 async {
                     for index in 0..80 {
                         let did = format!("device{index:02}");
-                        handle.subscribe_property(&did, POWER).await.unwrap();
+                        handle
+                            .subscribe_property_unobserved(&did, POWER)
+                            .await
+                            .unwrap();
                         handle.subscribe_online(&did).await.unwrap();
                     }
                     let mut pending = (0..80)
@@ -416,12 +428,18 @@ fn unsubscribe_properties_keeps_online_until_device_is_removed() {
                     }
                 }),
                 async {
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                     handle.subscribe_online("target").await.unwrap();
                     handle.unsubscribe_properties("target").await.unwrap();
                     observation.recv_async().await.unwrap();
                     handle.unsubscribe_device("target").await.unwrap();
-                    handle.subscribe_property("other", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("other", POWER)
+                        .await
+                        .unwrap();
                 },
             )
             .await;
@@ -488,11 +506,14 @@ fn cancel_pending_subscription_suppresses_its_late_suback() {
                     stop.close();
                 }),
                 async {
-                    let original = handle.subscribe_property("target", POWER);
+                    let original = handle.subscribe_property_unobserved("target", POWER);
                     retired.recv_async().await.unwrap();
                     handle.unsubscribe_properties("target").await.unwrap();
                     assert_eq!(original.await, Err(NotificationError::Cancelled));
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                 },
             )
             .await;

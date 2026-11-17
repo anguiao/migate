@@ -11,7 +11,7 @@ pub struct PropertyBinding {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum NumericFormat {
+pub(crate) enum NumericFormat {
     Uint8,
     Uint16,
     Uint32,

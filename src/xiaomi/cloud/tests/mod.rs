@@ -1,4 +1,4 @@
-pub(crate) use super::notifications::tests::support as notification_support;
+pub(in crate::xiaomi) use super::notifications::tests::support as notification_support;
 
 use super::*;
 use crate::xiaomi::tests::support::{MockResponse, mock_server};

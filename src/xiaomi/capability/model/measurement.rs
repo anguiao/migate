@@ -5,7 +5,7 @@ use serde_json::Value;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MeasurementUnit {
+pub(crate) enum MeasurementUnit {
     Celsius,
     Percentage,
     Ppm,
@@ -15,7 +15,7 @@ pub enum MeasurementUnit {
 /// One real read-only measurement binding. Format, unit, range and access are
 /// fixed at the source boundary; Matter projects its own target representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MeasurementBinding {
+pub(crate) struct MeasurementBinding {
     property: PropertyBinding,
     format: NumericFormat,
     unit: MeasurementUnit,
@@ -43,21 +43,21 @@ impl MeasurementBinding {
             range,
         })
     }
-    pub fn property(&self) -> PropertyBinding {
+    pub(crate) fn property(&self) -> PropertyBinding {
         self.property
     }
-    pub fn format(&self) -> NumericFormat {
+    pub(crate) fn format(&self) -> NumericFormat {
         self.format
     }
-    pub fn unit(&self) -> MeasurementUnit {
+    pub(crate) fn unit(&self) -> MeasurementUnit {
         self.unit
     }
-    pub fn range(&self) -> MeasurementRange {
+    pub(crate) fn range(&self) -> MeasurementRange {
         self.range
     }
     /// Decode a real source value in its declared unit. Integer formats do not
     /// accept fractional JSON values; every format is finite and in range.
-    pub fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
+    pub(crate) fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
         let value = match self.format {
             NumericFormat::Float => value.as_f64(),
             _ => value
@@ -80,7 +80,7 @@ impl MeasurementBinding {
 /// resolved before construction; this type only carries the real binding and
 /// its supported percentage representation.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BatteryBinding {
+pub(crate) struct BatteryBinding {
     measurement: MeasurementBinding,
 }
 impl BatteryBinding {
@@ -93,16 +93,16 @@ impl BatteryBinding {
         }
         Ok(Self { measurement })
     }
-    pub fn property(&self) -> PropertyBinding {
+    pub(crate) fn property(&self) -> PropertyBinding {
         self.measurement.property()
     }
-    pub fn format(&self) -> NumericFormat {
+    pub(crate) fn format(&self) -> NumericFormat {
         self.measurement.format()
     }
-    pub fn range(&self) -> MeasurementRange {
+    pub(crate) fn range(&self) -> MeasurementRange {
         self.measurement.range()
     }
-    pub fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
+    pub(crate) fn read_value(&self, value: &Value) -> Result<f64, CapabilityError> {
         self.measurement
             .read_value(value)
             .map_err(|_| CapabilityError::InvalidValue("battery"))

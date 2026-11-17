@@ -21,15 +21,15 @@ pub(super) fn queued_handle(timing: Timing) -> SessionHandle {
     }
 }
 
-pub(crate) struct Broker {
+pub(in crate::xiaomi) struct Broker {
     pub(super) stream: TlsStream<Async<TcpStream>>,
     pub(super) frames: Frames,
-    pub(crate) client_id: String,
+    pub(in crate::xiaomi) client_id: String,
     pub(super) deferred: VecDeque<Packet>,
 }
 
 impl Broker {
-    pub(crate) fn new(stream: TlsStream<Async<TcpStream>>) -> Self {
+    pub(in crate::xiaomi) fn new(stream: TlsStream<Async<TcpStream>>) -> Self {
         Self {
             stream,
             frames: Frames::default(),
@@ -38,13 +38,16 @@ impl Broker {
         }
     }
 
-    pub(crate) async fn next(&mut self) -> Packet {
+    pub(in crate::xiaomi) async fn next(&mut self) -> Packet {
         if let Some(packet) = self.deferred.pop_front() {
             return packet;
         }
         self.next_wire().await
     }
-    pub(crate) async fn wait_for(&mut self, matches: impl Fn(&Packet) -> bool) -> Packet {
+    pub(in crate::xiaomi) async fn wait_for(
+        &mut self,
+        matches: impl Fn(&Packet) -> bool,
+    ) -> Packet {
         if let Some(index) = self.deferred.iter().position(&matches) {
             return self.deferred.remove(index).unwrap();
         }
@@ -61,7 +64,7 @@ impl Broker {
             .await
             .expect("client closed before the expected packet")
     }
-    pub(crate) async fn next_optional(&mut self) -> Option<Packet> {
+    pub(in crate::xiaomi) async fn next_optional(&mut self) -> Option<Packet> {
         loop {
             if let Some(packet) = self.frames.next_packet().unwrap() {
                 return Some(packet);
@@ -74,20 +77,20 @@ impl Broker {
             self.frames.push(&bytes[..len]).unwrap();
         }
     }
-    pub(crate) async fn send(&mut self, packet: Packet) {
+    pub(in crate::xiaomi) async fn send(&mut self, packet: Packet) {
         self.stream
             .write_all(&encode_packet(&packet).unwrap())
             .await
             .unwrap();
         self.stream.flush().await.unwrap();
     }
-    pub(crate) async fn setup(&mut self) {
+    pub(in crate::xiaomi) async fn setup(&mut self) {
         assert!(
             self.setup_if_connected().await,
             "CONNECT expected before close"
         );
     }
-    pub(crate) async fn setup_if_connected(&mut self) -> bool {
+    pub(in crate::xiaomi) async fn setup_if_connected(&mut self) -> bool {
         let Some(packet) = self.next_optional().await else {
             return false;
         };
@@ -127,7 +130,7 @@ impl Broker {
         .await;
         true
     }
-    pub(crate) async fn subscription(&mut self) {
+    pub(in crate::xiaomi) async fn subscription(&mut self) {
         let Packet::Subscribe(subscribe) = self.next().await else {
             panic!("property SUBSCRIBE expected")
         };
@@ -141,7 +144,7 @@ impl Broker {
         )))
         .await;
     }
-    pub(crate) async fn reply(&mut self, outgoing: &Publish, value: Value, pkid: u16) {
+    pub(in crate::xiaomi) async fn reply(&mut self, outgoing: &Publish, value: Value, pkid: u16) {
         let message = wire::decode_mips(&outgoing.payload).unwrap();
         let mut reply = Publish::new(
             format!("{}/reply", self.client_id),
@@ -239,13 +242,13 @@ pub(super) async fn pair_fixture<S, C, SF, CF, W>(
 }
 
 impl Broker {
-    pub(crate) async fn acknowledge(&mut self, publish: &Publish) {
+    pub(in crate::xiaomi) async fn acknowledge(&mut self, publish: &Publish) {
         self.send(Packet::PubRec(PubRec::new(publish.pkid))).await;
         self.wait_for(|packet| matches!(packet,Packet::PubRel(ack) if ack.pkid==publish.pkid))
             .await;
         self.send(Packet::PubComp(PubComp::new(publish.pkid))).await;
     }
-    pub(crate) fn business(&self, publish: &Publish, value: Value) -> Packet {
+    pub(in crate::xiaomi) fn business(&self, publish: &Publish, value: Value) -> Packet {
         Packet::Publish(Publish::new(
             format!("{}/reply", self.client_id),
             QoS::AtMostOnce,
@@ -256,7 +259,7 @@ impl Broker {
             ),
         ))
     }
-    pub(crate) async fn batch(&mut self, packets: Vec<Packet>) {
+    pub(in crate::xiaomi) async fn batch(&mut self, packets: Vec<Packet>) {
         let bytes = packets
             .iter()
             .flat_map(|packet| encode_packet(packet).unwrap())
@@ -382,7 +385,7 @@ pub(super) fn notification(client_id: &str, did: &str, value: bool) -> Packet {
 }
 
 impl SessionHandle {
-    pub(crate) fn read_property_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
+    pub(in crate::xiaomi) fn read_property_value<F: FnOnce(RequestOutcome<Value>) + 'static>(
         &self,
         did: &str,
         binding: PropertyBinding,
@@ -390,7 +393,9 @@ impl SessionHandle {
     ) -> impl Future<Output = RequestOutcome<Value>> + use<F> {
         self.read_property_value_with_timeout(did, binding, self.timing.request, on_result)
     }
-    pub(crate) fn read_property_value_with_timeout<F: FnOnce(RequestOutcome<Value>) + 'static>(
+    pub(in crate::xiaomi) fn read_property_value_with_timeout<
+        F: FnOnce(RequestOutcome<Value>) + 'static,
+    >(
         &self,
         did: &str,
         binding: PropertyBinding,
@@ -406,7 +411,7 @@ impl SessionHandle {
         );
         async move { value_outcome(read.await) }
     }
-    pub(crate) fn set_property<F: FnOnce(RequestOutcome<()>) + 'static>(
+    pub(in crate::xiaomi) fn set_property<F: FnOnce(RequestOutcome<()>) + 'static>(
         &self,
         did: &str,
         binding: PropertyBinding,
@@ -421,7 +426,7 @@ impl SessionHandle {
             on_result,
         )
     }
-    pub(crate) fn set_property_guarded<F: FnOnce(RequestOutcome<()>) + 'static>(
+    pub(in crate::xiaomi) fn set_property_guarded<F: FnOnce(RequestOutcome<()>) + 'static>(
         &self,
         did: &str,
         binding: PropertyBinding,
@@ -435,7 +440,7 @@ impl SessionHandle {
             });
         async move { single_write_outcome(submitted.await) }
     }
-    pub(crate) fn set_properties<
+    pub(in crate::xiaomi) fn set_properties<
         F: FnOnce(RequestOutcome<PropertyResults<(), CentralError>>) + 'static,
     >(
         &self,

@@ -4,19 +4,19 @@ use serde_json::Value;
 /// One decoded real property value and any upstream attribute update time.
 /// The time is preserved exactly as supplied; it is diagnostic only.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PropertyReading {
-    pub value: Value,
-    pub update_time: Option<i64>,
+pub(in crate::xiaomi) struct PropertyReading {
+    pub(in crate::xiaomi) value: Value,
+    pub(in crate::xiaomi) update_time: Option<i64>,
 }
 
 /// A supplied upstream attribute update time from a read result or
 /// notification. Only the explicit attribute field is accepted; message
 /// timestamps and transport completion time are never substituted here.
-pub(crate) fn update_time(value: &Value) -> Option<i64> {
+pub(in crate::xiaomi) fn update_time(value: &Value) -> Option<i64> {
     value.as_object().and_then(update_time_map)
 }
 
-pub(crate) fn update_time_map(map: &serde_json::Map<String, Value>) -> Option<i64> {
+pub(in crate::xiaomi) fn update_time_map(map: &serde_json::Map<String, Value>) -> Option<i64> {
     map.get("updateTime").and_then(number)
 }
 
@@ -28,28 +28,28 @@ fn number(value: &Value) -> Option<i64> {
 
 /// Results remain in request order, including confirmed items from an invalid batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PropertyResults<T, E> {
-    pub items: Vec<Result<T, E>>,
+pub(in crate::xiaomi) struct PropertyResults<T, E> {
+    pub(in crate::xiaomi) items: Vec<Result<T, E>>,
     /// Missing, duplicate, malformed or unsolicited results invalidate the batch.
-    pub protocol_error: bool,
+    pub(in crate::xiaomi) protocol_error: bool,
 }
 
-pub(crate) fn valid_value(value: &Value) -> bool {
+pub(in crate::xiaomi) fn valid_value(value: &Value) -> bool {
     value.is_boolean() || value.as_f64().is_some_and(f64::is_finite)
 }
 
-pub(crate) fn valid_observation(value: &Value) -> bool {
+pub(in crate::xiaomi) fn valid_observation(value: &Value) -> bool {
     value.is_string() || valid_value(value)
 }
 
-pub(crate) fn valid_bindings(bindings: &[PropertyBinding]) -> bool {
+pub(in crate::xiaomi) fn valid_bindings(bindings: &[PropertyBinding]) -> bool {
     !bindings.is_empty()
         && bindings.iter().enumerate().all(|(index, binding)| {
             binding.siid > 0 && binding.piid > 0 && !bindings[..index].contains(binding)
         })
 }
 
-pub(crate) fn correlate<T, E: Clone + PartialEq>(
+pub(in crate::xiaomi) fn correlate<T, E: Clone + PartialEq>(
     did: &str,
     bindings: &[PropertyBinding],
     values: &[Value],

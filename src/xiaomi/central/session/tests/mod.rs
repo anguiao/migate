@@ -7,7 +7,7 @@ mod lifecycle;
 mod ordering;
 mod protocol;
 mod subscriptions;
-pub(crate) mod support;
+pub(in crate::xiaomi) mod support;
 mod timeouts;
 
 use super::request::Response;

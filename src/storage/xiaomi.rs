@@ -649,5 +649,4 @@ fn validate_pem(value: &str) -> Result<(), InvalidCredentials> {
 }
 
 #[cfg(test)]
-#[path = "tests/xiaomi_fixture.rs"]
-pub(crate) mod fixture;
+pub(crate) mod tests;

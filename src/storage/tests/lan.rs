@@ -18,7 +18,10 @@ fn confirmed_records_are_scoped_and_survive_reopen() {
         did: "656878122".into(),
         model: "dmaker.fan.p5c".into(),
         address: "192.0.2.5".parse().unwrap(),
-        token: Token::parse("00112233445566778899aabbccddeeff").unwrap(),
+        token: Token::from_bytes([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]),
     };
     let store = Store::open(dir.path()).unwrap();
     store.lan().save(&record).unwrap();
@@ -82,7 +85,10 @@ fn same_account_login_preserves_lan_and_logout_erases_it() {
         did: "656878122".into(),
         model: "dmaker.fan.p5c".into(),
         address: "192.0.2.5".parse().unwrap(),
-        token: Token::parse("00112233445566778899aabbccddeeff").unwrap(),
+        token: Token::from_bytes([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]),
     };
     store.lan().save(&record).unwrap();
     let login = |uid: &str| {

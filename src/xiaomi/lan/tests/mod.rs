@@ -42,7 +42,7 @@ fn packet_matches_independent_openssl_vector() {
     );
 }
 
-pub(crate) mod support;
+pub(in crate::xiaomi) mod support;
 
 #[test]
 fn miot_datagrams_keep_the_full_device_identifier() {

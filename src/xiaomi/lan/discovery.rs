@@ -12,7 +12,7 @@ use std::{
 const WINDOW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
-pub(crate) struct Discovery {
+pub(in crate::xiaomi) struct Discovery {
     cached: Rc<Mutex<Option<Scan>>>,
 }
 
@@ -23,7 +23,7 @@ struct Scan {
 
 impl Discovery {
     /// Concurrent recovery attempts share a single bounded broadcast scan.
-    pub(crate) async fn address(&self, did: u64) -> Option<Ipv4Addr> {
+    pub(in crate::xiaomi) async fn address(&self, did: u64) -> Option<Ipv4Addr> {
         self.scan_for(did, broadcast_targets, WINDOW).await
     }
 
@@ -99,5 +99,4 @@ async fn scan(targets: &[SocketAddrV4], timeout: Duration) -> BTreeMap<u64, Ipv4
 }
 
 #[cfg(test)]
-#[path = "tests/discovery.rs"]
 mod tests;

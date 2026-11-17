@@ -28,36 +28,36 @@ use std::{
 /// treated as deletions. Any page failure returns `Err` and no partial
 /// snapshot; callers must keep the previous confirmed state instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloudDeviceCatalog {
-    pub devices: Vec<CloudCatalogDevice>,
+pub(in crate::xiaomi) struct CloudDeviceCatalog {
+    pub(in crate::xiaomi) devices: Vec<CloudCatalogDevice>,
 }
 
 /// One device record of the account directory.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloudCatalogDevice {
-    pub did: String,
-    pub name: Option<String>,
-    pub model: String,
+pub(in crate::xiaomi) struct CloudCatalogDevice {
+    pub(in crate::xiaomi) did: String,
+    pub(in crate::xiaomi) name: Option<String>,
+    pub(in crate::xiaomi) model: String,
     /// MIoT instance type, or `None` when the directory record has no usable
     /// description. Absence is a capability metadata gap and never invalidates
     /// the record's identity or group membership.
-    pub instance_type: Option<String>,
+    pub(in crate::xiaomi) instance_type: Option<String>,
     /// Online observation from the directory record. Missing or invalid
     /// values fail the whole snapshot instead of defaulting to online.
-    pub online: bool,
-    pub group: CloudGroupStatus,
-    pub(crate) split: Option<CloudSplit>,
+    pub(in crate::xiaomi) online: bool,
+    pub(in crate::xiaomi) group: CloudGroupStatus,
+    pub(in crate::xiaomi) split: Option<CloudSplit>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CloudSplit {
-    pub parent_did: String,
-    pub siid: u32,
+pub(in crate::xiaomi) struct CloudSplit {
+    pub(in crate::xiaomi) parent_did: String,
+    pub(in crate::xiaomi) siid: u32,
 }
 
 /// Native group membership read status for one directory record.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CloudGroupStatus {
+pub(in crate::xiaomi) enum CloudGroupStatus {
     /// The record carries no `member_list` and is an ordinary device.
     NotGroup,
     /// The record carries a well-formed membership. An empty member list is a
@@ -71,12 +71,12 @@ pub enum CloudGroupStatus {
 /// A confirmed native group relation. Members are sorted by DID so directory
 /// ordering cannot change the value.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CloudGroupMembership {
+pub(in crate::xiaomi) struct CloudGroupMembership {
     /// Authoritative group identity from `member_list.group_did`.
-    pub group_did: String,
+    pub(in crate::xiaomi) group_did: String,
     /// Distinguishes physical from virtual groups; never inferred from model.
-    pub is_physical: bool,
-    pub members: Vec<String>,
+    pub(in crate::xiaomi) is_physical: bool,
+    pub(in crate::xiaomi) members: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -158,7 +158,7 @@ impl MijiaClient {
     /// and envelope failures return `Err` instead of a partial result. The
     /// caller selects the owned home by comparing record DIDs with its home
     /// directory; the response is never labeled as belonging to one home.
-    pub async fn get_device_catalog(
+    pub(in crate::xiaomi) async fn get_device_catalog(
         &self,
         credential: &MijiaSession,
     ) -> Result<CloudDeviceCatalog, CloudError> {

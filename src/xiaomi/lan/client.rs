@@ -17,13 +17,13 @@ use std::{
 static IDS: OnceLock<AtomicU32> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SendStage {
+pub(in crate::xiaomi) enum SendStage {
     BeforeSend,
     Sent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Failure {
+pub(in crate::xiaomi) enum Failure {
     Io,
     Timeout,
     Rejected(i64),
@@ -33,9 +33,9 @@ pub(crate) enum Failure {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RequestError {
-    pub(crate) stage: SendStage,
-    pub(crate) failure: Failure,
+pub(in crate::xiaomi) struct RequestError {
+    pub(in crate::xiaomi) stage: SendStage,
+    pub(in crate::xiaomi) failure: Failure,
 }
 
 impl fmt::Display for RequestError {
@@ -52,7 +52,7 @@ impl fmt::Display for RequestError {
 }
 
 #[derive(Clone)]
-pub(crate) struct Client(Rc<Inner>);
+pub(in crate::xiaomi) struct Client(Rc<Inner>);
 
 struct Inner {
     did: u64,
@@ -63,11 +63,16 @@ struct Inner {
 }
 
 impl Client {
-    pub(crate) fn same(&self, other: &Self) -> bool {
+    pub(in crate::xiaomi) fn same(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
 
-    pub(crate) fn new(did: u64, address: SocketAddr, token: Token, timeout: Duration) -> Self {
+    pub(in crate::xiaomi) fn new(
+        did: u64,
+        address: SocketAddr,
+        token: Token,
+        timeout: Duration,
+    ) -> Self {
         Self(Rc::new(Inner {
             did,
             address,
@@ -78,13 +83,17 @@ impl Client {
     }
 
     /// One attempt has one deadline and never retransmits an emitted request.
-    pub(crate) async fn request(&self, method: &str, params: Value) -> Result<Value, RequestError> {
+    pub(in crate::xiaomi) async fn request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, RequestError> {
         self.request_guarded(method, params, || true, || {}).await
     }
 
     /// Recheck authority immediately before the business datagram and report
     /// its successful send before waiting for a response.
-    pub(crate) async fn request_guarded(
+    pub(in crate::xiaomi) async fn request_guarded(
         &self,
         method: &str,
         params: Value,
@@ -95,7 +104,7 @@ impl Client {
             .await
     }
 
-    pub(crate) async fn request_with_timeout(
+    pub(in crate::xiaomi) async fn request_with_timeout(
         &self,
         method: &str,
         params: Value,
@@ -246,5 +255,4 @@ fn request_id(sequence: u32) -> u32 {
 }
 
 #[cfg(test)]
-#[path = "tests/client.rs"]
 mod tests;

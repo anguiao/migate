@@ -12,20 +12,20 @@ pub struct EventBinding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EventArgument {
-    pub property: PropertyBinding,
-    pub format: String,
-    pub unit: Option<String>,
+pub(crate) struct EventArgument {
+    pub(crate) property: PropertyBinding,
+    pub(crate) format: String,
+    pub(crate) unit: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct StateValue {
-    pub native: i64,
-    pub active: Option<bool>,
+pub(crate) struct StateValue {
+    pub(crate) native: i64,
+    pub(crate) active: Option<bool>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StateMapping {
+pub(crate) enum StateMapping {
     ContactBoolean,
     Enumerated {
         format: NumericFormat,
@@ -37,7 +37,7 @@ pub enum StateMapping {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StateBinding {
+pub(crate) struct StateBinding {
     property: PropertyBinding,
     mapping: StateMapping,
 }
@@ -67,13 +67,13 @@ impl StateBinding {
         }
         Ok(Self { property, mapping })
     }
-    pub fn property(&self) -> PropertyBinding {
+    pub(crate) fn property(&self) -> PropertyBinding {
         self.property
     }
-    pub fn mapping(&self) -> &StateMapping {
+    pub(crate) fn mapping(&self) -> &StateMapping {
         &self.mapping
     }
-    pub fn read_value(&self, value: &Value) -> Result<Option<bool>, CapabilityError> {
+    pub(crate) fn read_value(&self, value: &Value) -> Result<Option<bool>, CapabilityError> {
         let invalid = || CapabilityError::InvalidValue("state");
         match &self.mapping {
             StateMapping::ContactBoolean => value
@@ -103,7 +103,7 @@ impl StateBinding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MotionBinding {
+pub(crate) struct MotionBinding {
     state: StateBinding,
     event: EventBinding,
     arguments: Vec<EventArgument>,
@@ -133,13 +133,13 @@ impl MotionBinding {
             arguments,
         })
     }
-    pub fn state(&self) -> &StateBinding {
+    pub(crate) fn state(&self) -> &StateBinding {
         &self.state
     }
-    pub fn event(&self) -> EventBinding {
+    pub(crate) fn event(&self) -> EventBinding {
         self.event
     }
-    pub fn arguments(&self) -> &[EventArgument] {
+    pub(crate) fn arguments(&self) -> &[EventArgument] {
         &self.arguments
     }
 }

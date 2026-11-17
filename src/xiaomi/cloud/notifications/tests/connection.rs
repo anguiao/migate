@@ -43,7 +43,7 @@ fn notification_connect_suback_and_messages_follow_wire_order() {
             let work = async {
                 let timeout = Duration::from_secs(10);
                 let before = std::time::Instant::now();
-                let subscription = handle.subscribe_property("target", POWER);
+                let subscription = handle.subscribe_property_unobserved("target", POWER);
                 let deadline = handle.shared.queue.borrow().back().unwrap().deadline;
                 assert!(deadline >= before + timeout);
                 assert!(deadline <= std::time::Instant::now() + timeout);

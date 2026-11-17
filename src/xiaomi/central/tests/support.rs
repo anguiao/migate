@@ -1,4 +1,4 @@
-pub(crate) use super::super::wire::{decode_mips, encode_mips};
+pub(in crate::xiaomi) use super::super::wire::{decode_mips, encode_mips};
 
 use super::super::*;
 use crate::{
@@ -23,16 +23,16 @@ use rustls::{
 use std::{net::TcpListener, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 
-pub(crate) struct TlsFixture {
-    pub(crate) ca_pem: String,
+pub(in crate::xiaomi) struct TlsFixture {
+    pub(in crate::xiaomi) ca_pem: String,
     server_pem: String,
     server_key: String,
-    pub(crate) credentials: XiaomiRecord,
+    pub(in crate::xiaomi) credentials: XiaomiRecord,
     pub(super) force_tls12: bool,
 }
 
 impl TlsFixture {
-    pub(crate) fn new(expired_server: bool) -> Self {
+    pub(in crate::xiaomi) fn new(expired_server: bool) -> Self {
         Self::server_case(
             -120,
             if expired_server { -60 } else { 3600 },
@@ -95,7 +95,7 @@ impl TlsFixture {
         }
     }
 
-    pub(crate) fn server_config(&self) -> Arc<ServerConfig> {
+    pub(in crate::xiaomi) fn server_config(&self) -> Arc<ServerConfig> {
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let mut roots = RootCertStore::empty();
         roots
@@ -170,9 +170,9 @@ pub(super) async fn exchange_tls(
     .await
 }
 
-pub(crate) use super::super::session::tests::support::Broker;
+pub(in crate::xiaomi) use super::super::session::tests::support::Broker;
 
-pub(crate) async fn connect(
+pub(in crate::xiaomi) async fn connect(
     address: std::net::SocketAddr,
     credentials: &crate::storage::XiaomiRecord,
     ca: &str,

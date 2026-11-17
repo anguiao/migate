@@ -14,7 +14,7 @@ use crate::{
 };
 
 #[derive(Debug)]
-pub enum CatalogError {
+pub(in crate::xiaomi) enum CatalogError {
     NoLocalHome,
     InvalidScope,
     TargetMissing,
@@ -51,7 +51,7 @@ impl Error for CatalogError {
 
 /// Select a local owned home before examining any device membership.
 /// Home fields and uniqueness are validated by the cloud directory reader.
-pub fn select_local_home(
+pub(in crate::xiaomi) fn select_local_home(
     snapshot: &DiscoverySnapshot,
     homes: &[OwnedHome],
     uid: &str,
@@ -71,7 +71,10 @@ pub fn select_local_home(
 }
 
 /// A missing selected home is a scope failure, never an empty member list.
-pub(crate) fn current_home(homes: &[OwnedHome], scope: &Scope) -> Result<OwnedHome, CatalogError> {
+pub(in crate::xiaomi) fn current_home(
+    homes: &[OwnedHome],
+    scope: &Scope,
+) -> Result<OwnedHome, CatalogError> {
     homes
         .iter()
         .find(|home| home.uid == scope.uid && home.home_id == scope.home_id)
@@ -81,7 +84,7 @@ pub(crate) fn current_home(homes: &[OwnedHome], scope: &Scope) -> Result<OwnedHo
 
 /// Load a selected home's member description and optional cloud name.
 /// Persistence and availability belong to the adapter.
-pub(crate) async fn load_device(
+pub(in crate::xiaomi) async fn load_device(
     cloud: &CloudClient,
     mijia: &MijiaClient,
     credentials: &XiaomiRecord,

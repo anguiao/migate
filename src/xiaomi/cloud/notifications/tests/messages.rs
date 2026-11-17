@@ -103,7 +103,10 @@ fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery(
             let (result, ()) = future::zip(
                 driver.run(move |event| collected.borrow_mut().push(event)),
                 async {
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                     handle.subscribe_online("target").await.unwrap();
                     invalidating.recv_async().await.unwrap();
                     let generations = handle
@@ -119,7 +122,10 @@ fn received_property_invalidation_keeps_ready_subscriptions_and_online_delivery(
                         assert!(registrations[&topic].ready);
                         assert_eq!(registrations[&topic].generation, generation);
                     }
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                     assert!(handle.shared.queue.borrow().is_empty());
                     assert_eq!(handle.shared.outstanding.get(), 0);
                     resume.send(()).unwrap();
@@ -186,7 +192,7 @@ fn received_property_invalidation_keeps_a_pending_suback_current() {
             let (result, ()) = future::zip(
                 driver.run(move |event| collected.borrow_mut().push(event)),
                 async {
-                    let pending = handle.subscribe_property("target", POWER);
+                    let pending = handle.subscribe_property_unobserved("target", POWER);
                     invalidating.recv_async().await.unwrap();
                     let topic = "device/target/up/properties_changed/2/1";
                     let generation = handle.shared.registrations.borrow()[topic].generation;
@@ -297,7 +303,10 @@ fn malformed_notification_payloads_are_isolated_from_valid_notifications() {
                     }
                 }),
                 async {
-                    handle.subscribe_property("target", POWER).await.unwrap();
+                    handle
+                        .subscribe_property_unobserved("target", POWER)
+                        .await
+                        .unwrap();
                     handle.subscribe_online("target").await.unwrap();
                 },
             )
@@ -394,10 +403,16 @@ fn qos2_duplicate_and_retired_subscription_messages_do_not_reapply() {
                         }
                     }),
                     async {
-                        handle.subscribe_property("target", POWER).await.unwrap();
+                        handle
+                            .subscribe_property_unobserved("target", POWER)
+                            .await
+                            .unwrap();
                         retired.recv_async().await.unwrap();
                         handle.unsubscribe_properties("target").await.unwrap();
-                        handle.subscribe_property("target", POWER).await.unwrap();
+                        handle
+                            .subscribe_property_unobserved("target", POWER)
+                            .await
+                            .unwrap();
                     },
                 )
                 .await;
@@ -461,7 +476,7 @@ fn numeric_notifications_preserve_payload_identity_and_values() {
                         stop.close();
                     }
                 }),
-                handle.subscribe_property("target", POWER),
+                handle.subscribe_property_unobserved("target", POWER),
             )
             .await;
             result.unwrap();
@@ -520,7 +535,7 @@ fn property_notifications_preserve_upstream_update_time() {
                         stop.close();
                     }
                 }),
-                handle.subscribe_property("target", POWER),
+                handle.subscribe_property_unobserved("target", POWER),
             )
             .await;
             result.unwrap();
