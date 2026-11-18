@@ -2,7 +2,7 @@ mod context;
 mod render;
 pub(crate) use context::Context;
 use context::View;
-use render::{configuration_lines, render};
+use render::render;
 
 use super::AuthStatus;
 use crate::{
@@ -45,30 +45,8 @@ impl View {
                 render(self, None, &diagnostics, false),
                 self.render_devices(status, &diagnostics, None)
             ),
-            ["status", did] => {
-                if self.get(&DeviceKey::new("xiaomi", *did)).is_none() {
-                    if self.contains_did(did) {
-                        let mut lines = vec![format!("{did}: not published")];
-                        lines.extend(configuration_lines(self, did));
-                        lines.push(self.render_devices(status, &diagnostics, Some(did)));
-                        lines.join("\n")
-                    } else if let Some(pending) = diagnostics
-                        .pending
-                        .iter()
-                        .find(|pending| pending.did == *did)
-                    {
-                        self.pending_line(pending)
-                    } else {
-                        invalid("Unknown device DID.")
-                    }
-                } else {
-                    format!(
-                        "{}\n{}",
-                        render(self, Some(did), &diagnostics, false),
-                        self.render_devices(status, &diagnostics, Some(did))
-                    )
-                }
-            }
+            ["status", did] => render::device_status(self, did, status, &diagnostics)
+                .unwrap_or_else(|| invalid("Unknown device DID.")),
             [verb @ ("on" | "off"), did, id] => {
                 let Some(physical) = self.get(&DeviceKey::new("xiaomi", *did)) else {
                     return Ok(Some(invalid("Unknown device DID.")));
@@ -186,7 +164,7 @@ impl Context<'_> {
                 }))
             }
             _ => {
-                self.view()
+                self.view()?
                     .handle_words(&words, self.status, || self.app.diagnostics())
                     .await
             }

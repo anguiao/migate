@@ -136,7 +136,12 @@ fn descriptions_from_the_previous_home_are_not_visible_for_the_same_did() {
         ..app.current().configuration.scope.clone().unwrap()
     });
     source.describe(outlet());
-    assert!(app.accessible_descriptions(&app.current()).is_empty());
+    assert!(
+        app.configuration_access(&app.current())
+            .unwrap()
+            .descriptions
+            .is_empty()
+    );
     let status = status(&store);
     let terminal = Context::committed(app, &status);
     let list = block_on(terminal.handle_line("list")).unwrap().unwrap();

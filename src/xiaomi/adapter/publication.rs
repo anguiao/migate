@@ -87,13 +87,26 @@ impl SourceHandle {
         *self.0.graph.borrow_mut() = derived;
     }
 
-    pub(crate) fn accessible_groups(&self, scope: &Option<Scope>) -> BTreeSet<String> {
+    pub(crate) fn accessible_groups(
+        &self,
+        configuration: &CommittedConfiguration,
+        revoked: &BTreeSet<DeviceKey>,
+    ) -> BTreeSet<String> {
         let directory = self.0.directory.borrow();
-        directory
-            .confirmed_groups()
-            .into_iter()
-            .filter(|group| scope.as_ref() == Some(&group.scope) && directory.scope == *scope)
-            .map(|group| group.membership.group_did)
+        if directory.scope != configuration.scope {
+            return BTreeSet::new();
+        }
+        configuration
+            .groups
+            .iter()
+            .filter(|relation| {
+                directory.group(&relation.group_did).is_some_and(|group| {
+                    // A confirmed withdrawal still explains a committed inactive relation.
+                    !revoked.contains(&DeviceKey::new("xiaomi", &relation.group_did))
+                        || !group.active && !relation.active
+                })
+            })
+            .map(|relation| relation.group_did.clone())
             .collect()
     }
 

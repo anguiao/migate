@@ -14,6 +14,29 @@ fn pending<'a>(status: &'a AdapterStatus, did: &str) -> &'a PendingDevice {
     entries[0]
 }
 
+async fn terminal_detail_with_pending(control: &Control, did: &str) -> String {
+    let terminal = control.terminal();
+    let list = terminal.handle_line("list").await.unwrap().unwrap();
+    let prefix = format!("{did} (");
+    let row = list
+        .lines()
+        .find(|line| line.starts_with(&prefix) && line.contains("): pending ("))
+        .unwrap();
+    let detail = terminal
+        .handle_line(&format!("status {did}"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        detail
+            .lines()
+            .filter(|line| line.contains("): pending ("))
+            .collect::<Vec<_>>(),
+        [row]
+    );
+    detail
+}
+
 fn assert_reasons(status: &AdapterStatus, did: &str, reasons: &[&str]) {
     let entry = pending(status, did);
     let positions = reasons
@@ -126,6 +149,9 @@ fn pending_description_subscriptions_and_reads_recover_independently() {
                 })
                 .await;
 
+                let detail = terminal_detail_with_pending(control, "one").await;
+                assert!(detail.contains("503") && detail.contains("one read 2.3"));
+                assert!(detail.contains("light:2"));
                 peer.state
                     .borrow_mut()
                     .sub_reject
@@ -239,6 +265,13 @@ fn pending_first_description_keeps_the_confirmed_home_catalog_name() {
             .names
             .insert("one".into(), "Living room outlet".into());
         cloud.detail_status = 503;
+        let instance = group_instance();
+        cloud
+            .catalog_instances
+            .insert(instance["type"].as_str().unwrap().into(), instance);
+        cloud
+            .catalog_groups
+            .push(group_record("record", "group-1", &["one"], false));
         cloud.catalog_groups.push(json!({
             "did":"foreign", "name":"Other home's outlet", "model":"cuco.plug.v3",
             "spec_type":rig.data[0].instance_type(), "isOnline":true
@@ -259,11 +292,29 @@ fn pending_first_description_keeps_the_confirmed_home_catalog_name() {
                 })
         })
         .await;
-        assert!(c.publication.current().configuration.devices.is_empty());
+        until(|| {
+            c.context
+                .physical(&DeviceKey::new("xiaomi", "group-1"))
+                .is_some()
+        })
+        .await;
+        assert!(
+            c.publication
+                .current()
+                .configuration
+                .descriptions
+                .iter()
+                .all(|raw| raw.key.id != "one")
+        );
         let status = c.context.diagnostics();
         assert_eq!(pending(&status, "one").name, "Living room outlet");
         assert_eq!(status.pending.len(), 1);
         assert!(!c.context.directory.borrow().devices.contains_key("foreign"));
+        let detail = terminal_detail_with_pending(&c, "one").await;
+        assert_eq!(detail.lines().count(), 1);
+        assert!(
+            detail.starts_with("one (Living room outlet): pending (") && detail.contains("503")
+        );
     }));
 }
 

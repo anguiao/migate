@@ -43,6 +43,12 @@ pub(crate) struct EffectiveConfiguration {
     pub(crate) entries: Vec<Rc<SourceEntry>>,
 }
 
+pub(crate) struct ConfigurationAccess {
+    pub(crate) descriptions: BTreeSet<DeviceKey>,
+    pub(crate) groups: BTreeSet<String>,
+    pub(crate) configurable_devices: BTreeSet<DeviceKey>,
+}
+
 impl EffectiveConfiguration {
     pub(crate) fn devices(&self) -> Vec<PhysicalDevice> {
         self.entries
@@ -105,10 +111,6 @@ impl App {
         *self.current.borrow_mut() = Rc::new(current);
     }
 
-    pub(crate) fn accessible_groups(&self, current: &EffectiveConfiguration) -> BTreeSet<String> {
-        self.source.accessible_groups(&current.configuration.scope)
-    }
-
     pub(crate) fn diagnostics(&self) -> crate::xiaomi::adapter::AdapterStatus {
         self.source.diagnostics()
     }
@@ -121,26 +123,43 @@ impl App {
         self.pending.get()
     }
 
-    pub(crate) fn accessible_descriptions(
-        &self,
-        current: &EffectiveConfiguration,
-    ) -> BTreeSet<DeviceKey> {
-        self.source.accessible_descriptions(&current.configuration)
+    fn revoked_keys(&self) -> Result<BTreeSet<DeviceKey>, StorageError> {
+        Ok(self
+            .store
+            .devices()
+            .load_revocations()?
+            .into_iter()
+            .map(|record| record.key)
+            .collect())
     }
 
-    pub(crate) fn configurable_devices(
+    /// Project one committed view through current source authority, including a failed withdrawal save.
+    pub(crate) fn configuration_access(
         &self,
         current: &EffectiveConfiguration,
-    ) -> BTreeSet<DeviceKey> {
-        current
+    ) -> Result<ConfigurationAccess, StorageError> {
+        let revoked = self.revoked_keys()?;
+        let mut descriptions = self.source.accessible_descriptions(&current.configuration);
+        descriptions.retain(|key| !revoked.contains(key));
+        let groups = self
+            .source
+            .accessible_groups(&current.configuration, &revoked);
+        let configurable_devices = current
             .entries
             .iter()
             .filter(|entry| {
-                self.source
-                    .binding_accessible(&current.configuration.scope, entry.physical.key())
+                descriptions.contains(entry.physical.key())
+                    && self
+                        .source
+                        .binding_accessible(&current.configuration.scope, entry.physical.key())
             })
             .map(|entry| entry.physical.key().clone())
-            .collect()
+            .collect();
+        Ok(ConfigurationAccess {
+            descriptions,
+            groups,
+            configurable_devices,
+        })
     }
 
     /// Record a non-fatal prepare/save failure for the terminal; the committed
@@ -257,13 +276,7 @@ impl App {
             return Ok(None);
         }
         let current = self.current();
-        let revoked = self
-            .store
-            .devices()
-            .load_revocations()?
-            .into_iter()
-            .map(|record| record.key)
-            .collect();
+        let revoked = self.revoked_keys()?;
         let snapshot = self.source.snapshot(&current.configuration, &revoked);
         let committed_derived = current.configuration.derive();
         let mut new_identities = BTreeMap::new();

@@ -302,9 +302,11 @@ fn withdrawn_raw_description_uses_pending_or_unknown_without_visible_details() {
             }),
             pending: true,
             failure: Some("withdrawal save failed".into()),
-            accessible_descriptions: Default::default(),
-            accessible_groups: Default::default(),
-            configurable_devices: Default::default(),
+            access: crate::app::ConfigurationAccess {
+                descriptions: Default::default(),
+                groups: Default::default(),
+                configurable_devices: Default::default(),
+            },
         };
         let mut diagnostics = support::diagnostics();
         for pending in [false, true] {

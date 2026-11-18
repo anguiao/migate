@@ -33,6 +33,15 @@ fn readmitted_group_waits_for_its_new_native_description() {
         }
         c.context.request_sync();
         until(|| c.cloud.lock().unwrap().instance_reads.contains_key(urn)).await;
+        let list = c.terminal().handle_line("list").await.unwrap().unwrap();
+        assert!(
+            !list.contains("Group group-1 (virtual)")
+                && list
+                    .lines()
+                    .filter(|line| line.starts_with("group-1 ("))
+                    .all(|line| line.contains("): pending (")),
+            "{list}"
+        );
         db.execute_batch("DROP TRIGGER block_withdrawal").unwrap();
         let plan = c.publication.plan().unwrap().unwrap();
         assert!(plan.clear_revocations.is_empty());
@@ -49,6 +58,8 @@ fn readmitted_group_waits_for_its_new_native_description() {
 
         release.send(()).unwrap();
         until(|| c.context.physical(&key).is_some()).await;
+        let list = c.terminal().handle_line("list").await.unwrap().unwrap();
+        assert!(list.contains("group-1 (Native group)"), "{list}");
         assert_eq!(
             c.context.directory.borrow().devices["group-1"]
                 .work

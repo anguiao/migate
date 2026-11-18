@@ -95,7 +95,11 @@ pub(super) fn view(devices: &[PhysicalDevice], store: &DeviceStore) -> Result<Vi
         .map(|group| group.group_did.clone())
         .collect();
     Ok(View {
-        accessible_groups,
+        access: crate::app::ConfigurationAccess {
+            groups: accessible_groups,
+            descriptions: accessible_descriptions,
+            configurable_devices,
+        },
         current: Rc::new(EffectiveConfiguration {
             configuration: Rc::new(configuration),
             derived: derived.into(),
@@ -103,8 +107,6 @@ pub(super) fn view(devices: &[PhysicalDevice], store: &DeviceStore) -> Result<Vi
         }),
         pending: false,
         failure: None,
-        accessible_descriptions,
-        configurable_devices,
     })
 }
 

@@ -9,9 +9,37 @@ use crate::device::{
     AmbientTemperature, Availability, DeviceKey, Function, FunctionKey, FunctionState,
     MeasurementSnapshot,
 };
-pub(super) use configuration::configuration_lines;
+use configuration::configuration_lines;
 use diagnostics::FunctionDiagnostics;
 use measurement::AmbientSource;
+
+pub(super) fn device_status(
+    view: &View,
+    did: &str,
+    auth: &crate::terminal::AuthStatus,
+    status: &crate::xiaomi::adapter::AdapterStatus,
+) -> Option<String> {
+    let key = DeviceKey::new("xiaomi", did);
+    let pending = status.pending.iter().find(|record| record.did == did);
+    if view.description(&key).is_none() {
+        if let Some(pending) = pending {
+            return Some(view.pending_line(pending));
+        }
+        if !view.has_relation(&key) {
+            return None;
+        }
+    }
+    let mut lines = if view.get(&key).is_some() {
+        vec![render(view, Some(did), status, false)]
+    } else {
+        let mut lines = vec![format!("{did}: not published")];
+        lines.extend(configuration_lines(view, did));
+        lines
+    };
+    lines.extend(pending.map(|record| view.pending_line(record)));
+    lines.push(view.render_devices(auth, status, Some(did)));
+    Some(lines.join("\n"))
+}
 
 pub(super) fn render(
     view: &View,
@@ -21,7 +49,7 @@ pub(super) fn render(
 ) -> String {
     let mut lines = Vec::new();
     for source in &view.current.configuration.descriptions {
-        if !view.accessible_descriptions.contains(&source.key)
+        if !view.access.descriptions.contains(&source.key)
             || did.is_some_and(|did| did != source.key.id)
         {
             continue;
@@ -38,7 +66,7 @@ pub(super) fn render(
             continue;
         }
         let key = DeviceKey::new("xiaomi", &relation.group_did);
-        if !view.accessible_groups.contains(&relation.group_did) || view.get(&key).is_some() {
+        if !view.access.groups.contains(&relation.group_did) || view.get(&key).is_some() {
             continue;
         }
         lines.push(format!(

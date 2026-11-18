@@ -12,12 +12,7 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
     let current = &view.current;
     let key = DeviceKey::new("xiaomi", did);
     let mut lines = Vec::new();
-    if view.accessible_descriptions.contains(&key)
-        && let Some(source) = current
-            .configuration
-            .descriptions
-            .iter()
-            .find(|source| source.key == key)
+    if let Some(source) = view.description(&key)
         && let Some(diagnostic) = &source.diagnostic
     {
         lines.push(format!(
@@ -28,7 +23,7 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
     if let Some(record) = current
         .configuration
         .device(&key)
-        .filter(|_| view.accessible_descriptions.contains(&key))
+        .filter(|_| view.access.descriptions.contains(&key))
     {
         lines.push(format!(
             "  Matter: {}; endpoint {}; configuration version {}.",
@@ -114,7 +109,7 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
     // The terminal lists every confirmed membership from the effective
     // relations, including groups that are currently unpublished.
     for relation in current.derived.groups.values().filter(|relation| {
-        view.accessible_groups.contains(&relation.group_did)
+        view.access.groups.contains(&relation.group_did)
             && relation.members.iter().any(|member| member == did)
     }) {
         let group_key = DeviceKey::new("xiaomi", &relation.group_did);
@@ -137,7 +132,7 @@ pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -
         .derived
         .groups
         .get(did)
-        .filter(|_| view.accessible_groups.contains(did))
+        .filter(|_| view.access.groups.contains(did))
     {
         lines.push(format!(
             "  Native group ({}): members {}.",
@@ -246,7 +241,7 @@ pub(super) fn relay_lines(
             },
         };
         let published = view.current.derived.published_relays.contains(key);
-        let visibility = if !view.configurable_devices.contains(&key.device) {
+        let visibility = if !view.access.configurable_devices.contains(&key.device) {
             if published {
                 "published (mapping access unavailable)"
             } else {

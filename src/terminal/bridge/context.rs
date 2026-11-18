@@ -1,7 +1,8 @@
 use super::super::AuthStatus;
 use crate::{
-    app::{App, EffectiveConfiguration},
+    app::{App, ConfigurationAccess, EffectiveConfiguration},
     device::{DeviceKey, PhysicalDevice},
+    storage::StorageError,
     xiaomi::adapter::{AdapterStatus, PendingDevice},
 };
 use std::{fmt::Write as _, rc::Rc};
@@ -19,19 +20,15 @@ impl<'a> Context<'a> {
         Self { app, status }
     }
 
-    pub(super) fn view(&self) -> View {
+    pub(super) fn view(&self) -> Result<View, StorageError> {
         let current = self.app.current();
-        let configurable_devices = self.app.configurable_devices(&current);
-        let accessible_descriptions = self.app.accessible_descriptions(&current);
-        let accessible_groups = self.app.accessible_groups(&current);
-        View {
+        let access = self.app.configuration_access(&current)?;
+        Ok(View {
             current,
             pending: self.app.pending(),
             failure: self.app.failure(),
-            accessible_descriptions,
-            accessible_groups,
-            configurable_devices,
-        }
+            access,
+        })
     }
 }
 
@@ -40,34 +37,42 @@ pub(super) struct View {
     pub(super) current: Rc<EffectiveConfiguration>,
     pub(super) pending: bool,
     pub(super) failure: Option<String>,
-    pub(super) accessible_descriptions: std::collections::BTreeSet<DeviceKey>,
-    pub(super) configurable_devices: std::collections::BTreeSet<DeviceKey>,
-    pub(super) accessible_groups: std::collections::BTreeSet<String>,
+    pub(super) access: ConfigurationAccess,
 }
 
 impl View {
-    pub(super) fn contains_did(&self, did: &str) -> bool {
+    pub(super) fn description(
+        &self,
+        key: &DeviceKey,
+    ) -> Option<&crate::xiaomi::capability::RawDescription> {
+        if !self.access.descriptions.contains(key) {
+            return None;
+        }
+        self.current
+            .configuration
+            .descriptions
+            .iter()
+            .find(|source| &source.key == key)
+    }
+
+    pub(super) fn has_relation(&self, key: &DeviceKey) -> bool {
         let configuration = &self.current.configuration;
-        let key = DeviceKey::new("xiaomi", did);
-        self.accessible_descriptions.contains(&key)
-            && (configuration
-                .descriptions
+        let did = &key.id;
+        self.access.descriptions.contains(key)
+            && configuration
+                .split_devices
                 .iter()
-                .any(|source| source.key == key)
-                || configuration
-                    .split_devices
-                    .iter()
-                    .any(|split| split.did == did))
+                .any(|split| &split.did == did)
             || configuration.groups.iter().any(|group| {
-                self.accessible_groups.contains(&group.group_did)
-                    && (group.group_did == did
-                        || group.record_did == did
-                        || group.members.iter().any(|member| member == did))
+                self.access.groups.contains(&group.group_did)
+                    && (&group.group_did == did
+                        || &group.record_did == did
+                        || group.members.contains(did))
             })
     }
 
     pub(super) fn get(&self, key: &DeviceKey) -> Option<PhysicalDevice> {
-        if !self.accessible_descriptions.contains(key) {
+        if !self.access.descriptions.contains(key) {
             return None;
         }
         self.current
@@ -81,7 +86,7 @@ impl View {
         self.current
             .devices()
             .into_iter()
-            .filter(|device| self.accessible_descriptions.contains(device.key()))
+            .filter(|device| self.access.descriptions.contains(device.key()))
             .collect()
     }
 

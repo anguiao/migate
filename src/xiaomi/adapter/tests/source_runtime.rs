@@ -6,7 +6,8 @@ use crate::xiaomi::capability::PropertyBinding;
 fn readmission_commits_its_own_description_after_the_held_batch_is_ready() {
     let rig = Rig::new(true, &["one", "two"]);
     let context = &rig.source.context;
-    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let app =
+        Rc::new(crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap());
     let key = DeviceKey::new("xiaomi", "one");
     let next_description = |did: &str| {
         let mut raw = context.directory.borrow().devices[did]
@@ -51,6 +52,27 @@ fn readmission_commits_its_own_description_after_the_held_batch_is_ready() {
         infos,
         None,
     );
+    context.pending_description("one", "new admission awaiting description".into());
+    let status = crate::terminal::AuthStatus::new(
+        context.diagnostics().auth,
+        "/bin/migate".into(),
+        "/data".into(),
+    );
+    let terminal = crate::terminal::bridge::Context::committed(app.clone(), &status);
+    let detail = block_on(terminal.handle_line("status one"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        detail.lines().count() == 1 && detail.contains("new admission awaiting description"),
+        "{detail}"
+    );
+    let list = block_on(terminal.handle_line("list")).unwrap().unwrap();
+    assert_eq!(
+        list.lines()
+            .filter(|line| line.starts_with("one ("))
+            .collect::<Vec<_>>(),
+        [detail.as_str()]
+    );
 
     // The previous configuration is still on disk through both stages of the new admission.
     for description in [None, Some(one.clone())] {
@@ -85,6 +107,15 @@ fn readmission_commits_its_own_description_after_the_held_batch_is_ready() {
         one.raw.instance_type
     );
     assert!(rig.store.devices().load_revocations().unwrap().is_empty());
+    for command in ["list", "status one"] {
+        let text = block_on(terminal.handle_line(command)).unwrap().unwrap();
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("one (") && !line.contains("pending (")),
+            "{text}"
+        );
+        assert!(!text.contains("source retired"), "{text}");
+    }
 }
 
 /// A group whose native control description is unchanged must keep its
