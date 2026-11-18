@@ -563,13 +563,13 @@ fn diagnostics_keep_31_mode_legacy_fields_and_per_fan_unknown_reasons_separate()
                     heater
                         .properties
                         .iter()
-                        .any(|property| property.name == "Power")
+                        .any(|property| property.role == PropertyRole::Power)
                 );
                 assert!(
                     heater
                         .properties
                         .iter()
-                        .any(|property| property.name == "Temperature")
+                        .any(|property| property.role == PropertyRole::TargetTemperature)
                 );
             })
             .await;

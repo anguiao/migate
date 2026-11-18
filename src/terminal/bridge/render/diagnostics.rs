@@ -1,14 +1,14 @@
-use super::primitives::{Observation, observed_text};
+use super::primitives::{known, observed_text};
 use crate::{
-    device::FunctionDescription,
-    terminal::status::{format_command, path, property_diagnostics},
-    xiaomi::adapter::{DeviceStatus, FunctionStatus, ObservedPropertyStatus},
+    device::{FunctionDescription, PropertyObservation},
+    terminal::status::{format_command, path, property_diagnostics, property_label},
+    xiaomi::adapter::{DeviceStatus, FunctionStatus, ObservedPropertyStatus, PropertyRole},
 };
 use std::fmt::Write as _;
 
 /// One function borrows all diagnostics from the command's captured input.
 pub(super) struct FunctionDiagnostics<'a> {
-    pub(super) properties: &'a [ObservedPropertyStatus],
+    properties: &'a [ObservedPropertyStatus],
     pub(super) synchronization: String,
     commands: Vec<String>,
 }
@@ -42,39 +42,53 @@ impl<'a> FunctionDiagnostics<'a> {
         }
     }
 
-    pub(super) fn property(&self, name: &str) -> Option<&ObservedPropertyStatus> {
+    pub(super) fn property(&self, role: PropertyRole) -> Option<&ObservedPropertyStatus> {
         self.properties
             .iter()
-            .find(|property| property.name == name)
+            .find(|property| property.role == role)
     }
 
-    pub(super) fn property_text(&self, name: &str) -> String {
-        property_diagnostics(self.property(name))
+    pub(super) fn observation<T>(
+        &self,
+        role: PropertyRole,
+        observation: PropertyObservation<T>,
+        format: impl FnOnce(T) -> String,
+    ) -> String {
+        let label = match role {
+            PropertyRole::TargetTemperature => "Target temperature",
+            _ => property_label(role),
+        };
+        observed_line(
+            label,
+            self.property(role),
+            &known(observation.value, format),
+            observation.source_time,
+            observation.received_at,
+        )
     }
 
     pub(super) fn observed_lines(
         &self,
         description: &FunctionDescription,
-        entries: impl IntoIterator<Item = Observation>,
+        entries: impl IntoIterator<Item = String>,
     ) -> Vec<String> {
         let mut lines = vec![format!("  {} ({}):", description.id, description.label)];
-        for (name, value, source_time, received_at) in entries {
-            let value = observed_text(&value, source_time, received_at);
-            let diagnostic = self.property_text(if name == "Target temperature" {
-                "Temperature"
-            } else {
-                name
-            });
-            let diagnostic = if diagnostic.is_empty() {
-                String::new()
-            } else {
-                format!("; {diagnostic}")
-            };
-            lines.push(format!("    {name}: {value}{diagnostic}."));
-        }
+        lines.extend(entries);
         lines.extend(self.commands.iter().map(|command| format!("    {command}")));
         lines
     }
+}
+
+pub(super) fn observed_line(
+    label: &str,
+    property: Option<&ObservedPropertyStatus>,
+    value: &str,
+    source_time: Option<i64>,
+    received_at: Option<i64>,
+) -> String {
+    let value = observed_text(value, source_time, received_at);
+    let diagnostic = property_diagnostics(property);
+    format!("    {label}: {value}; {diagnostic}.")
 }
 
 pub(super) fn synchronization(function: Option<&FunctionStatus>) -> String {

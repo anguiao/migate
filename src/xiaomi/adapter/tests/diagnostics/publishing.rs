@@ -10,7 +10,7 @@ fn mode_source(status: &AdapterStatus) -> Option<PathKind> {
         .find(|function| function.function == "relay:2")?
         .properties
         .iter()
-        .find(|property| property.name == "Mode")?
+        .find(|property| property.role == PropertyRole::Mode)?
         .observation_source
 }
 

@@ -1,7 +1,7 @@
 use crate::xiaomi::{
     adapter::{
         ChannelCommands, CommandStatus, DeviceStatus, GatewayStatus, ObservedPropertyStatus,
-        PathKind, PathPriority, RecoveryStatus, RoutingStatus,
+        PathKind, PathPriority, PropertyRole, RecoveryStatus, RoutingStatus,
     },
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::{CertificateStatus, CertificateValidity},
@@ -393,7 +393,7 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
             let _ = write!(
                 report,
                 "\n    {}: {}.",
-                property.name,
+                property_label(property.role),
                 property_diagnostics(Some(property))
             );
         }
@@ -420,6 +420,22 @@ pub(super) fn format_device(status: &DeviceStatus) -> String {
         }
     }
     report
+}
+
+pub(in crate::terminal) fn property_label(role: PropertyRole) -> &'static str {
+    match role {
+        PropertyRole::Power => "Power",
+        PropertyRole::Mode => "Mode",
+        PropertyRole::TargetTemperature => "Temperature",
+        PropertyRole::Speed => "Speed",
+        PropertyRole::VerticalSwing => "Vertical swing",
+        PropertyRole::ControlRange => "Control range",
+        PropertyRole::NativeMode => "Native mode",
+        PropertyRole::HorizontalSwing => "Horizontal swing",
+        PropertyRole::CurrentPosition => "Current position",
+        PropertyRole::TargetPosition => "Target position",
+        PropertyRole::CurtainStatus => "Status",
+    }
 }
 
 pub(in crate::terminal) fn property_diagnostics(

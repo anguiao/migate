@@ -315,16 +315,20 @@ fn fan_partial_baseline_and_terminal_show_per_property_diagnostics() {
                 .await
                 .unwrap()
                 .unwrap();
-            for expected in [
-                "Power: on",
-                "Native mode: 1",
-                "Speed: unknown",
-                "Horizontal swing: unknown",
-                "8.1",
-                "Category: fan",
-                "fan:2: core",
-                "dmaker.fan.straight-wind",
+            for (value, binding) in [
+                ("Power: on;", "property 2.1"),
+                ("Native mode: 1;", "property 2.3"),
+                ("Speed: unknown;", "property 8.1"),
+                ("Horizontal swing: unknown;", "property 2.4"),
             ] {
+                assert!(
+                    result
+                        .lines()
+                        .any(|line| line.trim_start().starts_with(value) && line.contains(binding)),
+                    "missing {binding} on {value} line: {result}"
+                );
+            }
+            for expected in ["Category: fan", "fan:2: core", "dmaker.fan.straight-wind"] {
                 assert!(result.contains(expected), "missing {expected}: {result}");
             }
             peer.release_property("one", SPEED, json!({"value": 40, "updateTime": 30}))

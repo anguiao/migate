@@ -1,13 +1,13 @@
 use super::{
     model::{
         AdapterStatus, DeviceStatus, DiagnosticObservation, FunctionStatus, GatewayStatus,
-        LowSpeedStatus, ObservedPropertyStatus, RoutingStatus, SharedFanSpeedStatus,
+        LowSpeedStatus, ObservedPropertyStatus, PropertyRole, RoutingStatus, SharedFanSpeedStatus,
         SharedFeedbackStatus, SubscriptionBinding, SubscriptionStatus,
     },
     state::Context,
     work::DeviceWork,
 };
-use crate::xiaomi::capability::PropertyBinding;
+use crate::xiaomi::capability::ParsedFunction;
 
 impl Context {
     pub(super) fn diagnostics(&self) -> AdapterStatus {
@@ -49,77 +49,7 @@ impl Context {
                             .map(|source| source.kind())
                     };
                     let subscriptions = work.subscription_status(function.id());
-                    let properties = if let Some((mode, _)) = function.relay_mode() {
-                        property_statuses(
-                            work,
-                            function.id(),
-                            &subscriptions,
-                            [("Power", function.power().unwrap()), ("Mode", mode)],
-                        )
-                    } else if let Some(ac) = function.air_conditioner() {
-                        let state = ac.mcn04().map(|patch| patch.state);
-                        let mut bindings = vec![
-                            ("Power", Some(state.unwrap_or(ac.power()))),
-                            ("Mode", Some(state.unwrap_or(ac.mode().property()))),
-                            (
-                                "Temperature",
-                                Some(state.unwrap_or(ac.temperature().property())),
-                            ),
-                            ("Speed", Some(state.unwrap_or(ac.speed().property()))),
-                            (
-                                "Vertical swing",
-                                ac.swing().map(|swing| state.unwrap_or(swing)),
-                            ),
-                        ];
-                        if let Some(patch) = ac.mcn04() {
-                            bindings.push(("Control range", Some(patch.range)));
-                        }
-                        property_statuses(
-                            work,
-                            function.id(),
-                            &subscriptions,
-                            bindings.into_iter().filter_map(|(name, binding)| {
-                                binding.map(|binding| (name, binding))
-                            }),
-                        )
-                    } else if let Some(heater) = function.heater() {
-                        property_statuses(
-                            work,
-                            function.id(),
-                            &subscriptions,
-                            [
-                                ("Power", heater.power()),
-                                ("Temperature", heater.temperature().property()),
-                            ],
-                        )
-                    } else if let Some(fan) = function.fan() {
-                        property_statuses(
-                            work,
-                            function.id(),
-                            &subscriptions,
-                            [
-                                ("Power", Some(fan.power())),
-                                ("Native mode", fan.mode().map(|mode| mode.property())),
-                                ("Speed", fan.standard_speed().map(|speed| speed.property())),
-                                ("Horizontal swing", fan.swing()),
-                            ]
-                            .into_iter()
-                            .filter_map(|(name, binding)| binding.map(|binding| (name, binding))),
-                        )
-                    } else if let Some(curtain) = function.curtain() {
-                        property_statuses(
-                            work,
-                            function.id(),
-                            &subscriptions,
-                            [
-                                ("Current position", curtain.current().property()),
-                                ("Target position", curtain.target().property()),
-                                ("Status", curtain.status().property()),
-                            ],
-                        )
-                    } else {
-                        Vec::new()
-                    };
+                    let properties = property_statuses(work, function, &subscriptions);
                     FunctionStatus {
                         function: function.id().to_owned(),
                         selected_read: function_routes.read.selected_kind(),
@@ -287,29 +217,82 @@ impl Context {
 
 fn property_statuses(
     work: &DeviceWork,
-    id: &str,
+    function: &ParsedFunction,
     subscriptions: &[SubscriptionStatus],
-    bindings: impl IntoIterator<Item = (&'static str, PropertyBinding)>,
 ) -> Vec<ObservedPropertyStatus> {
+    use PropertyRole::{
+        ControlRange, CurrentPosition, CurtainStatus, HorizontalSwing, Mode, NativeMode, Power,
+        Speed, TargetPosition, TargetTemperature, VerticalSwing,
+    };
+
+    let id = function.id();
     let refresh = work.refresh.borrow();
-    bindings
-        .into_iter()
-        .map(|(name, binding)| ObservedPropertyStatus {
-            name,
-            binding,
-            observation_source: work.property_source(id, binding),
-            native_mode: (name == "Native mode").then(|| work.fan_mode_observation(id)),
-            read_problem: work
-                .mcn04_problem(id, binding)
-                .or_else(|| refresh.property_problem(id, binding)),
-            source_detail: (name == "Control range")
-                .then(|| work.mcn04_range(id))
-                .flatten(),
-            subscriptions: subscriptions
-                .iter()
-                .filter(|item| item.binding == SubscriptionBinding::Property(binding))
-                .cloned()
-                .collect(),
-        })
-        .collect()
+    let status = |role, binding| ObservedPropertyStatus {
+        role,
+        binding,
+        observation_source: work.property_source(id, binding),
+        read_problem: work
+            .mcn04_problem(id, binding)
+            .or_else(|| refresh.property_problem(id, binding)),
+        subscriptions: subscriptions
+            .iter()
+            .filter(|item| item.binding == SubscriptionBinding::Property(binding))
+            .cloned()
+            .collect(),
+        native_mode: None,
+        source_detail: None,
+    };
+    if let Some((mode, _)) = function.relay_mode() {
+        vec![status(Power, function.power().unwrap()), status(Mode, mode)]
+    } else if let Some(ac) = function.air_conditioner() {
+        let patch = ac.mcn04();
+        let state_binding = |standard| patch.map_or(standard, |patch| patch.state);
+        let mut properties = vec![
+            status(Power, state_binding(ac.power())),
+            status(Mode, state_binding(ac.mode().property())),
+            status(
+                TargetTemperature,
+                state_binding(ac.temperature().property()),
+            ),
+            status(Speed, state_binding(ac.speed().property())),
+        ];
+        if let Some(swing) = ac.swing() {
+            properties.push(status(VerticalSwing, state_binding(swing)));
+        }
+        if let Some(patch) = patch {
+            properties.push(ObservedPropertyStatus {
+                source_detail: work.mcn04_range(id),
+                ..status(ControlRange, patch.range)
+            });
+        }
+        properties
+    } else if let Some(heater) = function.heater() {
+        vec![
+            status(Power, heater.power()),
+            status(TargetTemperature, heater.temperature().property()),
+        ]
+    } else if let Some(fan) = function.fan() {
+        let mut properties = vec![status(Power, fan.power())];
+        if let Some(mode) = fan.mode() {
+            properties.push(ObservedPropertyStatus {
+                native_mode: Some(work.fan_mode_observation(id)),
+                ..status(NativeMode, mode.property())
+            });
+        }
+        if let Some(speed) = fan.standard_speed() {
+            properties.push(status(Speed, speed.property()));
+        }
+        if let Some(swing) = fan.swing() {
+            properties.push(status(HorizontalSwing, swing));
+        }
+        properties
+    } else if let Some(curtain) = function.curtain() {
+        vec![
+            status(CurrentPosition, curtain.current().property()),
+            status(TargetPosition, curtain.target().property()),
+            status(CurtainStatus, curtain.status().property()),
+        ]
+    } else {
+        Vec::new()
+    }
 }

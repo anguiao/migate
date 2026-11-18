@@ -33,7 +33,7 @@ pub use model::{AdapterError, AdapterStatus, TopologyReady};
 pub(crate) use model::{
     ChannelCommands, CommandStatus, CommandTarget, DeviceStatus, DiagnosticObservation,
     FunctionStatus, GatewayStatus, LanProtocol, LanState, ObservedPropertyStatus, PathKind,
-    PendingDevice, RecoveryStatus, RoutingStatus, StepReceipt,
+    PendingDevice, PropertyRole, RecoveryStatus, RoutingStatus, StepReceipt,
 };
 pub use publication::SourceHandle;
 pub(crate) use routing::PathPriority;

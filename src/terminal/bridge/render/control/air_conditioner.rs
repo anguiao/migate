@@ -1,13 +1,14 @@
 use super::super::{
     diagnostics::FunctionDiagnostics,
     measurement::{AmbientSource, ambient_lines},
-    primitives::{known, on_off},
+    primitives::on_off,
 };
 use crate::device::{
     AirConditionerCommand, AirConditionerFanSpeed, AirConditionerMode, AirConditionerSnapshot,
     AmbientTemperature, FunctionDescription, FunctionKind,
     air_conditioner::AirConditionerConstraints,
 };
+use crate::{terminal::status::property_diagnostics, xiaomi::adapter::PropertyRole};
 
 pub(in crate::terminal::bridge::render) struct AirConditionerControl {
     pub(in crate::terminal::bridge::render) constraints_ready: bool,
@@ -24,30 +25,12 @@ pub(in crate::terminal::bridge::render) fn air_conditioner_lines(
     control: AirConditionerControl,
 ) -> Vec<String> {
     let mut entries = vec![
-        (
-            "Power",
-            on_off(ac.power.value),
-            ac.power.source_time,
-            ac.power.received_at,
-        ),
-        (
-            "Mode",
-            known(ac.mode.value, |value| format!("{value:?}")),
-            ac.mode.source_time,
-            ac.mode.received_at,
-        ),
-        (
-            "Target temperature",
-            known(ac.temperature.value, |value| format!("{value} °C")),
-            ac.temperature.source_time,
-            ac.temperature.received_at,
-        ),
-        (
-            "Speed",
-            known(ac.speed.value, |value| format!("{value:?}")),
-            ac.speed.source_time,
-            ac.speed.received_at,
-        ),
+        diagnostics.observation(PropertyRole::Power, ac.power, on_off),
+        diagnostics.observation(PropertyRole::Mode, ac.mode, |value| format!("{value:?}")),
+        diagnostics.observation(PropertyRole::TargetTemperature, ac.temperature, |value| {
+            format!("{value} °C")
+        }),
+        diagnostics.observation(PropertyRole::Speed, ac.speed, |value| format!("{value:?}")),
     ];
     if matches!(
         description.kind,
@@ -56,22 +39,17 @@ pub(in crate::terminal::bridge::render) fn air_conditioner_lines(
             ..
         }
     ) {
-        entries.push((
-            "Vertical swing",
-            on_off(ac.swing.value),
-            ac.swing.source_time,
-            ac.swing.received_at,
-        ));
+        entries.push(diagnostics.observation(PropertyRole::VerticalSwing, ac.swing, on_off));
     }
     let mut lines = diagnostics.observed_lines(description, entries);
     lines.extend(ambient_lines(ambient, source));
     if ac.power.value == Some(true) && ac.speed.value == Some(AirConditionerFanSpeed::Auto) {
         lines.push("    Current fan level: unknown (automatic speed).".into());
     }
-    if diagnostics.property("Control range").is_some() {
+    if let Some(range) = diagnostics.property(PropertyRole::ControlRange) {
         lines.push(format!(
             "    Control range source: {}.",
-            diagnostics.property_text("Control range")
+            property_diagnostics(Some(range))
         ));
     }
     if !control.constraints_ready {

@@ -1,7 +1,7 @@
 mod format;
 
 use format::{auth_report_lines, format_device, format_gateway, format_routing};
-pub(super) use format::{format_command, path, property_diagnostics, timestamp};
+pub(super) use format::{format_command, path, property_diagnostics, property_label, timestamp};
 pub use format::{format_report, login_command};
 
 use crate::xiaomi::{

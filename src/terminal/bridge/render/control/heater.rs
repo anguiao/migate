@@ -1,8 +1,9 @@
 use super::super::{
-    diagnostics::FunctionDiagnostics,
+    diagnostics::{FunctionDiagnostics, observed_line},
     primitives::{known, on_off},
 };
 use crate::device::{FunctionDescription, HeaterCommand, HeaterSnapshot, TemperatureSourceState};
+use crate::xiaomi::adapter::PropertyRole;
 
 pub(in crate::terminal::bridge::render) fn heater_lines(
     description: &FunctionDescription,
@@ -31,27 +32,23 @@ pub(in crate::terminal::bridge::render) fn heater_lines(
         }
     };
     let mut entries = vec![
-        (
-            "Power",
-            on_off(heater.power.value),
-            heater.power.source_time,
-            heater.power.received_at,
-        ),
-        (
+        diagnostics.observation(PropertyRole::Power, heater.power, on_off),
+        observed_line(
             "Mode",
-            mode.into(),
+            None,
+            mode,
             heater.power.source_time,
             heater.power.received_at,
         ),
-        (
-            "Target temperature",
-            known(heater.temperature.value, |value| format!("{value} °C")),
-            heater.temperature.source_time,
-            heater.temperature.received_at,
+        diagnostics.observation(
+            PropertyRole::TargetTemperature,
+            heater.temperature,
+            |value| format!("{value} °C"),
         ),
-        (
+        observed_line(
             "Current temperature",
-            current,
+            None,
+            &current,
             current_source_time,
             current_received_at,
         ),
@@ -59,9 +56,10 @@ pub(in crate::terminal::bridge::render) fn heater_lines(
     if heater.temperature_source != TemperatureSourceState::Available(heater.current_temperature)
         && let Some(value) = heater.current_temperature.value
     {
-        entries.push((
+        entries.push(observed_line(
             "Last reading (diagnostic only)",
-            format!("{value:.2} °C"),
+            None,
+            &format!("{value:.2} °C"),
             heater.current_temperature.source_time,
             heater.current_temperature.received_at,
         ));

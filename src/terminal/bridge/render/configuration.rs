@@ -6,6 +6,8 @@ use super::{
 use crate::{
     configuration::GroupRelation,
     device::{DeviceKey, FunctionDescription, FunctionKey, Power, RelayMode},
+    terminal::status::{property_diagnostics, property_label},
+    xiaomi::adapter::PropertyRole,
 };
 
 pub(in crate::terminal::bridge) fn configuration_lines(view: &View, did: &str) -> Vec<String> {
@@ -302,9 +304,9 @@ pub(super) fn relay_lines(
                 "    Synchronization: {}.",
                 diagnostics.synchronization
             ));
-            for name in ["Power", "Mode"] {
-                let diagnostic = diagnostics.property_text(name);
-                lines.push(format!("    {name}: {diagnostic}."));
+            for role in [PropertyRole::Power, PropertyRole::Mode] {
+                let diagnostic = property_diagnostics(diagnostics.property(role));
+                lines.push(format!("    {}: {diagnostic}.", property_label(role)));
             }
         }
     } else {

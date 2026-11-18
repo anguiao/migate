@@ -39,7 +39,8 @@ pub(crate) use model::{
     CurtainMotion, CurtainSnapshot, DeviceKey, FanSnapshot, FunctionDescription, FunctionKind,
     FunctionSnapshot, FunctionState, LightMode, LightPatch, LightProfile, LightProfileKind,
     LightSnapshot, MeasurementRange, MeasurementSnapshot, NumericRange, PhysicalDeviceDescription,
-    Power, RelayMode, Rgb, StateInput, StateSnapshot, TemperatureInterval, TemperatureSourceState,
+    Power, PropertyObservation, RelayMode, Rgb, StateInput, StateSnapshot, TemperatureInterval,
+    TemperatureSourceState,
 };
 pub(crate) use model::{CurtainValue, FanValue, FunctionKey};
 pub(crate) use state::{Function, PhysicalDevice};

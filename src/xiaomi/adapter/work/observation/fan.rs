@@ -1,15 +1,16 @@
 use super::*;
+use crate::device::PropertyObservation;
 
 #[derive(Default)]
 pub(in crate::xiaomi::adapter::work) struct FanObservations {
-    modes: RefCell<BTreeMap<String, NativeModeObservation>>,
+    modes: RefCell<BTreeMap<String, PropertyObservation<u32>>>,
 }
 
 impl DeviceWork {
     pub(in crate::xiaomi::adapter) fn fan_mode_observation(
         &self,
         id: &str,
-    ) -> NativeModeObservation {
+    ) -> PropertyObservation<u32> {
         self.fan.modes.borrow().get(id).copied().unwrap_or_default()
     }
 
@@ -36,7 +37,7 @@ impl DeviceWork {
             FanObservation::Mode(value) => {
                 self.fan.modes.borrow_mut().insert(
                     id.to_owned(),
-                    super::super::super::model::NativeModeObservation {
+                    PropertyObservation {
                         value: Some(value),
                         source_time: observation.source_time,
                         received_at: Some(observation.received_at),

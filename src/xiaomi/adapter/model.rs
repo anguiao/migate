@@ -1,5 +1,5 @@
 use crate::{
-    device::CommandError,
+    device::{CommandError, PropertyObservation},
     storage::StorageError,
     xiaomi::{
         auth::{AuthError, AuthReport},
@@ -315,12 +315,6 @@ pub(crate) struct SubscriptionStatus {
     pub(crate) ready: bool,
     pub(crate) problem: Option<String>,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct NativeModeObservation {
-    pub(crate) value: Option<u32>,
-    pub(crate) source_time: Option<i64>,
-    pub(crate) received_at: Option<i64>,
-}
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct NativeValueObservation {
     pub(super) value: serde_json::Value,
@@ -328,12 +322,29 @@ pub(super) struct NativeValueObservation {
     pub(super) received_at: i64,
     pub(super) reason: Option<String>,
 }
+
+/// Several logical properties can share a single native binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PropertyRole {
+    Power,
+    Mode,
+    TargetTemperature,
+    Speed,
+    VerticalSwing,
+    ControlRange,
+    NativeMode,
+    HorizontalSwing,
+    CurrentPosition,
+    TargetPosition,
+    CurtainStatus,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ObservedPropertyStatus {
-    pub(crate) name: &'static str,
+    pub(crate) role: PropertyRole,
     pub(crate) binding: PropertyBinding,
     pub(crate) observation_source: Option<PathKind>,
-    pub(crate) native_mode: Option<NativeModeObservation>,
+    pub(crate) native_mode: Option<PropertyObservation<u32>>,
     pub(crate) read_problem: Option<String>,
     pub(crate) source_detail: Option<String>,
     pub(crate) subscriptions: Vec<SubscriptionStatus>,

@@ -12,6 +12,7 @@ use crate::device::{
     CurtainCommand, CurtainMotion, CurtainSnapshot, FanCommand, FanSnapshot, FunctionDescription,
     FunctionKind, LightMode, LightSnapshot, Power,
 };
+use crate::xiaomi::adapter::PropertyRole;
 
 pub(super) fn power_line(description: &FunctionDescription, power: Power) -> String {
     format!(
@@ -76,37 +77,21 @@ pub(super) fn fan_lines(
     pending: Vec<FanCommand>,
 ) -> Vec<String> {
     let mut entries = vec![
-        (
-            "Power",
-            on_off(fan.power.value),
-            fan.power.source_time,
-            fan.power.received_at,
-        ),
-        (
-            "Speed",
-            known(fan.speed.value, |value| {
-                let FunctionKind::Fan { speed_count, .. } = description.kind else {
-                    unreachable!("fan snapshot has a fan description")
-                };
-                format!("level {value}/{speed_count}")
-            }),
-            fan.speed.source_time,
-            fan.speed.received_at,
-        ),
+        diagnostics.observation(PropertyRole::Power, fan.power, on_off),
+        diagnostics.observation(PropertyRole::Speed, fan.speed, |value| {
+            let FunctionKind::Fan { speed_count, .. } = description.kind else {
+                unreachable!("fan snapshot has a fan description")
+            };
+            format!("level {value}/{speed_count}")
+        }),
     ];
     if let Some(mode) = diagnostics
-        .properties
-        .iter()
-        .find_map(|property| property.native_mode)
+        .property(PropertyRole::NativeMode)
+        .and_then(|property| property.native_mode)
     {
         entries.insert(
             1,
-            (
-                "Native mode",
-                known(mode.value, |value| value.to_string()),
-                mode.source_time,
-                mode.received_at,
-            ),
+            diagnostics.observation(PropertyRole::NativeMode, mode, |value| value.to_string()),
         );
     }
     if matches!(
@@ -116,12 +101,7 @@ pub(super) fn fan_lines(
             ..
         }
     ) {
-        entries.push((
-            "Horizontal swing",
-            on_off(fan.swing.value),
-            fan.swing.source_time,
-            fan.swing.received_at,
-        ));
+        entries.push(diagnostics.observation(PropertyRole::HorizontalSwing, fan.swing, on_off));
     }
     let mut lines = diagnostics.observed_lines(description, entries);
     if !pending.is_empty() {
@@ -142,30 +122,24 @@ pub(super) fn curtain_lines(
     pending: Vec<CurtainCommand>,
 ) -> Vec<String> {
     let entries = [
-        (
-            "Current position",
-            known(curtain.current_position.value, |value| format!("{value}%")),
-            curtain.current_position.source_time,
-            curtain.current_position.received_at,
+        diagnostics.observation(
+            PropertyRole::CurrentPosition,
+            curtain.current_position,
+            |value| format!("{value}%"),
         ),
-        (
-            "Target position",
-            known(curtain.target_position.value, |value| format!("{value}%")),
-            curtain.target_position.source_time,
-            curtain.target_position.received_at,
+        diagnostics.observation(
+            PropertyRole::TargetPosition,
+            curtain.target_position,
+            |value| format!("{value}%"),
         ),
-        (
-            "Status",
-            match curtain.status.value {
-                None => "unknown",
-                Some(CurtainMotion::Opening) => "opening",
-                Some(CurtainMotion::Closing) => "closing",
-                Some(CurtainMotion::Stopped) => "stopped",
+        diagnostics.observation(PropertyRole::CurtainStatus, curtain.status, |status| {
+            match status {
+                CurtainMotion::Opening => "opening",
+                CurtainMotion::Closing => "closing",
+                CurtainMotion::Stopped => "stopped",
             }
-            .into(),
-            curtain.status.source_time,
-            curtain.status.received_at,
-        ),
+            .into()
+        }),
     ];
     let mut lines = diagnostics.observed_lines(description, entries);
     if !pending.is_empty() {

@@ -3,14 +3,12 @@ use crate::{
     terminal::status::timestamp,
 };
 
-pub(super) type Observation = (&'static str, String, Option<i64>, Option<i64>);
-
 pub(super) fn known<T>(value: Option<T>, format: impl FnOnce(T) -> String) -> String {
     value.map_or_else(|| "unknown".into(), format)
 }
 
-pub(super) fn on_off(value: Option<bool>) -> String {
-    known(value, |value| if value { "on" } else { "off" }.into())
+pub(super) fn on_off(value: bool) -> String {
+    if value { "on" } else { "off" }.into()
 }
 
 pub(super) fn power_text(power: Power) -> &'static str {

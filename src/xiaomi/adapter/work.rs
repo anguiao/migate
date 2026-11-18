@@ -1,8 +1,7 @@
 use super::{
     commands::DeviceWriteGate,
     model::{
-        AdapterError, NativeModeObservation, NativeValueObservation, PathKind, SubscriptionBinding,
-        SubscriptionStatus,
+        AdapterError, NativeValueObservation, PathKind, SubscriptionBinding, SubscriptionStatus,
     },
     notifications::NotificationSource,
     observations::{Observation, Observations, Origin},

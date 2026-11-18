@@ -108,13 +108,19 @@ fn mcn04_range_controls_commands_and_invalid_reports_preserve_last_valid_range()
             assert!(work(control).mcn04_range(ID).unwrap().contains("directs"));
             let terminal = control.terminal();
             let output = terminal.handle_line("status one").await.unwrap().unwrap();
-            assert!(output.contains("property 8.7"), "{output}");
             assert!(
-                output.contains("Control range source: property 8.6"),
+                output
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("Target temperature:")
+                        && line.contains("property 8.7")),
                 "{output}"
             );
             assert!(
-                output.contains("ac-ctrl-range") && output.contains("directs"),
+                output
+                    .lines()
+                    .any(|line| line.contains("Control range source: property 8.6")
+                        && line.contains("ac-ctrl-range")
+                        && line.contains("directs")),
                 "{output}"
             );
             peer.notify_value_at("one", MCN_STATE, json!("P0_M2_T24_S1_D1"), Some(901), false);
