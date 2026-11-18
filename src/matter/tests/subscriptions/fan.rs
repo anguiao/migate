@@ -45,7 +45,7 @@ fn fan_live_subscription_reports_only_changed_projections() {
             device.set_availability(Availability::Available);
             let function = &device.functions()[0];
             observe_fan_state(function, true, 40, 0, false);
-            let handler = model_handler(vec![single_entry(&device)]);
+            let handler = model_handler(&matter, vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -207,7 +207,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_concurrent_feedback(
             device.set_availability(Availability::Available);
             let function = &device.functions()[0];
             observe_fan_state(function, true, 40, 1, false);
-            let handler = model_handler(vec![single_entry(&device)]);
+            let handler = model_handler(&matter, vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -340,7 +340,7 @@ fn locked_stack_fan_write_report_preserves_observations_and_concurrent_feedback(
                     let version_before_feedback = report_dataver(&before_feedback);
                     assert_eq!(function.snapshot().fan().unwrap(), observed);
 
-                    let mut pending = Exchange::accept(&client).await.unwrap();
+                    let mut pending = Exchange::accept(client.transport()).await.unwrap();
                     pending.recv_fetch().await.unwrap();
                     {
                         let rx = pending.rx().unwrap();

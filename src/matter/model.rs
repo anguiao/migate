@@ -7,7 +7,7 @@ use crate::storage::Identity;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use rand::RngExt as _;
 use rs_matter::{
-    clusters, devices,
+    Matter, clusters, devices,
     dm::{
         Async, AsyncHandler, ChainedHandler, Dataver, DeviceType, EmptyHandler, Endpoint,
         FnMatcher, Handler, HandlerContext, InvokeContext, InvokeReply, LifecycleOp, MatchContext,
@@ -74,10 +74,10 @@ const AGGREGATOR: Endpoint<'static> = Endpoint::new(
     devices!(DEV_TYPE_AGGREGATOR),
     clusters!(desc::DescHandler::CLUSTER),
 );
-type RootHandler = ChainedHandler<
+type RootHandler<'a> = ChainedHandler<
     FnMatcher,
     Async<desc::HandlerAdaptor<desc::DescHandler<'static>>>,
-    endpoints::EthSysHandler<'static>,
+    endpoints::EthSysHandler<'a>,
 >;
 #[derive(Clone, Copy)]
 struct Versions {
@@ -164,20 +164,21 @@ pub(crate) struct PublishedEntry {
     pub(crate) identity: PublishedIdentity,
 }
 
-pub(super) struct Model {
-    root: RootHandler,
-    entries: Vec<Rc<Entry>>,
+pub(super) struct Model<'a> {
+    root: RootHandler<'a>,
+    entries: Vec<Rc<Entry<'a>>>,
     bindings: Rc<BindingRegistry>,
 }
 
-pub(super) fn handler_from(
+pub(super) fn handler_from<'a>(
+    matter: &'a Matter<'a>,
     entries: Vec<PublishedEntry>,
     mut random: impl rand::Rng,
     renamer: Rc<dyn super::bridge::LabelWriter>,
-) -> Model {
+) -> Model<'a> {
     let root = endpoints::EthSysHandlerBuilder::new()
         .netif_diag(&SysNetifs)
-        .build(&mut random)
+        .build(matter, &mut random)
         .chain(
             |endpoint, cluster| endpoint == AGGREGATOR_ENDPOINT && cluster == 0x1d,
             Async(desc::DescHandler::new_aggregator(Dataver::new_rand(&mut random)).adapt()),
@@ -192,6 +193,7 @@ pub(super) fn handler_from(
                 .function(&relay.function_id)
                 .expect("a published relay keeps its physical function");
             built.push(Rc::new(Entry {
+                matter,
                 endpoint,
                 descriptor: Dataver::new(versions.descriptor),
                 role: Role::Relay {
@@ -256,7 +258,8 @@ pub(super) fn handler_from(
                 Some((index, function)) => {
                     let function_device = device.function(&function.id).unwrap();
                     let label = function_device.description().label.clone();
-                    let function = FunctionHandler::new(function_device, endpoint, versions);
+                    let function =
+                        FunctionHandler::new(matter, function_device, endpoint, versions);
                     Role::Child {
                         function,
                         tag: index as u8 + 1,
@@ -265,6 +268,7 @@ pub(super) fn handler_from(
                 }
             };
             built.push(Rc::new(Entry {
+                matter,
                 endpoint,
                 descriptor: Dataver::new(versions.descriptor),
                 role,
@@ -278,8 +282,8 @@ pub(super) fn handler_from(
         bindings,
     }
 }
-impl Model {
-    fn entry(&self, endpoint: u16) -> Result<Rc<Entry>, Error> {
+impl<'a> Model<'a> {
+    fn entry(&self, endpoint: u16) -> Result<Rc<Entry<'a>>, Error> {
         self.entries
             .iter()
             .find(|entry| entry.endpoint == endpoint)
@@ -287,7 +291,7 @@ impl Model {
             .ok_or_else(|| ErrorCode::EndpointNotFound.into())
     }
 }
-impl Metadata for Model {
+impl Metadata for Model<'_> {
     fn access<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&Node<'_>) -> R,
@@ -312,7 +316,7 @@ impl Metadata for Model {
         f(&Node::new(&endpoints))
     }
 }
-impl AsyncHandler for Model {
+impl AsyncHandler for Model<'_> {
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {
         let endpoint = ctx.attr().endpoint_id;
         let cluster = ctx.attr().cluster_id;

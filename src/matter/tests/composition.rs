@@ -94,7 +94,8 @@ fn composition_keeps_existing_endpoint_and_publishes_each_child_and_shared_batte
         .iter()
         .map(|f| (f.id.as_str(), f.endpoint))
         .collect::<Vec<_>>();
-    let model = model_handler(vec![entry(&physical, saved.endpoint, &endpoints)]);
+    let matter = crate::matter::tests::support::test_matter();
+    let model = model_handler(&matter, vec![entry(&physical, saved.endpoint, &endpoints)]);
     model.access(|node| {
         let parent = node.endpoint(saved.endpoint).unwrap();
         assert!(parent.cluster(0x39).is_some());

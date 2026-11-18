@@ -132,10 +132,20 @@ pub(in crate::matter) fn single_entry(device: &PhysicalDevice) -> PublishedEntry
     )
 }
 
-pub(in crate::matter) fn model_handler(
+pub(in crate::matter) fn test_matter() -> Matter<'static> {
+    Matter::new(
+        &rs_matter::dm::devices::test::TEST_DEV_DET,
+        TEST_DEV_COMM,
+        &TEST_DEV_ATT,
+        MATTER_PORT,
+    )
+}
+
+pub(in crate::matter) fn model_handler<'a>(
+    matter: &'a Matter<'a>,
     entries: Vec<PublishedEntry>,
-) -> crate::matter::model::Model {
-    crate::matter::model::handler_from(entries, rand::rng(), Rc::new(NoLabels))
+) -> crate::matter::model::Model<'a> {
+    crate::matter::model::handler_from(matter, entries, rand::rng(), Rc::new(NoLabels))
 }
 
 /// Label persistence tests supply the real App instead.

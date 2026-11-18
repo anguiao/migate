@@ -1,21 +1,16 @@
 use rs_matter::{
-    Matter,
     crypto::Crypto,
     dm::{
         AsyncHandler, AttrChangeNotifier, AttrDetails, CmdDetails, EventEmitter, EventNumber,
-        HandlerContext, InvokeContext, LifecycleOp, MatchContext, Metadata, OperationContext,
-        OwnAttrChangeNotifier, OwnEventEmitter, ReadContext, WriteContext,
+        EventTLVWrite, HandlerContext, IMBuffer, ImStats, InvokeContext, LifecycleOp, MatchContext,
+        Metadata, OperationContext, OwnAttrChangeNotifier, OwnEventEmitter, ReadContext,
+        TransactionId, WriteContext,
     },
     error::Error,
-    im::{
-        ImStats,
-        encoding::{EventPriority, IMBuffer},
-        events::EventTLVWrite,
-    },
+    im::encoding::EventPriority,
     persist::KvBlobStoreAccess,
     tlv::TLVElement,
-    transport::exchange::Exchange,
-    utils::{storage::pooled::Buffers, sync::blocking::Mutex},
+    utils::{epoch::UtcTime, storage::pooled::Buffers, sync::blocking::Mutex},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -55,8 +50,8 @@ impl<'a, H> Context<'a, H> {
     }
 }
 impl<H: HandlerContext> HandlerContext for Context<'_, H> {
-    fn matter(&self) -> &Matter<'_> {
-        self.base.matter()
+    fn utc_time(&self) -> UtcTime {
+        self.base.utc_time()
     }
     fn crypto(&self) -> impl Crypto + '_ {
         self.base.crypto()
@@ -156,7 +151,7 @@ impl<H: HandlerContext> OwnEventEmitter for Context<'_, H> {
     }
 }
 impl<H: HandlerContext> OperationContext for Context<'_, H> {
-    fn exchange(&self) -> &Exchange<'_> {
+    fn transaction_id(&self) -> TransactionId {
         panic!("these device operations must not require a network exchange")
     }
 }

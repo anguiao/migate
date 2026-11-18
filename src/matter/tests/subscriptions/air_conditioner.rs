@@ -63,7 +63,7 @@ fn locked_stack_ambient_subscription_tracks_values_null_and_ignores_time_only_ch
             )
             .0;
             let sensor = &sensor_device.functions()[0];
-            let handler = model_handler(vec![single_entry(&device)]);
+            let handler = model_handler(&matter, vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -229,7 +229,7 @@ fn locked_stack_subscription_tracks_observations_across_both_clusters_without_re
             ] {
                 function.observe_air_conditioner(value, Some(1), 1);
             }
-            let handler = model_handler(vec![single_entry(&device)]);
+            let handler = model_handler(&matter, vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -470,7 +470,7 @@ fn persistent_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
     ] {
         function.observe_air_conditioner(value, Some(1), 1);
     }
-    let handler = model_handler(vec![single_entry(&device)]);
+    let handler = model_handler(&matter, vec![single_entry(&device)]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();

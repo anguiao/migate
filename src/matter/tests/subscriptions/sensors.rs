@@ -115,7 +115,7 @@ async fn expect_battery_report(
     level: u8,
     replacement: bool,
 ) -> Result<(), Error> {
-    let mut exchange = Exchange::accept(client).await?;
+    let mut exchange = Exchange::accept(client.transport()).await?;
     exchange.recv_fetch().await?;
     {
         let rx = exchange.rx()?;
@@ -188,13 +188,14 @@ fn with_sensor_subscription(
             device.functions()[1]
                 .observe_measurement(45.5, Some(1), 2)
                 .unwrap();
-            let handler = crate::matter::tests::support::model_handler(vec![
-                crate::matter::tests::support::entry(
+            let handler = crate::matter::tests::support::model_handler(
+                &matter,
+                vec![crate::matter::tests::support::entry(
                     &device,
                     2,
                     &[("temperature", 3), ("humidity", 4)],
-                ),
-            ]);
+                )],
+            );
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -324,7 +325,7 @@ async fn expect_sensor_report(
     temperature: Option<i16>,
     humidity: Option<u16>,
 ) -> Result<(), Error> {
-    let mut exchange = Exchange::accept(client).await?;
+    let mut exchange = Exchange::accept(client.transport()).await?;
     exchange.recv_fetch().await?;
     {
         let rx = exchange.rx()?;

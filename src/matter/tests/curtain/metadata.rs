@@ -3,7 +3,8 @@ use super::*;
 #[test]
 fn curtain_publishes_only_supported_window_covering_elements() {
     let (device, _) = curtain();
-    let model = model_handler(vec![single_entry(&device)]);
+    let matter = crate::matter::tests::support::test_matter();
+    let model = model_handler(&matter, vec![single_entry(&device)]);
     model.access(|node| {
         let endpoint = node.endpoint(2).unwrap();
         assert!(

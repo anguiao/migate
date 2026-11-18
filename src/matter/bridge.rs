@@ -109,11 +109,11 @@ impl<'a> Bridge<'a> {
             "prepare the root ConfigurationVersion",
             model::prepare_basic_info(&kv, root_version),
         )?;
-        matter.with_state(|state| state.basic_info_settings = settings.clone());
+        matter.with_state(|state| *state.basic_info_settings = settings.clone());
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
-        let handler = model::handler_from(entries, crypto.rand()?, self.renamer.clone());
+        let handler = model::handler_from(&matter, entries, crypto.rand()?, self.renamer.clone());
         let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         store.with_context("restore Matter model", im.startup().await)?;
         let persist_kv = matter.kv(store.clone());

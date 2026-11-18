@@ -150,10 +150,10 @@ macro_rules! setup {
         let $function = device.functions()[0].clone();
         device.set_availability(Availability::Available);
 
-        let handler = support::model_handler(vec![support::single_entry(&device)]);
 
         let info = model::basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let handler = support::model_handler(&matter, vec![support::single_entry(&device)]);
         let buffers: MatterBuffers = MatterBuffers::new();
 
         let state: InteractionModelState = InteractionModelState::new();

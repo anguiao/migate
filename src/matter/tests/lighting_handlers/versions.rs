@@ -446,11 +446,12 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     let (device, mut receiver) = crate::matter::tests::support::light(false);
-    let handler = crate::matter::tests::support::model_handler(vec![
-        crate::matter::tests::support::single_entry(&device),
-    ]);
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+    let handler = crate::matter::tests::support::model_handler(
+        &matter,
+        vec![crate::matter::tests::support::single_entry(&device)],
+    );
     let buffers: MatterBuffers = MatterBuffers::new();
     let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
@@ -534,8 +535,8 @@ fn frozen_light_instance_keeps_versions_and_a_new_instance_uses_new_bounds() {
         // endpoint version from BDBI and the Descriptor cluster. Its root
         // catches up through the same pre-startup alignment the bridge uses.
         let settings = model::prepare_basic_info(&kv, 2).unwrap();
-        matter.with_state(|state| state.basic_info_settings = settings);
-        let replacement_handler = model_handler(vec![replacement_entry]);
+        matter.with_state(|state| *state.basic_info_settings = settings);
+        let replacement_handler = model_handler(&matter, vec![replacement_entry]);
         let replacement_im = InteractionModel::new(
             &matter,
             &crypto,

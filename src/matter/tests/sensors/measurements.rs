@@ -18,7 +18,8 @@ fn unrepresentable_temperature_keeps_native_state_and_reports_unsupported_mappin
     );
     let function = &device.functions()[0];
     function.observe_measurement(400.0, None, 1).unwrap();
-    let handler = model_handler(vec![entry(&device, 2, &[("temperature", 3)])]);
+    let matter = crate::matter::tests::support::test_matter();
+    let handler = model_handler(&matter, vec![entry(&device, 2, &[("temperature", 3)])]);
     handler.access(|node| assert!(node.endpoints.iter().any(|endpoint| endpoint.id == 3)));
     assert_eq!(
         function.snapshot().measurement().unwrap().value,

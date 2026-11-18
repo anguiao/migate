@@ -37,9 +37,10 @@ fn actual_handler_waits_for_acceptance_reads_unknown_and_reports_shared_values()
     let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let handler = crate::matter::tests::support::model_handler(vec![
-        crate::matter::tests::support::single_entry(&device),
-    ]);
+    let handler = crate::matter::tests::support::model_handler(
+        &matter,
+        vec![crate::matter::tests::support::single_entry(&device)],
+    );
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let mut ctx = Context::new(&im, 6, 0);
     block_on(async {
@@ -178,7 +179,8 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
         &entry.identity,
         app.clone(),
     );
-    let handler = crate::matter::model::handler_from(vec![entry], rand::rng(), app.clone());
+    let handler =
+        crate::matter::model::handler_from(&matter, vec![entry], rand::rng(), app.clone());
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let ctx = Context::new(&im, 57, bridged::AttributeId::NodeLabel as _);
     assert!(!bridged.reachable(&ctx).unwrap());
@@ -240,7 +242,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
 
         // An empty publication serves only the root and aggregator.
         {
-            let handler = model_handler(vec![]);
+            let handler = model_handler(&matter, vec![]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -260,7 +262,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
         let multi_entry = || entry(&multi, 4, &[("outlet_1", 5), ("outlet_2", 6), ("usb", 7)]);
         let stored = multi_entry().identity;
         {
-            let handler = model_handler(vec![single_entry(&single), multi_entry()]);
+            let handler = model_handler(&matter, vec![single_entry(&single), multi_entry()]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -404,7 +406,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
         rejoined.set_availability(Availability::Available);
         rejoined.functions()[0].observe(false);
         {
-            let handler = model_handler(vec![single_entry(&rejoined), multi_entry()]);
+            let handler = model_handler(&matter, vec![single_entry(&rejoined), multi_entry()]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -450,7 +452,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
 
         // A new publication omits the multi-function endpoint.
         {
-            let handler = model_handler(vec![single_entry(&rejoined)]);
+            let handler = model_handler(&matter, vec![single_entry(&rejoined)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -479,7 +481,7 @@ fn frozen_topology_and_replacement_instances_keep_independent_channels() {
             entries.push(entry(&device, endpoint, &[("main", endpoint + 1)]));
         }
         {
-            let handler = model_handler(entries);
+            let handler = model_handler(&matter, entries);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let ctx = Context::new(&im, 6, 0);
             let mut run = pin!(handler.run(&ctx));
@@ -540,6 +542,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
             .unwrap()
             .clone();
         let handler = crate::matter::model::handler_from(
+            &matter,
             app.matter_configuration().entries,
             rand::rng(),
             app.clone(),

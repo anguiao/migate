@@ -74,7 +74,7 @@ macro_rules! setup {
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(store.matter()));
         let functions = $device.functions().iter().enumerate().map(|(index, function)| (function.function_key().id.as_str(), index as u16 + 3)).collect::<Vec<_>>();
-        let $handler = model_handler(vec![entry(&$device, 2, &functions)]);
+        let $handler = model_handler(&matter, vec![entry(&$device, 2, &functions)]);
         let $im = InteractionModel::new(&matter, &crypto, &buffers, &$handler, &kv, &state);
     };
 }

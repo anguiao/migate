@@ -43,7 +43,7 @@ fn dynamic_boot(directory: &Path, boot: u16, previous: Option<u32>) -> u32 {
         multi_entry.identity.configuration_version = boot as u32;
         entries.push(multi_entry);
     }
-    let handler = model_handler(entries);
+    let handler = model_handler(&matter, entries);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();

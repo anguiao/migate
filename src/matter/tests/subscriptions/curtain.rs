@@ -41,7 +41,7 @@ fn curtain_live_subscription_handles_noop_write_and_actual_observations() {
             function.observe_curtain(CurtainValue::CurrentPosition(20), Some(1), 1);
             function.observe_curtain(CurtainValue::TargetPosition(80), Some(1), 1);
             function.observe_curtain(CurtainValue::Status(CurtainMotion::Opening), Some(1), 1);
-            let handler = model_handler(vec![single_entry(&device)]);
+            let handler = model_handler(&matter, vec![single_entry(&device)]);
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();

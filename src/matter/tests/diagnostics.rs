@@ -89,7 +89,7 @@ fn failed_reads_report_the_path_without_reporting_values_or_buffer_retries() {
     let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let handler = model_handler(vec![single_entry(&device)]);
+    let handler = model_handler(&matter, vec![single_entry(&device)]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let ctx = Context::new(&im, 6, 0);
 

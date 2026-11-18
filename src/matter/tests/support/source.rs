@@ -3,7 +3,7 @@
 use super::{Context, read_bytes, report_value};
 use crate::{
     app::App,
-    matter::{model, storage::StoreAdapter},
+    matter::{PublishedEntry, model, storage::StoreAdapter},
     storage::Store,
 };
 use rs_matter::{
@@ -15,7 +15,7 @@ use rs_matter::{
             bridged_device_basic_information::AttributeId as BridgedAttribute,
             color_control::AttributeId as ColorAttribute,
         },
-        devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
+        devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM, TEST_DEV_DET},
     },
     error::ErrorCode,
     im::{InteractionModel, InteractionModelState},
@@ -25,8 +25,40 @@ use rs_matter::{
 };
 use std::{future::Future, pin::Pin, rc::Rc};
 
+/// Retain the publication inputs while each operation owns its Matter instance.
+struct PublishedModel {
+    entries: Vec<PublishedEntry>,
+    app: Rc<App>,
+}
+
+impl PublishedModel {
+    fn new(entries: Vec<PublishedEntry>, app: Rc<App>) -> Self {
+        Self { entries, app }
+    }
+
+    fn bind<'a>(&self, matter: &'a Matter<'a>) -> model::Model<'a> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| PublishedEntry {
+                device: entry.device.clone(),
+                identity: entry.identity.clone(),
+            })
+            .collect();
+        model::handler_from(matter, entries, rand::rng(), self.app.clone())
+    }
+
+    fn access<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&rs_matter::dm::Node<'_>) -> R,
+    {
+        let matter = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        self.bind(&matter).access(f)
+    }
+}
+
 pub(crate) struct PublishedLightModel {
-    handler: model::Model,
+    handler: PublishedModel,
     store: Store,
     children: std::collections::BTreeMap<u16, u16>,
 }
@@ -61,7 +93,7 @@ impl PublishedLightModel {
             })
             .collect();
         Self {
-            handler: model::handler_from(entries, rand::rng(), app.clone()),
+            handler: PublishedModel::new(entries, app.clone()),
             store: store.clone(),
             children,
         }
@@ -82,7 +114,8 @@ impl PublishedLightModel {
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(self.store.matter()));
-        let im = InteractionModel::new(&matter, &crypto, &buffers, &self.handler, &kv, &state);
+        let handler = self.handler.bind(&matter);
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let child = self.children[&endpoint];
         let mut values = Vec::new();
         for (cluster, attribute) in [
@@ -92,7 +125,7 @@ impl PublishedLightModel {
         ] {
             values.push(
                 read_bytes(
-                    &self.handler,
+                    &handler,
                     &Context::at(
                         &im,
                         if cluster == 0x39 { endpoint } else { child },
@@ -107,7 +140,7 @@ impl PublishedLightModel {
             );
         }
         let current_mireds = match read_bytes(
-            &self.handler,
+            &handler,
             &Context::at(
                 &im,
                 child,
@@ -138,7 +171,7 @@ impl PublishedLightModel {
 
 /// Exercise source-backed relay endpoints through the real Matter handler.
 pub(crate) struct PublishedRelayModel {
-    handler: model::Model,
+    handler: PublishedModel,
     store: Store,
 }
 
@@ -149,11 +182,7 @@ pub(crate) fn persisted_root_version(store: &Store) -> u32 {
 impl PublishedRelayModel {
     pub(crate) fn new(app: &Rc<App>, store: &Store) -> Self {
         Self {
-            handler: model::handler_from(
-                app.matter_configuration().entries,
-                rand::rng(),
-                app.clone(),
-            ),
+            handler: PublishedModel::new(app.matter_configuration().entries, app.clone()),
             store: store.clone(),
         }
     }
@@ -249,12 +278,9 @@ impl PublishedRelayModel {
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(self.store.matter()));
-        let im = InteractionModel::new(&matter, &crypto, &buffers, &self.handler, &kv, &state);
-        read_bytes(
-            &self.handler,
-            &Context::at(&im, endpoint, cluster, attribute),
-        )
-        .await
+        let handler = self.handler.bind(&matter);
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
+        read_bytes(&handler, &Context::at(&im, endpoint, cluster, attribute)).await
     }
 
     pub(crate) async fn power(&self, endpoint: u16) -> Result<bool, rs_matter::error::Error> {
@@ -331,13 +357,14 @@ impl PublishedRelayModel {
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(self.store.matter()));
-        let im = InteractionModel::new(&matter, &crypto, &buffers, &self.handler, &kv, &state);
+        let handler = self.handler.bind(&matter);
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let mut bytes = [0; 128];
         let mut writer = WriteBuf::new(&mut bytes);
         writer.utf8(&TLVTag::Anonymous, label)?;
         let mut ctx = Context::at(&im, endpoint, 0x39, BridgedAttribute::NodeLabel as u32);
         ctx.data = TLVElement::new(writer.as_slice());
-        self.handler.write(&ctx).await
+        handler.write(&ctx).await
     }
 
     pub(crate) async fn invoke(
@@ -352,11 +379,12 @@ impl PublishedRelayModel {
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(self.store.matter()));
-        let im = InteractionModel::new(&matter, &crypto, &buffers, &self.handler, &kv, &state);
+        let handler = self.handler.bind(&matter);
+        let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
         let mut ctx = Context::at(&im, endpoint, 6, 0);
         ctx.command.cmd_id = command;
         let mut bytes = [0; 128];
-        self.handler
+        handler
             .invoke(
                 &ctx,
                 InvokeReplyInstance::new(&ctx.command, WriteBuf::new(&mut bytes)),
@@ -370,6 +398,7 @@ pub(crate) async fn running_parts(port: u16) -> Vec<u16> {
     use rs_matter::{
         crypto::test_only_crypto,
         dm::{clusters::decl::descriptor::DescriptorClient, devices::test::TEST_DEV_DET},
+        sc::ExchangeInitiator,
         transport::{
             exchange::Exchange,
             network::{Address, NoNetwork},
@@ -391,8 +420,10 @@ pub(crate) async fn running_parts(port: u16) -> Vec<u16> {
             panic!("Matter test client exited")
         },
         async {
-            Exchange::initiate_pase(&client, &crypto, address, 20_202_021)
+            let session = Exchange::establish_pase(&client, &crypto, address, 20_202_021)
                 .await
+                .unwrap();
+            Exchange::initiate_for_session(client.transport(), &crypto, session)
                 .unwrap()
                 .descriptor()
                 .parts_list_read_with(1, |value| {

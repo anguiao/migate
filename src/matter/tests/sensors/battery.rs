@@ -17,7 +17,7 @@ fn battery_capability_adds_power_source_to_the_parent_only() {
                 .iter()
                 .map(|kind| (kind.dtype, kind.drev))
                 .collect::<Vec<_>>(),
-            [(0x0013, 1), (0x0011, 1)]
+            [(0x0013, 3), (0x0011, 1)]
         );
         let power = parent
             .clusters
@@ -250,10 +250,13 @@ fn multiple_sensor_parents_keep_isolated_battery_state_and_endpoint_lists() {
     let kv = matter.kv(StoreAdapter::new(store.matter()));
     let first = battery_sensor_named("one", "Sensor One", true);
     let second = battery_sensor_named("two", "Sensor Two", true);
-    let handler = model_handler(vec![
-        entry(&first, 2, &[("temperature", 3), ("humidity", 4)]),
-        entry(&second, 5, &[("temperature", 6), ("humidity", 7)]),
-    ]);
+    let handler = model_handler(
+        &matter,
+        vec![
+            entry(&first, 2, &[("temperature", 3), ("humidity", 4)]),
+            entry(&second, 5, &[("temperature", 6), ("humidity", 7)]),
+        ],
+    );
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     block_on(async {
         first.observe_battery(11.0, Some(1), 2).unwrap();

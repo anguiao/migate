@@ -36,9 +36,10 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                     mode: Some(LightMode::Rgb),
                 })
                 .unwrap();
-            let handler = crate::matter::tests::support::model_handler(vec![
-                crate::matter::tests::support::single_entry(&device),
-            ]);
+            let handler = crate::matter::tests::support::model_handler(
+                &matter,
+                vec![crate::matter::tests::support::single_entry(&device)],
+            );
             let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
             let incoming = Pipe::default();
             let outgoing = Pipe::default();
@@ -337,7 +338,7 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
     matter.startup(&kv).unwrap();
     let root_version = if boot == 1 { 1 } else { 2 };
     let settings = model::prepare_basic_info(&kv, root_version).unwrap();
-    matter.with_state(|state| state.basic_info_settings = settings);
+    matter.with_state(|state| *state.basic_info_settings = settings);
     let client = Matter::new(&TEST_DEV_DET, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
     connect(&matter, SERVER_ID, CLIENT_ID, boot + 30);
     connect(&client, CLIENT_ID, SERVER_ID, boot + 30);
@@ -356,7 +357,7 @@ fn frozen_light_boot(directory: &Path, boot: u16, previous: Option<u32>) -> (u32
     device.set_availability(Availability::Available);
     let mut entry = single_entry(&device);
     entry.identity.configuration_version = root_version;
-    let handler = model_handler(vec![entry]);
+    let handler = model_handler(&matter, vec![entry]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();

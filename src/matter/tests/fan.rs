@@ -19,7 +19,8 @@ mod reports;
 fn fan_endpoint_publishes_confirmed_device_type_cluster_and_shape() {
     for swing in [false, true] {
         let device = fan_device("fan", swing).0;
-        let model = model_handler(vec![single_entry(&device)]);
+        let matter = crate::matter::tests::support::test_matter();
+        let model = model_handler(&matter, vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = node.endpoint(2).unwrap();
             assert!(

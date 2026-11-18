@@ -22,12 +22,12 @@ use rs_matter::{
     fabric::GroupKeyMapping,
     im::{
         AttrDataTag, AttrPath, AttrResp, CmdDataTag, CmdResp, EventPath, EventResp, GenericPath,
-        IMStatusCode, InteractionModel, InteractionModelState, OpCode, StatusResp,
-        client::{ImClient, SubscribeOutcome, TxOutcome},
-        encoding::ReportDataResp,
+        IMStatusCode, ImClient, InteractionModel, InteractionModelState, OpCode, StatusResp,
+        SubscribeOutcome, TxOutcome, encoding::ReportDataResp,
     },
     persist::PERSISTENT_SUBSCRIPTIONS_START,
     respond::DefaultResponder,
+    sc::ExchangeInitiator,
     tlv::{FromTLV, TLVElement, TLVTag, TLVWrite, ToTLV},
     transport::{
         exchange::{Exchange, MatterBuffers},
@@ -102,7 +102,7 @@ fn connect(matter: &Matter<'_>, local: u64, peer: u64, session_id: u16) {
                 .unwrap();
         });
     }
-    let mut session = ReservedSession::reserve_now(matter, test_only_crypto()).unwrap();
+    let mut session = ReservedSession::reserve_now(matter.transport(), test_only_crypto()).unwrap();
     session
         .update(
             local,
@@ -142,7 +142,7 @@ async fn subscribe(client: &Matter<'_>, initial: bool) -> Result<u32, Error> {
                 sender = builder
                     .keep_subs(false)?
                     .min_int_floor(0)?
-                    .max_int_ceil(60)?
+                    .max_int_ceil(600)?
                     .attr_requests_from(&paths)?
                     .fabric_filtered(false)?
                     .end()?;
@@ -162,7 +162,10 @@ async fn subscribe(client: &Matter<'_>, initial: bool) -> Result<u32, Error> {
         );
         match chunk.complete().await? {
             SubscribeOutcome::NextChunk(next) => chunk = next,
-            SubscribeOutcome::Established(subscription) => return Ok(subscription.subscription_id),
+            SubscribeOutcome::Established(subscription) => {
+                assert_eq!(subscription.max_int, 120);
+                return Ok(subscription.subscription_id);
+            }
         }
     }
 }
@@ -181,7 +184,7 @@ async fn expect_report(
     power: Option<bool>,
     reachable: Option<bool>,
 ) -> Result<(), Error> {
-    let mut exchange = Exchange::accept(client).await?;
+    let mut exchange = Exchange::accept(client.transport()).await?;
     exchange.recv_fetch().await?;
     {
         let rx = exchange.rx()?;
@@ -679,7 +682,7 @@ async fn read_paths(client: &Matter<'_>, paths: &[AttrPath]) -> Result<Observed,
     }
 }
 async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Error> {
-    let mut exchange = Exchange::accept(client).await?;
+    let mut exchange = Exchange::accept(client.transport()).await?;
     let mut observed = Observed::default();
     loop {
         exchange.recv_fetch().await?;

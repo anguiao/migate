@@ -35,9 +35,9 @@ macro_rules! setup_light {
         let store = Store::open(dir.path()).unwrap();
         let identity = store.load_identity().unwrap();
         let ($device, mut $receiver) = $source;
-        let $handler = model_handler(vec![crate::matter::tests::support::single_entry(&$device)]);
         let info = basic_info(&identity);
         let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
+        let $handler = model_handler(&matter, vec![crate::matter::tests::support::single_entry(&$device)]);
         let buffers: MatterBuffers = MatterBuffers::new();
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);

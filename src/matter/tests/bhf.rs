@@ -42,7 +42,7 @@ fn two_independent_fan_endpoints_keep_speed_max_two_and_off_low_high() {
     let state: InteractionModelState = InteractionModelState::new();
     let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
     let kv = matter.kv(StoreAdapter::new(store.matter()));
-    let handler = model_handler(vec![frozen]);
+    let handler = model_handler(&matter, vec![frozen]);
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
 
     block_on(async {

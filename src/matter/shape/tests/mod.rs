@@ -187,7 +187,8 @@ fn air_conditioner_shape_tracks_the_published_types_and_thermostat_features() {
             .unwrap(),
         )
         .0;
-        let model = model_handler(vec![single_entry(&device)]);
+        let matter = crate::matter::tests::support::test_matter();
+        let model = model_handler(&matter, vec![single_entry(&device)]);
         let shape = fixed_shape(&[description]);
         let FixedKind::AirConditioner {
             device_types,

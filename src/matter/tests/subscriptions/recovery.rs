@@ -28,9 +28,10 @@ fn recovery_race_boot(directory: &Path, previous_subscription: Option<u32>) -> u
     let (device, _receiver) = super::super::test_device();
     device.set_availability(Availability::Available);
     device.functions()[0].observe(false);
-    let handler = crate::matter::tests::support::model_handler(vec![
-        crate::matter::tests::support::single_entry(&device),
-    ]);
+    let handler = crate::matter::tests::support::model_handler(
+        &matter,
+        vec![crate::matter::tests::support::single_entry(&device)],
+    );
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();

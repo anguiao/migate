@@ -1,6 +1,7 @@
 use super::*;
 
-pub(super) struct FunctionHandler {
+pub(super) struct FunctionHandler<'a> {
+    matter: &'a Matter<'a>,
     groups: Dataver,
     identify: identify::IdentifyHandler,
     pub(super) kind: FunctionHandlerKind,
@@ -21,8 +22,13 @@ pub(super) enum FunctionHandlerKind {
     Contact(states::ContactHandler),
     Occupancy(states::OccupancyHandler),
 }
-impl FunctionHandler {
-    pub(super) fn new(function: Function, endpoint: u16, versions: Versions) -> Self {
+impl<'a> FunctionHandler<'a> {
+    pub(super) fn new(
+        matter: &'a Matter<'a>,
+        function: Function,
+        endpoint: u16,
+        versions: Versions,
+    ) -> Self {
         let kind = match function.description().kind {
             FunctionKind::Relay => unreachable!("relay accessories have independent endpoints"),
             FunctionKind::Contact => FunctionHandlerKind::Contact(states::ContactHandler::new(
@@ -131,6 +137,7 @@ impl FunctionHandler {
             )),
         };
         Self {
+            matter,
             groups: Dataver::new(versions.groups),
             identify: identify::IdentifyHandler::new(Dataver::new(versions.identify)),
             kind,
@@ -242,6 +249,7 @@ impl FunctionHandler {
                 Async(
                     groups::GroupsHandler::new_with_identify(
                         Dataver::new(self.groups.get()),
+                        self.matter,
                         &self.identify,
                     )
                     .adapt(),
@@ -254,7 +262,7 @@ impl FunctionHandler {
             .chain(matcher, &self.kind)
     }
 }
-impl AsyncHandler for FunctionHandler {
+impl AsyncHandler for FunctionHandler<'_> {
     fn bump_dataver(&self, _ctx: impl MatchContext) { /* Model owns the retained cluster versions. */
     }
     async fn read(&self, ctx: impl ReadContext, reply: impl ReadReply) -> Result<(), Error> {

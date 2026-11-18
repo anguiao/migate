@@ -36,9 +36,10 @@ fn run_boot(directory: &Path, boot: u16, previous_subscription: Option<u32>) -> 
     let initial = boot == 3;
     let rejection = RefCell::new(None::<CommandError>);
     let accepted = Cell::new(0);
-    let handler = crate::matter::tests::support::model_handler(vec![
-        crate::matter::tests::support::single_entry(&device),
-    ]);
+    let handler = crate::matter::tests::support::model_handler(
+        &matter,
+        vec![crate::matter::tests::support::single_entry(&device)],
+    );
     let im = InteractionModel::new(&matter, &crypto, &buffers, &handler, &kv, &state);
     let incoming = Pipe::default();
     let outgoing = Pipe::default();

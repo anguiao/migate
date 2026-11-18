@@ -40,8 +40,9 @@ fn topology_and_identity_are_fixed() {
     assert_eq!(info.serial_no, identity.bridge_id);
     assert_eq!(info.unique_id, identity.bridge_id);
     assert_eq!(info.product_name, "MiGate");
+    let matter = test_matter();
     assert_eq!(
-        model_handler(vec![single_entry(&test_device().0)]).access(|node| node
+        model_handler(&matter, vec![single_entry(&test_device().0)]).access(|node| node
             .endpoints
             .iter()
             .map(|e| e.id)
@@ -52,7 +53,8 @@ fn topology_and_identity_are_fixed() {
 
 #[test]
 fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
-    let model = model_handler(vec![single_entry(&test_device().0)]);
+    let matter = test_matter();
+    let model = model_handler(&matter, vec![single_entry(&test_device().0)]);
     model.access(|node| {
         let endpoint = &node.endpoints[2];
         assert!(
@@ -111,7 +113,8 @@ fn plug_metadata_only_declares_basic_on_off_and_supported_events() {
 fn light_metadata_declares_only_real_level_temperature_and_xy_controls() {
     for rgb in [false, true] {
         let (device, _receiver) = support::light(rgb);
-        let model = model_handler(vec![single_entry(&device)]);
+        let matter = test_matter();
+        let model = model_handler(&matter, vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = &node.endpoints[2];
             assert!(
@@ -202,7 +205,8 @@ fn on_off_and_dimmable_light_metadata_use_their_standard_device_types() {
         (LightProfile::Dimmable, 0x0101u16, true),
     ] {
         let (device, _receiver) = support::light_with(profile);
-        let model = model_handler(vec![single_entry(&device)]);
+        let matter = test_matter();
+        let model = model_handler(&matter, vec![single_entry(&device)]);
         model.access(|node| {
             let endpoint = &node.endpoints[2];
             assert!(

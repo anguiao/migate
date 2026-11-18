@@ -177,12 +177,13 @@ const OCCUPANCY_CLUSTERS: &[rs_matter::dm::Cluster<'static>] = clusters!(
     <states::OccupancyHandler as occupancy_sensing::ClusterHandler>::CLUSTER
 );
 
-pub(super) struct Entry {
+pub(super) struct Entry<'a> {
+    pub(super) matter: &'a Matter<'a>,
     pub(super) endpoint: u16,
     pub(super) descriptor: Dataver,
-    pub(super) role: Role,
+    pub(super) role: Role<'a>,
 }
-pub(super) enum Role {
+pub(super) enum Role<'a> {
     Relay {
         device_type: crate::configuration::RelayType,
         function: OnOffHandler,
@@ -198,13 +199,13 @@ pub(super) enum Role {
         battery: Option<sensors::BatteryHandler>,
     },
     Child {
-        function: FunctionHandler,
+        function: FunctionHandler<'a>,
         tag: u8,
         label: String,
     },
 }
-impl Role {
-    fn function(&self) -> Option<&FunctionHandler> {
+impl Role<'_> {
+    fn function(&self) -> Option<&FunctionHandler<'_>> {
         match self {
             Self::Child { function, .. } => Some(function),
             Self::Parent { .. } | Self::Relay { .. } => None,
@@ -240,7 +241,7 @@ macro_rules! dispatch {
                 AsyncHandler::$method(&EmptyHandler
                     .chain(|_, cluster| cluster == 0x39, Async(bridged::HandlerAdaptor(bridged)))
                     .chain(binding_match, Async(BindingHandler::new(Dataver::new(binding.get()), $entry.endpoint, bindings).adapt()))
-                    .chain(groups_match, Async(groups::GroupsHandler::new_with_identify(Dataver::new(groups.get()), identify).adapt()))
+                    .chain(groups_match, Async(groups::GroupsHandler::new_with_identify(Dataver::new(groups.get()), $entry.matter, identify).adapt()))
                     .chain(identify_match, Async(identify::HandlerAdaptor(identify)))
                     .chain(|_, cluster| cluster == 6, on_off::HandlerAsyncAdaptor(function)), $($arg),*
                 ).await
@@ -270,7 +271,7 @@ macro_rules! dispatch {
 }
 
 /// Why a light cannot map to any of the four standard Matter light types.
-impl Entry {
+impl Entry<'_> {
     fn descriptor(&self) -> desc::DescHandler<'_> {
         desc::DescHandler::new_matching(Dataver::new(self.descriptor.get()), self)
     }
@@ -459,14 +460,14 @@ impl Entry {
         dispatch!(self, run(ctx))
     }
 }
-impl std::fmt::Debug for Entry {
+impl std::fmt::Debug for Entry<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PartsMatcher")
             .field("endpoint", &self.endpoint)
             .finish()
     }
 }
-impl desc::PartsMatcher for Entry {
+impl desc::PartsMatcher for Entry<'_> {
     fn matches(&self, _our_endpoint: u16, endpoint: u16) -> bool {
         match &self.role {
             Role::Parent { children, .. } => children.contains(&endpoint),

@@ -69,9 +69,10 @@ macro_rules! fan_model {
         let state: InteractionModelState = InteractionModelState::new();
         let crypto = default_crypto(rand::rng(), DAC_PRIVKEY);
         let kv = matter.kv(StoreAdapter::new(store.matter()));
-        let $handler = $crate::matter::tests::support::model_handler(vec![
-            $crate::matter::tests::support::single_entry($device),
-        ]);
+        let $handler = $crate::matter::tests::support::model_handler(
+            &matter,
+            vec![$crate::matter::tests::support::single_entry($device)],
+        );
         let $im = InteractionModel::new(&matter, &crypto, &buffers, &$handler, &kv, &state);
     };
 }

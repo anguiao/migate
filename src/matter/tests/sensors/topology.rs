@@ -41,7 +41,11 @@ fn mixed_light_children_publish_their_real_light_profiles() {
             )
             .unwrap(),
         );
-        let handler = model_handler(vec![entry(&device, 2, &[("main", 3), ("temperature", 4)])]);
+        let matter = crate::matter::tests::support::test_matter();
+        let handler = model_handler(
+            &matter,
+            vec![entry(&device, 2, &[("main", 3), ("temperature", 4)])],
+        );
         handler.access(|node| {
             let light = node
                 .endpoints
@@ -84,7 +88,7 @@ fn sensor_publishes_parent_and_two_measurement_child_endpoints() {
                 .iter()
                 .map(|kind| (kind.dtype, kind.drev))
                 .collect::<Vec<_>>(),
-            [(0x0013, 1)]
+            [(0x0013, 3)]
         );
         let parent_clusters = parent
             .clusters
@@ -276,7 +280,8 @@ fn a_member_with_hidden_control_lists_only_visible_measurement_endpoints_for_sha
         .with_battery(),
     );
     setup!(_baseline, _model, im);
-    let handler = model_handler(vec![entry(&device, 2, &[("illuminance", 4)])]);
+    let matter = crate::matter::tests::support::test_matter();
+    let handler = model_handler(&matter, vec![entry(&device, 2, &[("illuminance", 4)])]);
     handler.access(|node| {
         assert!(node.endpoints.iter().any(|endpoint| endpoint.id == 2));
         assert!(node.endpoints.iter().any(|endpoint| endpoint.id == 4));
@@ -321,7 +326,8 @@ fn single_control_keeps_identity_and_shared_battery_on_its_parent() {
         .unwrap()
         .with_battery(),
     );
-    let handler = model_handler(vec![entry(&device, 2, &[("outlet", 3)])]);
+    let matter = crate::matter::tests::support::test_matter();
+    let handler = model_handler(&matter, vec![entry(&device, 2, &[("outlet", 3)])]);
     handler.access(|node| {
         let parent = node.endpoint(2).unwrap();
         let child = node.endpoint(3).unwrap();

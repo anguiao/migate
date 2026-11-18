@@ -17,6 +17,8 @@ cargo run --locked
 
 启动时程序先采集设备状态，Matter 服务最多等待 20 秒；家庭中已配对的网桥在此期间可能暂时不可用。未完成或失败的设备继续在后台恢复，可用 `status` 和 `status DID` 查看状态及读取问题。新设备尚未接入时，`list` 中的 `DID (名称): pending (原因)` 表示当前待处理问题；用同一 DID 执行 `status DID` 可查看相同原因。等待描述获取或配置问题恢复后再检查，完全未知的 DID 才会提示 `Unknown device DID.`。
 
+已配对网桥重启后，Home 还需恢复控制连接和状态订阅。首次从旧版升级时，Home 可能仍按旧订阅等待约 10 分钟；新订阅使用 120 秒的最大报告间隔上限。等待期间保留原数据目录和 Home 配对，可用米家及 `status DID` 核对设备状态。
+
 也可以构建后直接运行：
 
 ```sh
@@ -267,6 +269,8 @@ RUST_LOG=info,migate=debug cargo run --locked
 日志写入标准错误，终端命令结果和配对信息写入标准输出。
 
 Matter 属性读取失败日志显示端点、簇和属性编号及处理阶段，不包含属性值。排查中枢请求超时时，可用 `RUST_LOG=info,migate::xiaomi::central::session::dispatch=debug` 启动，在 `Gateway request completed` 中查看操作、设备、请求编号及阶段。
+
+排查 Home 重启恢复时，可用 `RUST_LOG=info,rs_matter_im=debug` 启动，核对订阅的 `max_int_secs` 和 `primed` 日志。控制回执与状态订阅分别检查：从 Home 操作后核对米家状态，再从米家改变状态，观察 Home 是否自行更新。
 
 若默认端口被占用，可通过 `MIGATE_MATTER_PORT` 设置其他端口；设为 `0` 时由系统分配，启动日志会显示实际端口。运行多个网桥时，分别使用独立数据目录和不同端口。
 
