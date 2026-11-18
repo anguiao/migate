@@ -62,7 +62,7 @@ fn make_plan(
             current,
             current_derived: &current.derive(),
             facts,
-            revocations: vec![],
+            revoked: Default::default(),
             new_identities: identities,
         },
         |functions, battery| {

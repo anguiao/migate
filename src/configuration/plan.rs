@@ -21,16 +21,12 @@ pub(crate) fn plan<Shape: PartialEq>(
         current,
         current_derived,
         mut facts,
-        revocations,
+        revoked,
         mut new_identities,
     } = input;
     let Some(scope) = facts.scope else {
         return Err(PlanError::InvalidInput("The current home scope is missing"));
     };
-    let revoked = revocations
-        .into_iter()
-        .map(|revocation| revocation.key)
-        .collect::<BTreeSet<_>>();
     facts
         .devices
         .retain(|device| !revoked.contains(&device.description.raw.key) || device.fresh);

@@ -124,7 +124,7 @@ pub(crate) fn planned_from(
             current: &current,
             current_derived: &current_derived,
             facts,
-            revocations: Vec::new(),
+            revoked: Default::default(),
             new_identities,
         },
         |functions, battery| matter::fixed_shape_with_battery(functions.iter().copied(), battery),

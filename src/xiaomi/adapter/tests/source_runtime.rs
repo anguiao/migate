@@ -2,6 +2,91 @@ use super::*;
 use crate::device::TemperatureInterval;
 use crate::xiaomi::capability::PropertyBinding;
 
+#[test]
+fn readmission_commits_its_own_description_after_the_held_batch_is_ready() {
+    let rig = Rig::new(true, &["one", "two"]);
+    let context = &rig.source.context;
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let key = DeviceKey::new("xiaomi", "one");
+    let next_description = |did: &str| {
+        let mut raw = context.directory.borrow().devices[did]
+            .latest_description
+            .as_ref()
+            .unwrap()
+            .raw
+            .clone();
+        raw.instance_type = "urn:miot-spec-v2:device:outlet:0000A002:example:3".into();
+        raw.instance["type"] = json!(raw.instance_type);
+        raw.recognize(false).unwrap()
+    };
+    let one = next_description("one");
+    let two = next_description("two");
+    let infos = [&one, &two]
+        .map(|description| {
+            let raw = &description.raw;
+            (
+                raw.key.id.clone(),
+                crate::xiaomi::mijia::CloudDeviceInfo {
+                    did: raw.key.id.clone(),
+                    model: raw.model.clone(),
+                    instance_type: raw.instance_type.clone(),
+                    online: true,
+                    lan: crate::xiaomi::mijia::LanCredentials::NotIp,
+                },
+            )
+        })
+        .into_iter()
+        .collect();
+    let db = rusqlite::Connection::open(rig.store.path()).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER block_withdrawal BEFORE UPDATE ON bridge_configuration
+        BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+    )
+    .unwrap();
+    context.remove("one").unwrap();
+    let withdrawal = app.plan().unwrap().unwrap();
+    assert!(app.apply(app.prepare(withdrawal)).is_err());
+    context.directory.borrow_mut().confirm_members(
+        &["one".to_owned(), "two".to_owned()].into_iter().collect(),
+        infos,
+        None,
+    );
+
+    // The previous configuration is still on disk through both stages of the new admission.
+    for description in [None, Some(one.clone())] {
+        if let Some(description) = description {
+            context
+                .directory
+                .borrow_mut()
+                .accept_description("one", description);
+        }
+        let plan = app.plan().unwrap().unwrap();
+        assert!(plan.clear_revocations.is_empty());
+        assert!(plan.configuration.device(&key).unwrap().native.is_none());
+        assert!(app.apply(app.prepare(plan)).is_err());
+        assert!(context.directory.borrow().devices["one"].work.is_none());
+    }
+
+    db.execute_batch("DROP TRIGGER block_withdrawal").unwrap();
+    context
+        .directory
+        .borrow_mut()
+        .accept_description("two", two);
+    let plan = app.plan().unwrap().unwrap();
+    assert_eq!(plan.clear_revocations, [key]);
+    app.apply(app.prepare(plan)).unwrap();
+    assert_eq!(
+        context.directory.borrow().devices["one"]
+            .work
+            .as_ref()
+            .unwrap()
+            .native
+            .instance_type(),
+        one.raw.instance_type
+    );
+    assert!(rig.store.devices().load_revocations().unwrap().is_empty());
+}
+
 /// A group whose native control description is unchanged must keep its
 /// installed runtime when only the served logical description (member-derived
 /// capability interval) changes. Rebuilding native subscriptions here is the

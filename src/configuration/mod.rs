@@ -156,6 +156,7 @@ pub(crate) struct DerivedConfiguration {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceDevice {
     pub description: SourceDescription,
+    /// This description comes from a currently confirmed admission and can clear its revocation.
     pub fresh: bool,
 }
 
@@ -237,7 +238,7 @@ pub(crate) struct PlanInput<'a> {
     pub current: &'a CommittedConfiguration,
     pub current_derived: &'a DerivedConfiguration,
     pub facts: SourceFacts,
-    pub revocations: Vec<Revocation>,
+    pub revoked: BTreeSet<DeviceKey>,
     pub new_identities: BTreeMap<DeviceKey, String>,
 }
 

@@ -361,7 +361,7 @@ fn plan_with_revocations(
             current: &current,
             current_derived: &current_derived,
             facts,
-            revocations,
+            revoked: revocations.into_iter().map(|record| record.key).collect(),
             new_identities,
         },
         |functions, battery| matter::fixed_shape_with_battery(functions.iter().copied(), battery),

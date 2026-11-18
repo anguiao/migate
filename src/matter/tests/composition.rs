@@ -58,7 +58,7 @@ fn plan(current: &CommittedConfiguration, value: Value) -> Plan {
             current,
             current_derived: &derived,
             facts,
-            revocations: vec![],
+            revoked: Default::default(),
             new_identities,
         },
         |functions, battery| {

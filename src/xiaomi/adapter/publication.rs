@@ -213,51 +213,65 @@ impl SourceHandle {
 
     /// Collect the latest pure source facts and the serving entries. No
     /// running device is created here.
-    pub(crate) fn snapshot(&self, current: &CommittedConfiguration) -> SourceFacts {
+    pub(crate) fn snapshot(
+        &self,
+        current: &CommittedConfiguration,
+        revoked: &BTreeSet<DeviceKey>,
+    ) -> SourceFacts {
         let directory = self.0.directory.borrow();
         let scope = directory.scope.clone();
         let same_scope = current.scope == scope;
         // A configured target awaiting a complete matching description holds
-        // the whole batch. Withdrawn sources are absent and never held back.
-        let waiting = same_scope
-            && current.descriptions.iter().any(|committed| {
-                let did = &committed.key.id;
-                let Some(slot) = directory.devices.get(did) else {
-                    return false;
-                };
-                directory
-                    .group(did)
-                    .is_some_and(|group| group.instance_type.is_none())
-                    || directory
-                        .description_target(did)
-                        .as_ref()
-                        .is_some_and(|(model, urn)| {
-                            slot.latest_description.as_ref().is_none_or(|description| {
-                                description.raw.model != *model
-                                    || description.raw.instance_type != *urn
-                            })
+        // the whole batch only while its original source authority is retained.
+        let awaiting_target = |did: &str, slot: &DeviceSlot| {
+            directory
+                .group(did)
+                .is_some_and(|group| group.instance_type.is_none())
+                || directory
+                    .description_target(did)
+                    .as_ref()
+                    .is_some_and(|(model, urn)| {
+                        slot.latest_description.as_ref().is_none_or(|description| {
+                            description.raw.model != *model || description.raw.instance_type != *urn
                         })
+                    })
+        };
+        let waiting = same_scope
+            && current.descriptions.iter().any(|raw| {
+                !revoked.contains(&raw.key)
+                    && directory
+                        .devices
+                        .get(&raw.key.id)
+                        .is_some_and(|slot| awaiting_target(&raw.key.id, slot))
             });
-        let committed = waiting.then(|| {
+        let devices = if waiting {
             current
                 .source_descriptions()
-                .map(|description| (description.raw.key.id.clone(), description))
-                .collect::<BTreeMap<_, _>>()
-        });
-        let devices = directory
-            .devices
-            .iter()
-            .filter_map(|(did, slot)| {
-                let description = match &committed {
-                    Some(committed) => committed.get(did),
-                    None => slot.latest_description.as_ref(),
-                }?;
-                Some(SourceDevice {
-                    description: description.clone(),
-                    fresh: slot.confirmed,
+                .filter(|description| {
+                    directory.devices.contains_key(&description.raw.key.id)
+                        && !revoked.contains(&description.raw.key)
                 })
-            })
-            .collect();
+                .map(|description| SourceDevice {
+                    description,
+                    fresh: false,
+                })
+                .collect()
+        } else {
+            directory
+                .devices
+                .iter()
+                .filter_map(|(did, slot)| {
+                    let description = slot.latest_description.as_ref()?;
+                    if revoked.contains(&description.raw.key) && awaiting_target(did, slot) {
+                        return None;
+                    }
+                    Some(SourceDevice {
+                        description: description.clone(),
+                        fresh: slot.confirmed,
+                    })
+                })
+                .collect()
+        };
         let mut relay_modes = BTreeMap::new();
         for work in directory
             .devices
@@ -277,6 +291,9 @@ impl SourceHandle {
             .filter_map(|group| {
                 let did = &group.membership.group_did;
                 if waiting && group.active {
+                    if revoked.contains(&DeviceKey::new("xiaomi", did)) {
+                        return None;
+                    }
                     return current
                         .groups
                         .iter()

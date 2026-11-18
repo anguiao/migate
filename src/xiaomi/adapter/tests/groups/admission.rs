@@ -1,6 +1,68 @@
 use super::*;
 
 #[test]
+fn readmitted_group_waits_for_its_new_native_description() {
+    let rig = super::super::support::repair_rig(1, true);
+    block_on(rig.run(|c| async move {
+        super::super::support::repair_ready(&c).await;
+        let key = DeviceKey::new("xiaomi", "group-1");
+        let db = rusqlite::Connection::open(c.store.path()).unwrap();
+        db.execute_batch(
+            "CREATE TRIGGER block_withdrawal BEFORE UPDATE ON bridge_configuration
+            BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+        )
+        .unwrap();
+        let mut group = c.cloud.lock().unwrap().catalog_groups.pop().unwrap();
+        c.context.request_sync();
+        until(|| {
+            !c.context.directory.borrow().devices.contains_key("group-1")
+                && c.publication.failure().is_some()
+        })
+        .await;
+
+        let urn = "urn:miot-spec-v2:device:light:0000A001:mijia-group3:4:0000C802";
+        let mut instance = group_instance();
+        instance["type"] = json!(urn);
+        group["spec_type"] = json!(urn);
+        let (release, gate) = flume::bounded(1);
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.catalog_groups.push(group);
+            cloud.catalog_instances.insert(urn.into(), instance);
+            cloud.instance_gates.insert(urn.into(), gate);
+        }
+        c.context.request_sync();
+        until(|| c.cloud.lock().unwrap().instance_reads.contains_key(urn)).await;
+        db.execute_batch("DROP TRIGGER block_withdrawal").unwrap();
+        let plan = c.publication.plan().unwrap().unwrap();
+        assert!(plan.clear_revocations.is_empty());
+        c.publication.apply(c.publication.prepare(plan)).unwrap();
+        assert!(c.context.physical(&key).is_none());
+        assert!(
+            c.store
+                .devices()
+                .load_revocations()
+                .unwrap()
+                .iter()
+                .any(|record| record.key == key)
+        );
+
+        release.send(()).unwrap();
+        until(|| c.context.physical(&key).is_some()).await;
+        assert_eq!(
+            c.context.directory.borrow().devices["group-1"]
+                .work
+                .as_ref()
+                .unwrap()
+                .native
+                .instance_type(),
+            urn
+        );
+        assert!(c.store.devices().load_revocations().unwrap().is_empty());
+    }));
+}
+
+#[test]
 fn native_group_description_restarts_after_its_loading_token_is_retired() {
     let rig = Rig::new(true, &["one"]);
     rig.clock

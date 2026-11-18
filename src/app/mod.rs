@@ -253,12 +253,18 @@ impl App {
     /// Collect the latest effective input and produce a pure candidate plan.
     /// No activation resource is created here.
     pub(crate) fn plan(&self) -> Result<Option<Plan>, StorageError> {
-        let current = self.current();
-        let snapshot = self.source.snapshot(&current.configuration);
-        if snapshot.scope.is_none() {
+        if !self.source.has_scope() {
             return Ok(None);
         }
-        let revocations = self.store.devices().load_revocations()?;
+        let current = self.current();
+        let revoked = self
+            .store
+            .devices()
+            .load_revocations()?
+            .into_iter()
+            .map(|record| record.key)
+            .collect();
+        let snapshot = self.source.snapshot(&current.configuration, &revoked);
         let committed_derived = current.configuration.derive();
         let mut new_identities = BTreeMap::new();
         for device in &snapshot.devices {
@@ -277,7 +283,7 @@ impl App {
                 current: &current.configuration,
                 current_derived: &committed_derived,
                 facts: snapshot,
-                revocations,
+                revoked,
                 new_identities,
             },
             |functions, battery| {
