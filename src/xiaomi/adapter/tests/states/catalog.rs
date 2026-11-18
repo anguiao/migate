@@ -140,8 +140,10 @@ fn native_state_directory_upgrade_is_atomic_and_restores_current_model_identity(
         let (discovery, _driver) = Discovery::with_events(receiver);
         let (restored, _) =
             XiaomiAdapter::new(c.store.clone(), c.cloud_client.clone(), discovery).unwrap();
-        let app =
-            Rc::new(crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap());
+        let app = Rc::new(crate::app::App::open(
+            restored.source_handle(),
+            c.store.clone(),
+        ));
         assert_eq!(app.current().configuration, current);
         let restored_physical = restored.context.physical(&key).unwrap();
         assert_eq!(

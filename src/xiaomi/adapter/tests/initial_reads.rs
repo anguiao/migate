@@ -20,7 +20,7 @@ fn restored_relays_wait_for_power_and_mode_only_on_published_channels() {
         ))
         .unwrap(),
     );
-    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone());
     let panel = work(&rig.source.context, "one").physical();
     for (id, mode) in [
         ("relay:2", RelayMode::Wired),
@@ -35,7 +35,7 @@ fn restored_relays_wait_for_power_and_mode_only_on_published_channels() {
     for bindings in [[POWER, mode], [mode, POWER]] {
         let (restored, _) = rig.reopen_adapter();
         let source = restored.source_handle();
-        let restarted = crate::app::App::open(source.clone(), rig.store.clone()).unwrap();
+        let restarted = crate::app::App::open(source.clone(), rig.store.clone());
         assert_eq!(restarted.matter_configuration().entries.len(), 1);
         let panel = work(&restored.context, "one");
         for binding in bindings {

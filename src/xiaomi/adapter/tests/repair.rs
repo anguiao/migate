@@ -594,8 +594,7 @@ fn repaired_group_downgrade_after_commit_and_failed_save_keeps_old_plan() {
         let restarted = crate::app::App::open(
             crate::xiaomi::adapter::SourceHandle(c.context.clone()),
             c.store.clone(),
-        )
-        .unwrap();
+        );
         assert!(
             restarted.plan().unwrap().is_none_or(|plan| !plan.rebuild),
             "restart must not widen or rebuild from stale cached inputs"

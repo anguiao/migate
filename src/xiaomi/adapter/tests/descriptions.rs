@@ -104,7 +104,7 @@ fn unsupported_source_is_cached_reported_and_removed_with_the_catalog() {
                 .as_deref(),
             Some("Future device")
         );
-        let app = crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap();
+        let app = crate::app::App::open(restored.source_handle(), c.store.clone());
         assert!(app.plan().unwrap().is_none());
         assert_eq!(c.cloud.lock().unwrap().instance_reads, reads_before_restart);
     }));

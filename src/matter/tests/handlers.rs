@@ -158,7 +158,7 @@ fn bridged_label_is_persisted_and_invalid_writes_preserve_it() {
     let store = Store::open(dir.path()).unwrap();
     let identity = store.load_identity().unwrap();
     let source = AppSource::new(&store, Some(super::test_device().0.description()));
-    let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+    let app = Rc::new(App::open(source.handle.clone(), store.clone()));
     let device = source.physical.as_ref().unwrap();
     let info = basic_info(&identity);
     let matter = Matter::new(&info, TEST_DEV_COMM, &TEST_DEV_ATT, MATTER_PORT);
@@ -522,7 +522,7 @@ fn dynamic_device_names_are_isolated_and_write_failure_preserves_names() {
             &store,
             Some(super::physical("first-name", false).0.description()),
         );
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let second_key = crate::device::DeviceKey::new("xiaomi", "second-name");
         source.describe(super::physical("second-name", true).0.description());
         app.apply(app.prepare(app.plan().unwrap().unwrap()))

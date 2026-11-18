@@ -812,13 +812,10 @@ impl Rig {
         let context = self.source.context.clone();
         let clock = self.clock.clone();
         let stall_timeout = self.stall_timeout;
-        let publication = Rc::new(
-            crate::app::App::open(
-                super::super::super::publication::SourceHandle(context.clone()),
-                self.store.clone(),
-            )
-            .unwrap(),
-        );
+        let publication = Rc::new(crate::app::App::open(
+            super::super::super::publication::SourceHandle(context.clone()),
+            self.store.clone(),
+        ));
         let applying = async {
             if !autoapply {
                 return future::pending::<Result<(), AdapterError>>().await;

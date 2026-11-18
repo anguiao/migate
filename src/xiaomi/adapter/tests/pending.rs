@@ -364,7 +364,7 @@ fn pending_first_plan_keeps_the_description_name_without_an_installed_instance()
 fn pending_successful_unchanged_planning_clears_only_its_previous_failure() {
     let rig = Rig::new(true, &["one"]);
     let source = rig.source.source_handle();
-    let app = crate::app::App::open(source.clone(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(source.clone(), rig.store.clone());
     rig.source
         .context
         .pending_description("one", "description read failed".into());
@@ -469,7 +469,7 @@ fn pending_removed_device_version_overflow_survives_without_a_slot_until_readmis
 fn pending_version_overflow_does_not_disclose_the_previous_home_name() {
     let rig = version_exhausted_rig();
     let source = rig.source.source_handle();
-    let app = crate::app::App::open(source, rig.store.clone()).unwrap();
+    let app = crate::app::App::open(source, rig.store.clone());
     rig.source.context.remove("one").unwrap();
     assert!(app.plan().is_err());
     assert_eq!(

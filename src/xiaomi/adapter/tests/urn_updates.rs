@@ -556,8 +556,10 @@ fn new_urn_commit_failure_keeps_old_views_then_applies_and_restores_the_range() 
         let (discovery, _driver) = Discovery::with_events(receiver);
         let (restored, _) =
             XiaomiAdapter::new(c.store.clone(), c.cloud_client.clone(), discovery).unwrap();
-        let app =
-            Rc::new(crate::app::App::open(restored.source_handle(), c.store.clone()).unwrap());
+        let app = Rc::new(crate::app::App::open(
+            restored.source_handle(),
+            c.store.clone(),
+        ));
         let restored_matter = PublishedLightModel::new(&app, &c.store);
         let attributes = restored_matter.read(endpoint).await;
         assert_eq!(

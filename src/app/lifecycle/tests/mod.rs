@@ -419,8 +419,7 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                 let status = status(&store);
                 let source = AppSource::new(&store, Some(outlet()));
                 source.confirm_all();
-                let app =
-                    Rc::new(crate::app::App::open(source.handle.clone(), store.clone()).unwrap());
+                let app = Rc::new(crate::app::App::open(source.handle.clone(), store.clone()));
                 let committed = app.clone();
                 let updates = Rc::new(Cell::new(0));
                 let source_updates = updates.clone();
@@ -509,7 +508,7 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
             let source = AppSource::new(&store, None);
             source.confirm_all();
             source.read_power(false);
-            let app = Rc::new(crate::app::App::open(source.handle.clone(), store.clone()).unwrap());
+            let app = Rc::new(crate::app::App::open(source.handle.clone(), store.clone()));
             let endpoint = configuration.relay_channels[0].endpoint;
             let (input, mut sender) = {
                 let (a, b) = UnixStream::pair().unwrap();
@@ -593,8 +592,7 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 let status = status(&store);
                 let source = AppSource::new(&store, Some(outlet()));
                 source.confirm_all();
-                let app =
-                    Rc::new(crate::app::App::open(source.handle.clone(), store.clone()).unwrap());
+                let app = Rc::new(crate::app::App::open(source.handle.clone(), store.clone()));
                 rusqlite::Connection::open(store.path())
                     .unwrap()
                     .execute_batch(

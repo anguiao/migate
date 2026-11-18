@@ -79,7 +79,7 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn open(source: SourceHandle, store: Store) -> Result<Self, StorageError> {
+    pub(crate) fn open(source: SourceHandle, store: Store) -> Self {
         let configuration = source.configuration();
         // Serving starts from the committed graph with real revocations
         // overlaid. Planning separately compares the unmodified committed graph
@@ -87,7 +87,7 @@ impl App {
         let derived = source.committed_graph();
         let entries = source.entries(&configuration);
         activate_temperature_bindings(&configuration, &entries);
-        Ok(Self {
+        Self {
             source,
             store,
             current: RefCell::new(Rc::new(EffectiveConfiguration {
@@ -100,7 +100,7 @@ impl App {
             rebuild_pending: Cell::new(false),
             failure: RefCell::new(None),
             pending: Cell::new(false),
-        })
+        }
     }
 
     pub(crate) fn current(&self) -> Rc<EffectiveConfiguration> {

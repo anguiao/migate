@@ -6,8 +6,10 @@ use crate::xiaomi::capability::PropertyBinding;
 fn readmission_commits_its_own_description_after_the_held_batch_is_ready() {
     let rig = Rig::new(true, &["one", "two"]);
     let context = &rig.source.context;
-    let app =
-        Rc::new(crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap());
+    let app = Rc::new(crate::app::App::open(
+        rig.source.source_handle(),
+        rig.store.clone(),
+    ));
     let key = DeviceKey::new("xiaomi", "one");
     let next_description = |did: &str| {
         let mut raw = context.directory.borrow().devices[did]

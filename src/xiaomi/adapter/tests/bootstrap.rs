@@ -5,7 +5,7 @@ use crate::storage::tests::fixtures::identity;
 fn equivalent_startup_recomputation_keeps_versions_and_uses_no_network() {
     let rig = Rig::new(true, &["one"]);
     let before = rig.store.devices().load_configuration().unwrap();
-    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone());
     assert!(app.plan().unwrap().is_none());
     assert_eq!(*app.current().configuration, before);
     assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
@@ -31,7 +31,7 @@ fn previously_unsupported_cached_source_can_gain_its_first_function_on_startup()
         .commit_configuration(&previous, &[])
         .unwrap();
     let (restored, _) = rig.reopen_adapter();
-    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone());
     assert_eq!(app.matter_configuration().entries.len(), 1);
     let plan = app.plan().unwrap().unwrap();
     app.apply(app.prepare(plan)).unwrap();
@@ -77,7 +77,7 @@ fn failed_recognition(context: &super::super::state::Context, did: &str) {
 fn failed_recognition_retains_one_source_without_blocking_updates_or_removal() {
     let rig = Rig::new(true, &["one", "two"]);
     let context = &rig.source.context;
-    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(rig.source.source_handle(), rig.store.clone());
     let before = app.current().configuration.clone();
     let retained = context.directory.borrow().devices["one"]
         .latest_description
@@ -346,7 +346,7 @@ fn startup_reparses_cached_source_before_committing_new_capabilities() {
         .work
         .clone()
         .unwrap();
-    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone());
     let plan = app
         .plan()
         .unwrap()
@@ -406,7 +406,7 @@ fn failed_startup_recomputation_keeps_committed_bindings_and_revocation_overlay(
         }])
         .unwrap();
     let (restored, _) = rig.reopen_adapter();
-    let app = crate::app::App::open(restored.source_handle(), rig.store.clone()).unwrap();
+    let app = crate::app::App::open(restored.source_handle(), rig.store.clone());
     assert_eq!(app.matter_configuration().entries.len(), 1);
     assert!(
         !app.matter_configuration().entries[0]

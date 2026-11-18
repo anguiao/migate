@@ -38,7 +38,7 @@ pub async fn run_xiaomi_bridge(
             }
             changed.await;
         }
-        let app = Rc::new(App::open(handle, store)?);
+        let app = Rc::new(App::open(handle, store));
         // Cached recognition failures retain their source's committed facts.
         // Apply other valid changes before serving, including real revocations.
         match app.plan() {

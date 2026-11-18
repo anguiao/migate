@@ -12,7 +12,7 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet()));
     let key = outlet().key().clone();
-    let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+    let app = Rc::new(App::open(source.handle.clone(), store.clone()));
     let before = app.current().configuration.device(&key).unwrap().clone();
     let physical = source.physical.as_ref().unwrap();
     let status = status(&store);
@@ -33,7 +33,7 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
             &current.configuration,
             &source.handle.configuration()
         ));
-        let reopened = App::open(source.handle.clone(), store.clone()).unwrap();
+        let reopened = App::open(source.handle.clone(), store.clone());
         assert!(Rc::ptr_eq(&reopened.current().derived, &current.derived));
         assert_eq!(source_graph.served[&key].description.label(), "");
     }
@@ -68,7 +68,7 @@ fn empty_saved_name_survives_restart_and_later_directory_names() {
 
     let store = Store::open(directory.path()).unwrap();
     let restored = AppSource::new(&store, None);
-    let app = App::open(restored.handle.clone(), store.clone()).unwrap();
+    let app = App::open(restored.handle.clone(), store.clone());
     assert_eq!(
         restored.physical.as_ref().unwrap().description().label(),
         ""
@@ -83,7 +83,7 @@ fn rename_rejects_overlong_utf8_without_changing_saved_or_served_views() {
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet()));
     let key = outlet().key().clone();
-    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let app = App::open(source.handle.clone(), store.clone());
     let valid = "灯".repeat(10);
     app.rename(&key, &valid).unwrap();
     let saved = store.devices().load_configuration().unwrap();
@@ -102,7 +102,7 @@ fn failed_name_commit_keeps_the_saved_and_served_name() {
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet()));
     let key = outlet().key().clone();
-    let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+    let app = Rc::new(App::open(source.handle.clone(), store.clone()));
     let before = app.current();
     let committed = app.committed.listen();
     let changed = app.listen();
@@ -165,7 +165,7 @@ fn renaming_a_sensor_keeps_its_battery_capability() {
     .with_battery();
     let source = AppSource::new(&store, Some(sensor));
     let key = source.physical.as_ref().unwrap().key().clone();
-    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let app = App::open(source.handle.clone(), store.clone());
     app.rename(&key, "Renamed sensor").unwrap();
     assert!(app.current().derived.served[&key].description.has_battery());
     assert!(

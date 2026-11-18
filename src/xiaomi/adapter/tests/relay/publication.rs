@@ -293,9 +293,10 @@ fn terminal_maps_a_relay_to_light_and_persists_its_identity() {
                     let source =
                         crate::xiaomi::adapter::tests::app_source::AppSource::new(&reopened, None);
                     source.confirm_all();
-                    let restored = Rc::new(
-                        crate::app::App::open(source.handle.clone(), reopened.clone()).unwrap(),
-                    );
+                    let restored = Rc::new(crate::app::App::open(
+                        source.handle.clone(),
+                        reopened.clone(),
+                    ));
                     let restored_model = crate::matter::tests::support::PublishedRelayModel::new(
                         &restored, &reopened,
                     );

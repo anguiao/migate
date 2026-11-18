@@ -11,7 +11,7 @@ fn source_install_shares_configuration_and_graph_before_app_updates_its_view() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet()));
-    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let app = App::open(source.handle.clone(), store.clone());
     let before = app.current();
     source.directory_name(outlet().key(), "Updated catalog name");
     let plan = app.plan().unwrap().unwrap();
@@ -54,7 +54,7 @@ fn startup_revocation_overlay_keeps_committed_versions_for_the_removal_plan() {
         .unwrap();
     let restored = AppSource::new(&store, None);
     assert!(restored.physical.is_none());
-    let app = Rc::new(App::open(restored.handle.clone(), store.clone()).unwrap());
+    let app = Rc::new(App::open(restored.handle.clone(), store.clone()));
     assert!(app.matter_configuration().entries.is_empty());
     let plan = app.plan().unwrap().unwrap();
     assert!(plan.rebuild);
@@ -97,7 +97,7 @@ fn failed_device_withdrawal_omits_the_retired_source_from_restored_reports() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet()));
-    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let app = App::open(source.handle.clone(), store.clone());
     let subscription = crate::matter::subscription_keys().start;
     store.matter().put(subscription, b"same home").unwrap();
     assert_eq!(app.matter_configuration().entries.len(), 1);
@@ -130,7 +130,7 @@ fn descriptions_from_the_previous_home_are_not_visible_for_the_same_did() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet()));
-    let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+    let app = Rc::new(App::open(source.handle.clone(), store.clone()));
     source.scope(crate::configuration::Scope {
         home_id: "other-home".into(),
         ..app.current().configuration.scope.clone().unwrap()

@@ -83,7 +83,7 @@ fn terminal_binding_persists_without_changing_published_endpoints() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let source = setup(&store);
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let before = app.current().configuration.clone();
@@ -147,7 +147,7 @@ fn terminal_projects_bound_observations_and_reports_unrepresentable_temperatures
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let source = setup_with_sensor_range(&store, MeasurementRange::new(-30.0, 400.0).unwrap());
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let view = app.current();
@@ -296,7 +296,7 @@ fn validation_multiple_targets_and_failed_saves_preserve_existing_projections() 
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let source = setup(&store);
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let sensor = function(&app, "sensor", "temperature:3:1001");
@@ -396,7 +396,7 @@ fn replacement_unbinding_and_missing_source_restore_follow_saved_relationships()
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let source = setup(&store);
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let first = function(&app, "sensor", "temperature:3:1001");
@@ -552,7 +552,7 @@ fn bindings_survive_restart_and_directory_changes_but_not_a_scope_change() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path()).unwrap();
         let source = setup(&store);
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let sensor = function(&app, "sensor", "temperature:3:1001");
@@ -586,7 +586,7 @@ fn bindings_survive_restart_and_directory_changes_but_not_a_scope_change() {
         let store = Store::open(directory.path()).unwrap();
         let source = AppSource::new(&store, None);
         source.confirm_all();
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = super::status(&store);
         let terminal = Context::committed(app.clone(), &status);
         let output = run(&terminal, "status ac").await;

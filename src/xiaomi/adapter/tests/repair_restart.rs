@@ -44,7 +44,7 @@ fn fresh_adapter_restores_rgb_plan_and_controls_real_member_bindings() {
         assert_eq!(color.temperature_kelvin, None);
 
         let context = restored.context.clone();
-        let publication = Rc::new(App::open(restored.source_handle(), c.store.clone()).unwrap());
+        let publication = Rc::new(App::open(restored.source_handle(), c.store.clone()));
         assert!(context.group_repair("group-1").is_some());
         let subscription_key = rs_matter::persist::PERSISTENT_SUBSCRIPTIONS_START;
         c.store.matter().put(subscription_key, &[1, 2, 3]).unwrap();
@@ -190,7 +190,7 @@ fn fresh_adapter_restores_changed_member_profile_and_downgraded_group() {
             Some(Power::Unknown)
         );
 
-        let publication = App::open(restored.source_handle(), c.store.clone()).unwrap();
+        let publication = App::open(restored.source_handle(), c.store.clone());
         if let Some(plan) = publication.plan().unwrap() {
             assert!(
                 !plan.rebuild,

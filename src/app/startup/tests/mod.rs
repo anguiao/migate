@@ -34,7 +34,7 @@ fn fixture() -> (tempfile::TempDir, AppSource, App) {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path()).unwrap();
     let source = AppSource::new(&store, Some(outlet("test-outlet")));
-    let app = App::open(source.handle.clone(), store).unwrap();
+    let app = App::open(source.handle.clone(), store);
     (directory, source, app)
 }
 

@@ -181,7 +181,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         let startup_port = free_udp_port();
         let failing = c.reopen_adapter().0;
         let failing_handle = crate::xiaomi::adapter::SourceHandle(failing.context.clone());
-        let recovered_view = crate::app::App::open(failing_handle.clone(), store.clone()).unwrap();
+        let recovered_view = crate::app::App::open(failing_handle.clone(), store.clone());
         assert!(recovered_view.current().published_device(&group).is_none());
         assert!(recovered_view.current().published_device(&one).is_some());
         assert!(!failing.context.graph.borrow().rules.contains_key("group-1"));
@@ -274,8 +274,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
         let reopened = crate::app::App::open(
             crate::xiaomi::adapter::SourceHandle(restored.context.clone()),
             store.clone(),
-        )
-        .unwrap();
+        );
         if let Some(plan) = reopened.plan().unwrap() {
             let prepared = reopened.prepare(plan);
             reopened.apply(prepared).unwrap();
@@ -462,8 +461,7 @@ fn restart_restores_group_and_hidden_member_identity_and_effective_status() {
         let opened = crate::app::App::open(
             crate::xiaomi::adapter::SourceHandle(restored.context.clone()),
             store.clone(),
-        )
-        .unwrap();
+        );
         // Install the bootstrap relation overlay through the normal boundary.
         if let Some(plan) = opened.plan().unwrap() {
             let prepared = opened.prepare(plan);

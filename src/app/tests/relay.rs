@@ -50,7 +50,7 @@ fn cold_restored_wired_relay_preserves_issuing_scope_before_new_mode_and_power_r
                         .relay_mode(),
                     None
                 );
-                let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+                let app = Rc::new(App::open(source.handle.clone(), store.clone()));
                 let model = PublishedRelayModel::new(&app, &store);
                 model.check_topology(&[endpoint]);
                 assert_eq!(model.label(endpoint).await, "Saved relay");
@@ -83,7 +83,7 @@ fn terminal_mapping_checks_authority_before_duplicates_and_failed_writes_do_not_
         let configuration = saved_relay(&store, RelayMode::Wireless);
         let source = AppSource::new(&store, None);
         source.confirm_all();
-        let app = Rc::new(App::open(source.handle.clone(), store.clone()).unwrap());
+        let app = Rc::new(App::open(source.handle.clone(), store.clone()));
         let status = super::status(&store);
         let terminal = crate::terminal::bridge::Context::committed(app.clone(), &status);
         let query =
@@ -198,7 +198,7 @@ fn mapping_rebuild_keeps_late_subscriptions_and_commits_new_source_facts() {
     let key = &configuration.relay_channels[0].key;
     let source = AppSource::new(&store, None);
     source.confirm_all();
-    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let app = App::open(source.handle.clone(), store.clone());
     let subscription = crate::matter::subscription_keys().start;
     let database = rusqlite::Connection::open(store.path()).unwrap();
 
@@ -272,7 +272,7 @@ fn a_pending_mapping_cannot_carry_subscriptions_across_a_home_change() {
     let configuration = saved_relay(&store, RelayMode::Wired);
     let source = AppSource::new(&store, None);
     source.confirm_all();
-    let app = App::open(source.handle.clone(), store.clone()).unwrap();
+    let app = App::open(source.handle.clone(), store.clone());
     let key = &configuration.relay_channels[0].key;
     assert!(app.map_relay_type(key, RelayType::Light).unwrap());
     let mapped = store.devices().load_configuration().unwrap();
