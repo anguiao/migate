@@ -102,10 +102,15 @@ impl Directory {
         catalog: Option<&CloudDeviceCatalog>,
     ) {
         for did in members {
+            let is_group = self.group(did).is_some();
             let slot = self.devices.entry(did.clone()).or_default();
             slot.confirmed = true;
-            slot.cloud_access = infos.remove(did);
-            slot.cloud_forbidden = false;
+            if !is_group {
+                slot.cloud_access = infos.remove(did);
+                if slot.cloud_access.is_some() {
+                    slot.cloud_forbidden = false;
+                }
+            }
         }
         if let Some(catalog) = catalog {
             for record in &catalog.devices {

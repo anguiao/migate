@@ -119,14 +119,24 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                 async_io::Timer::after(Duration::from_millis(20)).await;
                 assert_eq!(one.snapshot(), snapshot);
                 if !scope_failure {
-                    assert!(c.context.directory.borrow().devices["one"].cloud_forbidden);
-                    c.context
-                        .directory
-                        .borrow_mut()
-                        .devices
-                        .get_mut("one")
-                        .unwrap()
-                        .cloud_access = None;
+                    c.cloud.lock().unwrap().omitted_info.insert("one".into());
+                    c.context.request_sync();
+                    until(|| {
+                        c.context.directory.borrow().devices["one"]
+                            .cloud_access
+                            .is_none()
+                    })
+                    .await;
+                    // HA notifications can outlive a Mijia outage only for authorized devices.
+                    c.context.cloud_error(
+                        &c.context.mijia_path().unwrap(),
+                        None,
+                        &crate::xiaomi::cloud::CloudError::new(
+                            "test",
+                            crate::xiaomi::cloud::CloudErrorKind::HttpStatus(503),
+                        ),
+                    );
+                    assert!(c.context.cloud_candidate("one", false).is_err());
                     peer.online("one", true);
                     async_io::Timer::after(Duration::from_millis(20)).await;
                     assert!(
@@ -134,6 +144,13 @@ fn cloud_forbidden_and_scope_failure_revoke_properties_without_synthesizing_devi
                             .cloud_access
                             .is_none()
                     );
+                    c.cloud.lock().unwrap().omitted_info.clear();
+                    c.clock.advance(Duration::from_secs(2));
+                    c.context.request_sync();
+                    until(|| {
+                        c.context.cloud_candidate("one", true).is_ok() && cloud_active(&c, "one")
+                    })
+                    .await;
                 }
             })
             .await;

@@ -137,6 +137,8 @@ fn native_group_cloud_permission_recovers_only_after_fresh_confirmation() {
         {
             let mut cloud = c.cloud.lock().unwrap();
             cloud.property_code = 0;
+            // A group can also appear in the ordinary home list.
+            cloud.members.push("group-1".into());
             cloud.catalog_groups[0]["extra"]["member_list"]["status"] = json!("invalid");
         }
         c.context.request_sync();

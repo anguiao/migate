@@ -43,6 +43,7 @@ pub(in super::super) struct CloudState {
     pub(in super::super) sts_requests: usize,
     pub(in super::super) online: BTreeSet<String>,
     pub(in super::super) infos: usize,
+    pub(in super::super) omitted_info: BTreeSet<String>,
     pub(in super::super) info_status: u16,
     pub(in super::super) info_gate: Option<flume::Receiver<()>>,
     pub(in super::super) info_partial: bool,
@@ -629,7 +630,16 @@ impl Rig {
                     .all(|did| info_dids.contains(did.as_str().unwrap()))
                 {
                     state.infos += 1;
-                    let value = json!({"code":0,"result":{"list":records.iter().filter(|record|state.members.contains(&record.device().key().id)).map(|record|cloud_record(&state, record)).collect::<Vec<_>>(),"has_more":state.info_partial}});
+                    let list = records
+                        .iter()
+                        .filter(|record| {
+                            let did = &record.device().key().id;
+                            state.members.contains(did) && !state.omitted_info.contains(did)
+                        })
+                        .map(|record| cloud_record(&state, record))
+                        .collect::<Vec<_>>();
+                    let value =
+                        json!({"code":0,"result":{"list":list,"has_more":state.info_partial}});
                     let mut response = MockResponse::json(state.info_status, &value.to_string());
                     if let Some(gate) = state.info_gate.clone() {
                         response = response.gated(gate);
