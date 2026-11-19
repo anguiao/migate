@@ -4,7 +4,7 @@
 use std::{
     fs,
     io::Write,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -59,6 +59,15 @@ impl TestProcess {
     }
 
     pub(crate) fn wait_for_output(&mut self, stream: Stream, expected: &str) {
+        self.wait_for_output_matching(stream, expected, |output| output.contains(expected));
+    }
+
+    pub(crate) fn wait_for_output_matching(
+        &mut self,
+        stream: Stream,
+        expected: &str,
+        matches: impl Fn(&str) -> bool,
+    ) -> String {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             let (stdout, stderr) = self.output();
@@ -71,8 +80,8 @@ impl TestProcess {
                 Stream::Stdout => &stdout,
                 Stream::Stderr => &stderr,
             };
-            if output.contains(expected) {
-                return;
+            if matches(output) {
+                return output.clone();
             }
             assert!(
                 Instant::now() < deadline,
@@ -98,11 +107,11 @@ impl TestProcess {
         (stdout, stderr)
     }
 
-    pub(crate) fn signal_failure(self, signal: &str) -> (std::process::ExitStatus, String, String) {
+    pub(crate) fn signal_failure(self, signal: &str) -> (ExitStatus, String, String) {
         self.signal(signal)
     }
 
-    fn signal(mut self, signal: &str) -> (std::process::ExitStatus, String, String) {
+    fn signal(mut self, signal: &str) -> (ExitStatus, String, String) {
         assert!(
             self.child.try_wait().unwrap().is_none(),
             "process exited before {signal}: {}",
@@ -115,6 +124,10 @@ impl TestProcess {
                 .unwrap()
                 .success()
         );
+        self.wait_for_exit()
+    }
+
+    pub(crate) fn wait_for_exit(mut self) -> (ExitStatus, String, String) {
         let deadline = Instant::now() + TIMEOUT;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -122,7 +135,7 @@ impl TestProcess {
             }
             assert!(
                 Instant::now() < deadline,
-                "{signal} did not exit within {TIMEOUT:?}: {}",
+                "process did not exit within {TIMEOUT:?}: {}",
                 self.output().1
             );
             thread::sleep(POLL_INTERVAL);

@@ -10,16 +10,18 @@ use crate::{
     device::{DeviceKey, FunctionKey},
     storage::{Identity, StorageError, Store},
 };
+#[cfg(target_os = "macos")]
+use rs_matter::transport::network::mdns::astro::AstroMdns as PlatformMdns;
 use rs_matter::{
     Matter,
     crypto::{Crypto, default_crypto},
     dm::devices::test::{DAC_PRIVKEY, TEST_DEV_ATT, TEST_DEV_COMM},
     im::{InteractionModel, InteractionModelState},
     respond::DefaultResponder,
-    transport::{
-        MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers, network::mdns::astro::AstroMdns,
-    },
+    transport::{MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers},
 };
+#[cfg(target_os = "linux")]
+use rs_matter::{transport::network::mdns::avahi::AvahiMdns as PlatformMdns, utils::zbus};
 use std::{net::UdpSocket, rc::Rc, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
@@ -29,15 +31,12 @@ mod tests;
 
 /// Service registrations survive individual Matter runs.
 pub(crate) struct Advertisement {
-    mdns: AstroMdns,
+    mdns: Option<PlatformMdns>,
     port: u16,
 }
 impl Advertisement {
     pub(crate) fn new(port: u16) -> Self {
-        Self {
-            mdns: AstroMdns::new(),
-            port,
-        }
+        Self { mdns: None, port }
     }
 
     fn bind(&mut self) -> Result<async_io::Async<UdpSocket>, RuntimeError> {
@@ -49,6 +48,29 @@ impl Advertisement {
         // registrations. Each instance still owns and releases its socket.
         self.port = socket.get_ref().local_addr()?.port();
         Ok(socket)
+    }
+
+    async fn run(&mut self, matter: &Matter<'_>) -> Result<(), RuntimeError> {
+        let mdns = match &mut self.mdns {
+            Some(mdns) => mdns,
+            slot @ None => {
+                #[cfg(target_os = "macos")]
+                let mdns = PlatformMdns::new();
+                #[cfg(target_os = "linux")]
+                let mdns =
+                    PlatformMdns::new(zbus::Connection::system().await.map_err(|error| {
+                        format!("Failed to connect to the system D-Bus for Matter mDNS: {error}")
+                    })?);
+                slot.insert(mdns)
+            }
+        };
+        mdns.run(matter).await.map_err(|error| {
+            #[cfg(target_os = "macos")]
+            let operation = "Failed to advertise Matter services with Bonjour";
+            #[cfg(target_os = "linux")]
+            let operation = "Failed to advertise Matter services with Avahi";
+            format!("{operation}: {error}").into()
+        })
     }
 }
 
@@ -144,13 +166,7 @@ impl<'a> Bridge<'a> {
                 .await
                 .map_err(|e| format!("Matter transport task failed: {e}").into())
         };
-        let mdns = async {
-            advertisement
-                .mdns
-                .run(&matter)
-                .await
-                .map_err(|e| format!("mDNS service failed: {e}").into())
-        };
+        let mdns = advertisement.run(&matter);
         let respond = async {
             responder
                 .run::<4, 4>()

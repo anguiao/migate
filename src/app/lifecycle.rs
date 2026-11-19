@@ -110,9 +110,7 @@ async fn run_lifecycle<D: StartupDeadline>(
         .pending()
         .then(|| Instant::now() + Duration::from_secs(1));
     let mut retry_delay = Duration::from_secs(1);
-    // Keep unchanged mDNS registrations while replacing the protocol instance.
-    // astro-dnssd unregisters asynchronously, so immediate re-registration of
-    // the same name can otherwise overlap its previous registration.
+    // Keep the port and unchanged mDNS registrations across Matter rebuilds.
     let mut advertisement = Advertisement::new(options.port);
     loop {
         let renamer: Rc<dyn crate::matter::LabelWriter> = app.clone();

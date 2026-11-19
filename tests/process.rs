@@ -74,6 +74,7 @@ fn auth_check_without_credentials_reports_both_states_and_quoted_login_command()
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("data dir's");
     let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+        .env("DBUS_SYSTEM_BUS_ADDRESS", "invalid")
         .arg("--data-dir")
         .arg(&directory)
         .args(["auth", "check"])
@@ -108,6 +109,7 @@ fn repeated_logout_preserves_identity_without_starting_matter() {
         .unwrap();
     for _ in 0..2 {
         let result = Command::new(env!("CARGO_BIN_EXE_migate"))
+            .env("DBUS_SYSTEM_BUS_ADDRESS", "invalid")
             .arg("--data-dir")
             .arg(directory.path())
             .args(["auth", "logout"])
@@ -191,6 +193,7 @@ fn blocked_login(directory: &std::path::Path) -> TestProcess {
         .arg("--data-dir")
         .arg(directory)
         .args(["auth", "login"])
+        .env("DBUS_SYSTEM_BUS_ADDRESS", "invalid")
         .env("https_proxy", &proxy)
         .env("HTTPS_PROXY", &proxy)
         .env("all_proxy", &proxy)
