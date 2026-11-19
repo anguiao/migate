@@ -283,7 +283,12 @@ fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
                 let cloud = &cloud;
                 c.peer(Rc::new(Peer::default()), |local| async move {
                     initialized(control, &local, &["one"]).await;
-                    until(|| local_active(control, "one")).await;
+                    // Queued commands need the cloud HTTP route as soon as the hub goes offline.
+                    until(|| {
+                        local_active(control, "one")
+                            && control.context.cloud_candidate("one", true).is_ok()
+                    })
+                    .await;
                     control
                         .clock
                         .automatic
