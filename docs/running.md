@@ -28,6 +28,84 @@ cargo build --locked --release
 
 直接运行构建产物不会读取仓库的 Cargo 环境配置，请明确指定原数据目录。
 
+## macOS 开机自启
+
+系统域的 LaunchDaemon 在 macOS 启动时以指定的普通用户运行网桥，登录桌面之前即可运行。若冷启动停在 FileVault 解锁界面，先解锁启动卷。将程序、数据和日志放在开机时已经挂载且运行用户可访问的位置，优先选用启动卷上的本地目录。[Apple 后台服务说明](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) · [FileVault 启动说明](https://support.apple.com/guide/security/volume-encryption-with-filevault-sec4c6dc1b6e/1/web/1)
+
+### 安装与启动
+
+按上文构建 release。首次部署时，以运行服务的普通用户在前台完成米家登录和 Apple Home 配对。已有配对的 Mac 可沿用原数据目录，启动日志中的 `Data directory` 显示其绝对路径。启用服务前用 Ctrl-C 停止前台进程。
+
+由管理员在仓库根目录将构建产物安装到本地。下面以 `/usr/local/bin/migate` 为例。
+
+```sh
+sudo mkdir -p /usr/local/bin
+sudo install -o root -g wheel -m 755 target/release/migate /usr/local/bin/migate
+```
+
+以运行网桥的普通用户创建私有日志目录，再复制模板用于本机安装。[LaunchDaemon 模板](../deploy/launchd/io.github.anguiao.migate.plist)
+
+```sh
+install -d -m 700 "$HOME/Library/Logs/MiGate"
+cp deploy/launchd/io.github.anguiao.migate.plist ./io.github.anguiao.migate.plist
+```
+
+- `UserName` 填普通用户的账号短名称，可用 `id -un` 查看。
+- `ProgramArguments` 的第一项填已安装的可执行文件绝对路径，`--data-dir` 后填原数据目录绝对路径。该用户须能执行程序并读写数据目录。
+- `StandardOutPath` 和 `StandardErrorPath` 填日志文件的绝对路径，其上级目录须已创建且可由该用户写入。
+
+检查修改后的 plist，然后安装到 `/Library/LaunchDaemons` 并启动。安装后的配置须由 `root` 拥有，组和其他用户不可写。
+
+```sh
+plutil -lint ./io.github.anguiao.migate.plist
+sudo install -o root -g wheel -m 644 ./io.github.anguiao.migate.plist /Library/LaunchDaemons/io.github.anguiao.migate.plist
+sudo launchctl enable system/io.github.anguiao.migate
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.anguiao.migate.plist
+```
+
+### 状态与日志
+
+用 `launchctl print` 查看运行状态和退出原因。进程非零退出或崩溃后，`launchd` 会重试，模板将连续启动的间隔限制为至少 10 秒。用运行网桥的普通用户查看日志，路径以模板中的设置为准。
+
+```sh
+sudo launchctl print system/io.github.anguiao.migate
+tail -F "$HOME/Library/Logs/MiGate/stderr.log" "$HOME/Library/Logs/MiGate/stdout.log"
+```
+
+### 临时停服与恢复
+
+执行 `auth` 命令或用终端的 `list`、`status DID` 排障前，先卸载服务并等待网桥退出。服务会保持停止，直到手动恢复或下次开机。
+
+```sh
+sudo launchctl bootout system/io.github.anguiao.migate
+```
+
+停服后以原普通用户操作，命令里的程序和数据目录使用模板中配置的路径。下列命令用于检查米家账号。需要重新登录时，将 `auth check` 换成 `auth login`。[米家账号](#米家账号)
+
+```sh
+/usr/local/bin/migate --data-dir "/Users/your-user/.migate" auth check
+```
+
+在终端排障时，用下列命令启动前台网桥。切换期间 Apple Home 可能短暂离线。
+
+```sh
+/usr/local/bin/migate --data-dir "/Users/your-user/.migate"
+```
+
+若提示数据目录仍在使用，等待上一个进程退出后重试。完成操作后，先用 Ctrl-C 停止仍在运行的前台网桥，再恢复服务。
+
+```sh
+sudo launchctl bootstrap system /Library/LaunchDaemons/io.github.anguiao.migate.plist
+```
+
+### 取消自启
+
+执行 `disable` 取消后续开机自启。若服务仍已加载，再按上节执行 `bootout` 停服。以后可用安装步骤中的 `enable` 和 `bootstrap` 重新启用。
+
+```sh
+sudo launchctl disable system/io.github.anguiao.migate
+```
+
 ## 米家账号
 
 以下命令在 shell 中执行。登录和账号检查需要联网。

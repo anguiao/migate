@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.github.anguiao.migate</string>
+  <key>UserName</key>
+  <string>your-user</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/migate</string>
+    <string>--data-dir</string>
+    <string>/Users/your-user/.migate</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/your-user/Library/Logs/MiGate/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/your-user/Library/Logs/MiGate/stderr.log</string>
+</dict>
+</plist>
