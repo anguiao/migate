@@ -623,6 +623,12 @@ fn cloud_curtain_control_without_notifications_reads_one_snapshot() {
             c.clock
                 .automatic
                 .store(false, std::sync::atomic::Ordering::Relaxed);
+            // Complete a periodic snapshot so the next poll is beyond the command's observation window.
+            let before_poll = c.cloud.lock().unwrap().property_reads.len();
+            c.clock.advance(Duration::from_secs(10));
+            until(|| c.cloud.lock().unwrap().property_reads.len() == before_poll + 3).await;
+            settled(&c).await;
+
             cloud.send(Packet::Disconnect(Disconnect::new()));
             c.clock.advance(Duration::from_millis(201));
             until(|| {
