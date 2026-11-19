@@ -165,12 +165,7 @@ fn connack_rejection_and_persisted_session_are_rejected_over_tls() {
             let server = async {
                 let (socket, _) = listener.accept().await.unwrap();
                 let stream = acceptor.accept(socket).await.unwrap();
-                let mut broker = Broker {
-                    stream,
-                    frames: Frames::default(),
-                    client_id: String::new(),
-                    deferred: VecDeque::new(),
-                };
+                let mut broker = Broker::new(stream);
                 assert!(matches!(broker.next().await, Packet::Connect(_)));
                 broker
                     .send(Packet::ConnAck(ConnAck::new(
@@ -184,7 +179,7 @@ fn connack_rejection_and_persisted_session_are_rejected_over_tls() {
                     .await;
             };
             let client = async {
-                let stream = tls::connect(address, &fixture.credentials, &fixture.ca_pem)
+                let stream = connect_mqtt(address, &fixture.credentials, &fixture.ca_pem)
                     .await
                     .unwrap();
                 let error = match start(

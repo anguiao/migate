@@ -17,7 +17,11 @@ use super::{
 };
 use crate::xiaomi::{
     capability::PropertyBinding,
-    central::{CentralError, tests::support::TlsFixture, tls, wire},
+    central::{
+        CentralError,
+        tests::support::{TlsFixture, connect_mqtt},
+        wire,
+    },
     mqtt::{Frames, encode_packet},
 };
 use async_io::Async;

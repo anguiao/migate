@@ -89,11 +89,7 @@ fn cloud_connect_authentication_rejections_are_sanitized() {
             let address = listener.get_ref().local_addr().unwrap();
             future::zip(
                 async {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let mut broker = Broker {
-                        stream,
-                        frames: mqtt::Frames::default(),
-                    };
+                    let mut broker = Broker::accept_socket(&listener).await;
                     let Packet::Connect(connect) = broker.next().await else {
                         panic!();
                     };
@@ -103,10 +99,7 @@ fn cloud_connect_authentication_rejections_are_sanitized() {
                         .await;
                 },
                 async {
-                    let stream = Async::<TcpStream>::connect(address).await.unwrap();
-                    let error = PreparedConnection::new(&credentials(), timing())
-                        .unwrap()
-                        .start(Box::new(stream))
+                    let error = connect_with_timing(address, &credentials(), timing())
                         .await
                         .err()
                         .unwrap();

@@ -30,6 +30,7 @@ pub(in crate::xiaomi) struct Broker {
 
 impl Broker {
     pub(in crate::xiaomi) fn new(stream: TlsStream<Async<TcpStream>>) -> Self {
+        crate::xiaomi::tests::support::disable_nagle(stream.get_ref().0.get_ref());
         Self {
             stream,
             frames: Frames::default(),
@@ -208,16 +209,10 @@ pub(super) async fn pair_fixture<S, C, SF, CF, W>(
     let accept = async {
         let (socket, _) = listener.accept().await.unwrap();
         let stream = acceptor.accept(socket).await.unwrap();
-        server(Broker {
-            stream,
-            frames: Frames::default(),
-            client_id: String::new(),
-            deferred: VecDeque::new(),
-        })
-        .await;
+        server(Broker::new(stream)).await;
     };
     let connect = async {
-        let stream = tls::connect(address, &fixture.credentials, &fixture.ca_pem)
+        let stream = connect_mqtt(address, &fixture.credentials, &fixture.ca_pem)
             .await
             .unwrap();
         let (handle, driver) = start(

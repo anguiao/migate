@@ -13,6 +13,11 @@ use time::OffsetDateTime;
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 
+pub(in crate::xiaomi) fn disable_nagle(stream: &TcpStream) {
+    // Let the MQTT fixtures control frame timing independently of TCP's delayed ACKs.
+    stream.set_nodelay(true).unwrap();
+}
+
 pub(crate) struct ReceivedRequest {
     pub target: String,
     pub headers: String,

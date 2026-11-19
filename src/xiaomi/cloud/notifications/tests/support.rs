@@ -30,6 +30,15 @@ pub(super) struct Broker {
 }
 
 impl Broker {
+    pub(super) async fn accept_socket(listener: &Async<TcpListener>) -> Self {
+        let (stream, _) = listener.accept().await.unwrap();
+        crate::xiaomi::tests::support::disable_nagle(stream.get_ref());
+        Self {
+            stream,
+            frames: mqtt::Frames::default(),
+        }
+    }
+
     pub(super) async fn next(&mut self) -> Packet {
         loop {
             if let Some(packet) = self.frames.next_packet().unwrap() {
@@ -101,14 +110,7 @@ pub(super) async fn exercise<S: Future<Output = ()>, C: Future<Output = ()>>(
     future::race(
         async {
             future::zip(
-                async {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    server(Broker {
-                        stream,
-                        frames: mqtt::Frames::default(),
-                    })
-                    .await;
-                },
+                async { server(Broker::accept_socket(&listener).await).await },
                 async {
                     let (handle, driver) = connect_with_timing(address, &credentials(), timing)
                         .await
@@ -160,15 +162,16 @@ pub(in crate::xiaomi) async fn connect(
     .await
 }
 
-async fn connect_with_timing(
+pub(super) async fn connect_with_timing(
     address: SocketAddr,
     credentials: &XiaomiRecord,
     timing: Timing,
 ) -> Result<(NotificationHandle, NotificationDriver), NotificationError> {
     let prepared = PreparedConnection::new(credentials, timing)?;
-    let stream = Async::<std::net::TcpStream>::connect(address)
+    let stream = Async::<TcpStream>::connect(address)
         .await
         .map_err(|_| NotificationError::Io)?;
+    crate::xiaomi::tests::support::disable_nagle(stream.get_ref());
     prepared.start(Box::new(stream)).await
 }
 

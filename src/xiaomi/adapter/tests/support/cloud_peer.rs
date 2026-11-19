@@ -6,12 +6,17 @@ pub(in super::super) struct CloudBroker {
     pub(in super::super) frames: crate::xiaomi::mqtt::Frames,
 }
 impl CloudBroker {
-    pub(in super::super) async fn accept(listener: &Async<TcpListener>) -> Self {
+    async fn accept_socket(listener: &Async<TcpListener>) -> Self {
         let (stream, _) = listener.accept().await.unwrap();
-        let mut broker = Self {
+        crate::xiaomi::tests::support::disable_nagle(stream.get_ref());
+        Self {
             stream,
             frames: Default::default(),
-        };
+        }
+    }
+
+    pub(in super::super) async fn accept(listener: &Async<TcpListener>) -> Self {
+        let mut broker = Self::accept_socket(listener).await;
         assert!(matches!(broker.next().await, Packet::Connect(_)));
         broker
             .send(Packet::ConnAck(ConnAck::new(
@@ -137,11 +142,7 @@ impl CloudPeer {
     }
     pub(in super::super) async fn run(&self, listener: &Async<TcpListener>) {
         loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut broker = CloudBroker {
-                stream,
-                frames: Default::default(),
-            };
+            let mut broker = CloudBroker::accept_socket(listener).await;
             let Packet::Connect(connect) = broker.next().await else {
                 panic!("expected CONNECT")
             };
