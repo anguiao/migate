@@ -2,7 +2,7 @@
 
 ## 连接与网关
 
-**当前运行范围是 macOS / Apple Silicon。** Linux 部署暂缓，尚未验证。
+**支持的运行平台是 Apple Silicon Mac 及使用 systemd 和 Avahi 的 Debian/Ubuntu（ARM64、x86_64）。** 首次绑定需要在局域网发现小米主中枢，Apple Home 的发现和控制需要可用的 IPv6、mDNS 组播和 Matter UDP。虚拟机部署使用桥接到家庭局域网的网卡。安装和排障见[运行指南](running.md)。
 
 **冷启动先采集状态。** 首轮采集结束或等待 20 秒后才开放 Matter；离线、失败或设备未提供的状态可能仍然未知，继续按原有路径恢复。后续配置更新不重复冷启动等待。
 

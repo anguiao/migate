@@ -1,32 +1,121 @@
 # 运行 MiGate
 
-当前运行范围为 macOS / Apple Silicon，需要 Rust 1.96 和 Cargo；Linux 部署暂缓。仅支持中国大陆服务区，一次运行接入一个米家自有家庭。首次绑定时，Mac 与该家庭的小米主中枢须处于同一局域网。
+支持 Apple Silicon Mac 及使用 systemd 和 Avahi 的 Debian/Ubuntu（ARM64、x86_64）。仅支持中国大陆服务区，一次运行接入一个米家自有家庭。首次绑定时，网桥主机与该家庭的小米主中枢须处于同一局域网。
 
-## 启动
+## 构建
 
-在仓库根目录执行：
+安装 Rust 1.96 和 Cargo。Linux ARM64 和 x86_64 分别在对应架构的主机或虚拟机中本机构建。macOS 在 Apple Silicon Mac 上本机构建。
+
+Debian/Ubuntu 需要以下构建与运行依赖。Avahi 通过系统 D-Bus 为 Matter 提供局域网公告，`avahi-utils` 提供排障工具。若要运行 Linux 进程测试，还需安装 `dbus-daemon`。
 
 ```sh
-cargo run --locked -- auth login
-cargo run --locked
+sudo apt install build-essential cmake pkg-config avahi-daemon avahi-utils
 ```
 
-首次登录按下方「米家账号」完成授权，之后日常启动只需第二条命令。仓库的 Cargo 配置默认使用项目下的 `.migate/` 保存数据。日常重启继续使用同一目录，保留账号、设备名称和 Apple Home 配对。
+在目标主机的仓库根目录构建，产物位于 `target/release/migate`。
 
-程序在前台运行，使用 Ctrl-C 或 SIGTERM 停止；终端输入结束（EOF）不会停止服务。同一数据目录只能由一个进程使用，执行认证命令前也需先停止网桥。
+```sh
+cargo build --locked --release
+```
+
+## 前台首配
+
+在仓库根目录，以将运行网桥的普通用户操作。数据目录放在目标主机的本地磁盘上，虚拟机使用来宾系统的磁盘。已有配对时，从原网桥日志的 `Data directory` 确认原数据目录，用它替换示例中的 `"$HOME/.migate"`，直接执行第二条命令。
+
+```sh
+./target/release/migate --data-dir "$HOME/.migate" auth login
+./target/release/migate --data-dir "$HOME/.migate"
+```
+
+首次登录时按[米家账号](#米家账号)完成授权，再将网桥[添加到 Apple Home](#添加到-apple-home)。日常重启或改为开机自启时，继续使用同一用户和同一目录，以保留账号、设备名称和 Apple Home 配对。
+
+程序在前台运行时用 Ctrl-C 或 SIGTERM 停止，终端输入结束（EOF）后仍会运行。同一数据目录只能由一个进程使用，执行认证命令前也需先停止网桥。启用系统服务前用 Ctrl-C 停止前台进程。
 
 启动时程序先采集设备状态，Matter 服务最多等待 20 秒；家庭中已配对的网桥在此期间可能暂时不可用。未完成或失败的设备继续在后台恢复。用 `list` 找到 `DID (名称): pending (原因)`，再用 `status DID` 查看同一条记录。在服务的设备同时显示详情。新设备首次读取描述失败时，先按记录中的原因排查，再等待目录更新。完全未知的 DID 才会提示 `Unknown device DID.`。
 
 已配对网桥重启后，Home 还需恢复控制连接和状态订阅。首次从旧版升级时，Home 可能仍按旧订阅等待约 10 分钟；新订阅使用 120 秒的最大报告间隔上限。等待期间保留原数据目录和 Home 配对，可用米家及 `status DID` 核对设备状态。
 
-也可以构建后直接运行：
+## Linux 开机自启
+
+systemd 在开机时以指定的普通用户运行网桥，并等待 Avahi 启动。将程序与数据目录放在开机时即可访问的本地磁盘。
+
+### 安装 systemd 服务
+
+在仓库根目录安装已构建的程序，并复制一份模板用于本机安装。[systemd 模板](../deploy/systemd/migate.service)
 
 ```sh
-cargo build --locked --release
-./target/release/migate --data-dir .migate
+sudo install -D -o root -g root -m 755 target/release/migate /usr/local/bin/migate
+cp deploy/systemd/migate.service "$HOME/migate.service"
 ```
 
-直接运行构建产物不会读取仓库的 Cargo 环境配置，请明确指定原数据目录。
+编辑 `$HOME/migate.service`。
+
+- `User` 填前台运行网桥的普通用户账号，可用 `id -un` 查看。
+- `ExecStart` 填已安装程序的绝对路径，并在 `--data-dir` 后填前台使用的同一数据目录的绝对路径。保留路径两端的双引号，确认该用户能执行程序并读写数据目录。
+
+检查配置，安装到 `/etc/systemd/system`，再启用自启并立即启动。
+
+```sh
+sudo systemd-analyze verify "$HOME/migate.service"
+sudo install -o root -g root -m 644 "$HOME/migate.service" /etc/systemd/system/migate.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now migate.service
+```
+
+### 查看状态和日志
+
+网桥异常退出后，systemd 每次等 10 秒再重试，直到恢复或管理员停服。单独重启 Avahi 时，正在运行的网桥会随之重启并重新公告 Matter 服务。
+
+```sh
+systemctl status migate.service
+sudo journalctl -b -u migate.service -f
+```
+
+### 停服与恢复
+
+运行 `auth` 命令或用终端的 `list`、`status DID` 排障前，停止系统服务并等待退出。网桥会保持停止，直到手动启动或下次开机。
+
+```sh
+sudo systemctl stop migate.service
+```
+
+以模板指定的普通用户操作，命令里的程序和数据目录使用模板中的实际路径。检查账号时执行 `auth check`，需要重新登录时换成 `auth login`。
+
+```sh
+/usr/local/bin/migate --data-dir "$HOME/.migate" auth check
+```
+
+在终端排障时，用下列命令启动前台网桥。切换期间 Apple Home 可能短暂离线。
+
+```sh
+/usr/local/bin/migate --data-dir "$HOME/.migate"
+```
+
+完成后先用 Ctrl-C 停止仍在运行的前台网桥，再恢复系统服务。
+
+```sh
+sudo systemctl start migate.service
+```
+
+### 关闭自启
+
+同时取消自启并停止服务。以后可用安装步骤中的 `enable --now` 恢复。
+
+```sh
+sudo systemctl disable --now migate.service
+```
+
+### 检查 Avahi 与局域网发现
+
+在 Linux 网桥主机上执行 `systemctl status avahi-daemon.service` 查看 Avahi 状态。需要启动时执行 `sudo systemctl start avahi-daemon.service`。若启动失败，用 `sudo journalctl -b -u avahi-daemon.service` 查看日志。Avahi 运行后，用下列命令浏览和解析本地服务。
+
+```sh
+avahi-browse -rt _matterc._udp
+avahi-browse -rt _matter._tcp
+avahi-browse -rt _miot-central._tcp
+```
+
+配对窗口打开时检查 `_matterc._udp`，已配对时检查 `_matter._tcp`。在各自输出中找出网桥的记录，核对解析出的地址和端口是否对应网桥主机与日志中的 `Matter UDP listening on port`。也可以在家庭局域网内另一台运行 Avahi 的 Linux 主机上浏览，确认公告能从网络发现。`_miot-central._tcp` 用于 MiGate 首次绑定时发现该米家家庭的小米主中枢，也用于排查后续的中枢发现问题。
 
 ## macOS 开机自启
 
@@ -34,7 +123,7 @@ cargo build --locked --release
 
 ### 安装与启动
 
-按上文构建 release。首次部署时，以运行服务的普通用户在前台完成米家登录和 Apple Home 配对。已有配对的 Mac 可沿用原数据目录，启动日志中的 `Data directory` 显示其绝对路径。启用服务前用 Ctrl-C 停止前台进程。
+按上文构建并完成前台首配，或沿用已配对网桥的原数据目录。
 
 由管理员在仓库根目录将构建产物安装到本地。下面以 `/usr/local/bin/migate` 为例。
 
@@ -108,12 +197,12 @@ sudo launchctl disable system/io.github.anguiao.migate
 
 ## 米家账号
 
-以下命令在 shell 中执行。登录和账号检查需要联网。
+以下命令在仓库根目录的 shell 中执行。若已安装系统服务，先按对应平台的步骤停服，再以原普通用户使用模板中的程序和原数据目录。登录和账号检查需要联网。
 
 ### 登录
 
 ```sh
-cargo run --locked -- auth login
+./target/release/migate --data-dir "$HOME/.migate" auth login
 ```
 
 每次执行都会显示新的米家登录二维码；二维码过期后重新执行 `auth login`。使用米家 App 扫码并确认，程序会用本次账号会话自动完成 HA OAuth 授权，不需要安装或运行 Home Assistant。米家会话用于设备云端 HTTP，HA OAuth 是小米账号对官方 `Xiaomi Home (Home Assistant Integration)` 应用的授权，用于云端 MQTT 和中枢客户端证书。
@@ -127,7 +216,7 @@ HA OAuth 授权失败时，错误会标明失败步骤和类别，可用这些�
 ### 检查与退出登录
 
 ```sh
-cargo run --locked -- auth check
+./target/release/migate --data-dir "$HOME/.migate" auth check
 ```
 
 检查分别显示小米账号、米家会话、HA OAuth 和中枢证书状态，并在需要时执行免交互恢复、令牌刷新或证书续期。各项独立：HA OAuth 异常会影响云端 MQTT 和需要该授权的证书操作，但不等于米家设备 HTTP 失效；米家会话异常也不等于 HA OAuth 或中枢证书失效。已有有效中枢连接和已确认直连按各自条件使用。
@@ -137,14 +226,14 @@ cargo run --locked -- auth check
 退出登录：
 
 ```sh
-cargo run --locked -- auth logout
+./target/release/migate --data-dir "$HOME/.migate" auth logout
 ```
 
 该命令删除本地米家账号及已保存的设备直连凭据，保留 Apple Home 配对，也不会撤销远端 HA 应用授权。
 
 ## 添加到 Apple Home
 
-Mac 与 iPhone / iPad 须处于同一局域网，并保持 Mac 唤醒。网络需允许 mDNS 发现和 Matter UDP 通信，默认端口为 5540。
+网桥主机与 iPhone / iPad 须处于同一局域网，网桥主机须保持唤醒。保留 IPv6，网络需允许 mDNS 组播（UDP 5353）和实际监听端口上的 Matter UDP 通信（默认 UDP 5540）。在虚拟机运行时，将网卡桥接到家庭局域网，确认该网卡的 IPv6、mDNS 与 Matter UDP 可达。[Lima 网络说明](https://lima-vm.io/docs/config/network/)
 
 1. 启动 MiGate，等待终端显示二维码和手动配对码。暂无受支持设备时，也可以先添加网桥。
 2. 在「家庭」App 中添加配件，扫描二维码或输入手动配对码。
@@ -308,7 +397,7 @@ unbind-sensor 234567890 air-conditioner:3
 
 | 现象 | 处理方式 |
 | --- | --- |
-| 没有发现设备 | 用 `list` 查看原因，确认账号、米家家庭及云端连接；首次绑定还需 Mac 与中枢处于同一局域网。 |
+| 没有发现设备 | 用 `list` 查看原因，确认账号、米家家庭及云端连接。首次绑定还需网桥主机与中枢处于同一局域网。 |
 | 设备不可用或主中枢切换后未恢复 | 检查供电、中枢和网络，用 `status DID` 查看路径与请求结果，等待自动恢复；持续异常时参见[已知限制](known-limitations.md)。 |
 | 某项测量长期不更新 | 用 `status DID` 检查该功能的读取路径、通知来源及同步受限原因，再核对米家读数和实际网关。周期读取可能返回上游缓存，不能代替设备采样。 |
 | 门窗、运动或存在显示 `unknown` | 用 `status DID` 区分首次读取失败、设备明确上报未知和订阅问题，核对米家状态并等待有效读取或通知；不要将未知当作关闭或无人。 |
@@ -338,12 +427,12 @@ unbind-sensor 234567890 air-conditioner:3
 | 提示 `Stored Xiaomi credentials are invalid` | 停止网桥，在原数据目录执行 `auth logout` 后重新 `auth login`；Matter 身份与 Home 配对会保留，直连凭据需重新获取。 |
 | 提示 `Database version is not supported` | 保留原目录，用 `--data-dir` 指向新的空目录。按下方「数据目录与重新配对」重新登录并配对。 |
 | 提示数据目录正在使用 | 停止使用该目录的另一个 MiGate 进程，再重试；不要删除锁文件。 |
-| Apple Home 无法发现网桥 | 确认配对窗口仍有效、Mac 未休眠，且网络允许 mDNS 和 Matter UDP 通信。 |
+| Apple Home 无法发现网桥 | 确认配对窗口仍有效、网桥主机保持唤醒且可以通过 IPv6、mDNS 和 Matter UDP 通信。在 Linux 按上文检查 Avahi 与实际公告。 |
 
 需要详细日志时：
 
 ```sh
-RUST_LOG=info,migate=debug cargo run --locked
+RUST_LOG=info,migate=debug ./target/release/migate --data-dir "$HOME/.migate"
 ```
 
 日志写入标准错误，终端命令结果和配对信息写入标准输出。
@@ -369,8 +458,8 @@ Matter 属性读取失败日志显示端点、簇和属性编号及处理阶段�
 若需要全新实例，可停止 MiGate 并选择一个为空或尚不存在的新目录，依次登录和启动。例如：
 
 ```sh
-cargo run --locked -- --data-dir .migate-new auth login
-cargo run --locked -- --data-dir .migate-new
+./target/release/migate --data-dir "$HOME/.migate-new" auth login
+./target/release/migate --data-dir "$HOME/.migate-new"
 ```
 
 在「家庭」App 中按新显示的配对码添加网桥。新目录建立新的配对身份，需要重新登录米家；原网桥的 Home 名称、房间、场景和自动化不会自动带入新网桥。原数据目录和原配对会保留，请自行整理 Home 中的旧网桥。
@@ -378,8 +467,8 @@ cargo run --locked -- --data-dir .migate-new
 在线从「家庭」App 移除配件后，可使用原目录重新配对。若离线移除后无法重新配对，或需要全新实例，同样可选择与原目录并列的新目录：
 
 ```sh
-cargo run --locked -- --data-dir .migate-trial-1 auth login
-cargo run --locked -- --data-dir .migate-trial-1
+./target/release/migate --data-dir "$HOME/.migate-trial-1" auth login
+./target/release/migate --data-dir "$HOME/.migate-trial-1"
 ```
 
 新实例需要重新登录米家账号并添加到 Apple Home，原目录的数据会保留。

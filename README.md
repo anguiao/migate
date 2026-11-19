@@ -2,7 +2,7 @@
 
 MiGate 使用 Rust 和 `rs-matter` 构建 Matter Bridge，目标是将米家（Xiaomi/MIoT）设备映射为标准 Matter 设备，接入 Apple Home 等生态。
 
-当前在 macOS / Apple Silicon 本机前台运行，Linux 部署暂缓。首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持的插座、墙壁开关负载回路、灯光、米家原生灯组、窗帘、风扇、空调、浴霸、环境测量与状态功能。通用能力按实际服务和属性分别识别，不需要型号白名单；同一设备可有多个控制功能、多个同类功能实例，以及测量、门窗或运动等组合。人体存在只接入整机状态，`xiaomi.sensor_occupy.p1` 不展开分区。功能组合使用合成描述验证，实际型号的功能仍按设备描述判定。
+支持 Apple Silicon Mac 及使用 systemd 和 Avahi 的 Debian/Ubuntu（ARM64、x86_64），可从源码本机构建、前台运行或配置开机自启。首次通过局域网小米主中枢确定米家自有家庭，随后从云端目录接入受支持的插座、墙壁开关负载回路、灯光、米家原生灯组、窗帘、风扇、空调、浴霸、环境测量与状态功能。通用能力按实际服务和属性分别识别，不需要型号白名单；同一设备可有多个控制功能、多个同类功能实例，以及测量、门窗或运动等组合。人体存在只接入整机状态，`xiaomi.sensor_occupy.p1` 不展开分区。功能组合使用合成描述验证，实际型号的功能仍按设备描述判定。
 
 功能识别与通信接口分层：初始 IP 局域网直连支持 `dmaker.fan.p5c` 的标准 MIoT 属性、`lumi.acpartner.mcn02` 通过共用旧 miIO 转换器和内置映射进行的读写，以及 `yeelink.bhf_light.v13` 在同一连接上的标准 MIoT 属性、`set_bh_mode` 低挡命令和 `get_prop` 共享反馈读组。其他型号能否识别为某种功能，不代表已支持该型号的直连协议；BLE 和代理子设备沿用既有中枢或云端路径，不通过 IP 直连。直连沿用同一设备及既有功能、身份、名称、端点和配对，不增加电功率功能。
 
@@ -26,12 +26,17 @@ MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，�
 
 墙壁开关的每条直控回路独立发布，可映射为普通开关或仅通断的灯；其他可发布物理设备使用一个父端点和各可见功能的独立子端点，单功能设备也采用相同布局；有效电量由父端点共享。新增功能只分配新端点，已有功能的身份和端点保持不变。插座映射为 On/Off Plug-in Unit（`0x010A`，revision 3），窗帘映射为 Window Covering（`0x0202`，revision 6），风扇映射为 Fan（`0x002B`，revision 4），空调在同一子端点依次声明 Thermostat（`0x0301`，revision 6）和 Fan（`0x002B`，revision 4），提供温控和风速控制，自动风的当前风速数字采用显示占位（详见已知限制）；灯光按能力采用 On/Off Light（`0x0100`）、Dimmable Light（`0x0101`）、Color Temperature Light（`0x010C`）或 Extended Color Light（`0x010D`），彩灯提供 CT + XY + HS（色相／饱和度）。仅制热暖风映射为 Thermostat（`0x0301`，revision 6，仅 Off/Heat）；两路浴霸风扇分别为 Fan（`0x002B`，revision 4，SpeedMax 2）。测量和状态分别映射为 Temperature Sensor（`0x0302`）、Humidity Sensor（`0x0307`）、Air Quality Sensor（`0x002C`，提供 ppm 浓度，空气质量等级保持 Unknown）、Light Sensor（`0x0106`）、Contact Sensor（`0x0015`）或 Occupancy Sensor（`0x0107`）；共享电量使用 Power Source（`0x0011`）。OnOff/Level Lighting、场景与启动策略仍有标准必需项缺口，Level 保持 revision 6，与 Matter 1.6 的 revision 7 有差异；完整列表见[已知限制](docs/known-limitations.md)。Apple Home 的具体入口与显示受客户端限制，不声称已通过 Matter 认证。
 
+在目标主机安装 Rust 1.96 和平台依赖，再在仓库根目录以运行网桥的普通用户执行下列命令。[构建依赖](docs/running.md#构建)
+
+已有配对时，从原网桥日志的 `Data directory` 确认原目录，用其绝对路径替换示例中的 `"$HOME/.migate"`，构建后直接执行最后一条启动命令。使用仓库 Cargo 配置时，`cargo run` 的默认目录是仓库下的 `.migate/`。
+
 ```sh
-cargo run --locked -- auth login
-cargo run --locked
+cargo build --locked --release
+./target/release/migate --data-dir "$HOME/.migate" auth login
+./target/release/migate --data-dir "$HOME/.migate"
 ```
 
-仓库 Cargo 配置默认使用 `.migate/`；直接运行构建产物时目录规则不同，详见运行指南。
+首次部署时，用米家 App 扫码授权，再按终端显示的配对码添加到 Apple Home。启用系统服务前先停止前台网桥，服务继续使用同一普通用户和数据目录。[Linux 安装与启停](docs/running.md#linux-开机自启) · [macOS 安装与启停](docs/running.md#macos-开机自启)
 
 - [运行与 Apple Home 配对指南](docs/running.md)
 - [已知限制与恢复经验](docs/known-limitations.md)
@@ -87,4 +92,6 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-`cargo test` 使用临时目录、可控协议对端与可推进时钟，复用生产的设备与运行组装入口，覆盖中枢、直连和云端选路、灯具量化与接管、Matter 命令、属性、订阅及退出和重启。进程回归使用系统分配端口、macOS Bonjour 和 `dns-sd` 检查多个实例及 mDNS 公告；普通检查不访问个人账号、真实中枢或设备。
+`cargo test` 使用临时目录、可控协议对端与可推进时钟，复用生产的设备与运行组装入口，覆盖中枢、直连和云端选路、灯具量化与接管、Matter 命令、属性、订阅及退出和重启。进程回归使用系统分配端口检查多个实例，实际解析 macOS Bonjour 或 Linux Avahi 发布的 Matter 服务并核对监听端口。普通检查不访问个人账号、真实中枢或设备。
+
+Linux 进程测试需要运行中的系统 D-Bus 和 Avahi，并使用 `dbus-daemon` 启动隔离总线来验证 Avahi 不可用时的行为。安装依赖见[运行指南](docs/running.md#构建)。
