@@ -145,8 +145,8 @@ fn late_suback_after_timeout_does_not_restore_retired_subscription() {
     let (finished, done) = flume::bounded(1);
     future::block_on(exercise(
         Timing {
-            request: Duration::from_millis(25),
             keepalive: None,
+            ..Timing::default()
         },
         move |mut broker| async move {
             broker.setup().await;
@@ -172,8 +172,12 @@ fn late_suback_after_timeout_does_not_restore_retired_subscription() {
                     stop.close();
                 }),
                 async {
+                    let mut expiring = handle.clone();
+                    expiring.timing.request = Duration::from_millis(25);
                     assert_eq!(
-                        handle.subscribe_property_unobserved("target", POWER).await,
+                        expiring
+                            .subscribe_property_unobserved("target", POWER)
+                            .await,
                         Err(NotificationError::Timeout)
                     );
                     handle

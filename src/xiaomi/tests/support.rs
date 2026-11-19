@@ -87,8 +87,7 @@ pub(crate) fn mock_server(responses: Vec<MockResponse>) -> (String, Receiver<Rec
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         for response in responses {
-            let Some(mut stream) = accept_until(&listener, Instant::now() + Duration::from_secs(2))
-            else {
+            let Some(mut stream) = accept_with_idle_timeout(&listener) else {
                 return;
             };
             let Some(request) = read_request(&mut stream) else {
@@ -103,7 +102,27 @@ pub(crate) fn mock_server(responses: Vec<MockResponse>) -> (String, Receiver<Rec
 
 pub(crate) fn dynamic_mock_server(
     request_limit: usize,
+    respond: impl FnMut(&ReceivedRequest) -> MockResponse + Send + 'static,
+) -> (String, Receiver<ReceivedRequest>) {
+    start_dynamic_mock_server(request_limit, respond, accept_with_idle_timeout)
+}
+
+/// Keep the listener alive until the caller drops the returned sender.
+pub(in crate::xiaomi) fn scoped_dynamic_mock_server(
+    request_limit: usize,
+    respond: impl FnMut(&ReceivedRequest) -> MockResponse + Send + 'static,
+) -> (String, flume::Sender<()>) {
+    let (lifetime, expired) = flume::bounded(0);
+    let (base, _) = start_dynamic_mock_server(request_limit, respond, move |listener| {
+        accept_until(listener, || expired.is_disconnected())
+    });
+    (base, lifetime)
+}
+
+fn start_dynamic_mock_server(
+    request_limit: usize,
     mut respond: impl FnMut(&ReceivedRequest) -> MockResponse + Send + 'static,
+    accept: impl Fn(&TcpListener) -> Option<Box<dyn HttpStream>> + Send + 'static,
 ) -> (String, Receiver<ReceivedRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -111,8 +130,7 @@ pub(crate) fn dynamic_mock_server(
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {
         for _ in 0..request_limit {
-            let Some(mut stream) = accept_until(&listener, Instant::now() + Duration::from_secs(2))
-            else {
+            let Some(mut stream) = accept(&listener) else {
                 return;
             };
             let Some(request) = read_request(&mut stream) else {
@@ -147,7 +165,12 @@ fn write_response(mut stream: Box<dyn HttpStream>, response: MockResponse) {
     }
 }
 
-fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<Box<dyn HttpStream>> {
+fn accept_with_idle_timeout(listener: &TcpListener) -> Option<Box<dyn HttpStream>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    accept_until(listener, || Instant::now() >= deadline)
+}
+
+fn accept_until(listener: &TcpListener, expired: impl Fn() -> bool) -> Option<Box<dyn HttpStream>> {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
@@ -156,7 +179,7 @@ fn accept_until(listener: &TcpListener, deadline: Instant) -> Option<Box<dyn Htt
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
+                if expired() {
                     return None;
                 }
                 thread::sleep(Duration::from_millis(5));

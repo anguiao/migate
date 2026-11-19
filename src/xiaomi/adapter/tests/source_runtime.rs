@@ -418,6 +418,8 @@ fn a_sent_local_power_receipt_settles_after_revocation_and_readmission() {
         } else {
             (Rig::new(true, &["one"]), "outlet:2")
         };
+        // The broker holds the write while the readmitted device gets its initial state.
+        rig.network.gateway_timeout.set(Duration::from_secs(2));
         block_on(rig.run(|c| async move {
             c.announce();
             let control = &c;

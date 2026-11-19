@@ -15,7 +15,7 @@ pub(super) use crate::{
         cloud::CloudClient,
         discovery::Discovery,
         mijia::group_id,
-        tests::support::{MockResponse, dynamic_mock_server},
+        tests::support::{MockResponse, dynamic_mock_server, scoped_dynamic_mock_server},
     },
 };
 pub(super) use async_io::Async;

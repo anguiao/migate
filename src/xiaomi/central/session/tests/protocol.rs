@@ -4,8 +4,9 @@ use super::*;
 fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
     let values = Rc::new(RefCell::new(Vec::new()));
     let events = values.clone();
+    let (exchanged, exchange_done) = flume::bounded(1);
     block_on(pair(
-        |mut broker| async move {
+        move |mut broker| async move {
             broker.setup().await;
             broker.subscription().await;
             let Packet::Publish(read) = broker.next().await else {
@@ -45,9 +46,10 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
             broker
                 .wait_for(|packet| matches!(packet,Packet::PubComp(ack) if ack.pkid==21))
                 .await;
-            async_io::Timer::after(Duration::from_millis(20)).await;
+            exchanged.send(()).unwrap();
+            assert!(broker.next_optional().await.is_none());
         },
-        |handle, driver| async move {
+        move |handle, driver| async move {
             let work = async {
                 handle
                     .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
@@ -66,7 +68,7 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
                         .result,
                     Ok(json!(false))
                 );
-                async_io::Timer::after(Duration::from_millis(10)).await;
+                exchange_done.recv_async().await.unwrap();
                 handle.close();
             };
             let (result, ()) = future::zip(
@@ -88,8 +90,9 @@ fn positive_pubrec_and_reused_duplicate_packet_id_remain_valid() {
 fn duplicate_inflight_qos2_publication_is_delivered_once() {
     let values = Rc::new(RefCell::new(Vec::new()));
     let observed = values.clone();
+    let (exchanged, exchange_done) = flume::bounded(1);
     block_on(pair(
-        |mut broker| async move {
+        move |mut broker| async move {
             broker.setup().await;
             broker.subscription().await;
             let mut publish = Publish::new(
@@ -119,15 +122,16 @@ fn duplicate_inflight_qos2_publication_is_delivered_once() {
             broker
                 .wait_for(|packet| matches!(packet,Packet::PubComp(ack) if ack.pkid==30))
                 .await;
-            async_io::Timer::after(Duration::from_millis(25)).await;
+            exchanged.send(()).unwrap();
+            assert!(broker.next_optional().await.is_none());
         },
-        |handle, driver| async move {
+        move |handle, driver| async move {
             let work = async {
                 handle
                     .subscribe_property("target", PropertyBinding { siid: 2, piid: 1 }, |_| {})
                     .await
                     .unwrap();
-                async_io::Timer::after(Duration::from_millis(15)).await;
+                exchange_done.recv_async().await.unwrap();
                 handle.close();
             };
             let (result, ()) = future::zip(

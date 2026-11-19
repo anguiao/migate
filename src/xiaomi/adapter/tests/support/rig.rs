@@ -103,6 +103,7 @@ pub(in super::super) struct Rig {
     pub(in super::super) data: Vec<NativeDescription>,
     pub(in super::super) cloud: Arc<Mutex<CloudState>>,
     pub(in super::super) clock: Arc<TestClock>,
+    _cloud_server: flume::Sender<()>,
     stall_timeout: Duration,
 }
 pub(in super::super) struct Control {
@@ -357,7 +358,7 @@ impl Rig {
             .certificate_pem
             .clone()
             .unwrap();
-        let (base, _requests) = dynamic_mock_server(200, move |request| {
+        let (base, cloud_server) = scoped_dynamic_mock_server(200, move |request| {
             let detail_finished = responses.clone();
             let token_finished = responses.clone();
             let mut state = responses.lock().unwrap();
@@ -759,6 +760,7 @@ impl Rig {
             data,
             cloud,
             clock,
+            _cloud_server: cloud_server,
             stall_timeout: Duration::from_secs(5),
         }
     }
