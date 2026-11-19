@@ -26,6 +26,8 @@ use std::{net::UdpSocket, rc::Rc, time::Duration};
 
 const WINDOW_SECONDS: u16 = 900;
 
+#[cfg(target_os = "linux")]
+mod avahi;
 #[cfg(test)]
 mod tests;
 
@@ -50,7 +52,11 @@ impl Advertisement {
         Ok(socket)
     }
 
-    async fn run(&mut self, matter: &Matter<'_>) -> Result<(), RuntimeError> {
+    async fn run(
+        &mut self,
+        matter: &Matter<'_>,
+        #[cfg(target_os = "linux")] rebuild: &avahi::Rebuild,
+    ) -> Result<(), RuntimeError> {
         let mdns = match &mut self.mdns {
             Some(mdns) => mdns,
             slot @ None => {
@@ -64,7 +70,11 @@ impl Advertisement {
                 slot.insert(mdns)
             }
         };
-        mdns.run(matter).await.map_err(|error| {
+        #[cfg(target_os = "macos")]
+        let result = mdns.run(matter).await;
+        #[cfg(target_os = "linux")]
+        let result = rebuild.run(mdns, matter).await;
+        result.map_err(|error| {
             #[cfg(target_os = "macos")]
             let operation = "Failed to advertise Matter services with Bonjour";
             #[cfg(target_os = "linux")]
@@ -91,6 +101,8 @@ pub(crate) struct Bridge<'a> {
     identity: &'a Identity,
     pub(super) store: StoreAdapter,
     renamer: Rc<dyn LabelWriter>,
+    #[cfg(target_os = "linux")]
+    advertisement_rebuild: avahi::Rebuild,
 }
 impl<'a> Bridge<'a> {
     pub(crate) fn new(store: &Store, identity: &'a Identity, renamer: Rc<dyn LabelWriter>) -> Self {
@@ -98,6 +110,8 @@ impl<'a> Bridge<'a> {
             identity,
             store: StoreAdapter::new(store.matter()),
             renamer,
+            #[cfg(target_os = "linux")]
+            advertisement_rebuild: avahi::Rebuild::default(),
         }
     }
 
@@ -106,6 +120,19 @@ impl<'a> Bridge<'a> {
         self.store.check_failure()
     }
 
+    /// Return whether the runner must finish an asynchronous mDNS update before rebuilding.
+    pub(crate) fn request_rebuild(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.advertisement_rebuild.request()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            false
+        }
+    }
+
+    /// Run until the advertisement is ready for a requested rebuild or a task fails.
     pub(crate) async fn run_with_advertisement(
         &self,
         configuration: model::MatterConfiguration,
@@ -166,7 +193,11 @@ impl<'a> Bridge<'a> {
                 .await
                 .map_err(|e| format!("Matter transport task failed: {e}").into())
         };
-        let mdns = advertisement.run(&matter);
+        let mdns = advertisement.run(
+            &matter,
+            #[cfg(target_os = "linux")]
+            &self.advertisement_rebuild,
+        );
         let respond = async {
             responder
                 .run::<4, 4>()
@@ -186,6 +217,11 @@ impl<'a> Bridge<'a> {
         .await;
         // A protocol task may return an error before the storage watcher is polled again.
         self.check_failure()?;
-        result
+        result?;
+        #[cfg(target_os = "linux")]
+        if self.advertisement_rebuild.finished() {
+            return Ok(());
+        }
+        Err("Matter instance ended unexpectedly".into())
     }
 }

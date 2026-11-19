@@ -121,6 +121,7 @@ async fn run_lifecycle<D: StartupDeadline>(
                 .run_with_advertisement(app.matter_configuration(), &mut advertisement, &pairing)
                 .await
         });
+        let mut finishing_advertisement = false;
         loop {
             let changed = app.listen();
             let retry = async {
@@ -134,6 +135,7 @@ async fn run_lifecycle<D: StartupDeadline>(
                 Stop,
                 Configuration,
                 Retry,
+                Rebuild,
             }
             let prefer_runner = startup.prefer_runner();
             let wake = future::or(
@@ -152,13 +154,16 @@ async fn run_lifecycle<D: StartupDeadline>(
                             Ok(Wake::Stop)
                         },
                         async {
+                            let protocol = async {
+                                runner.as_mut().await?;
+                                Ok(Wake::Rebuild)
+                            };
+                            if finishing_advertisement {
+                                return protocol.await;
+                            }
                             let configuration = async {
                                 changed.await;
                                 Ok(Wake::Configuration)
-                            };
-                            let protocol = async {
-                                runner.as_mut().await?;
-                                Err("Matter instance ended unexpectedly".into())
                             };
                             let retry = async {
                                 retry.await;
@@ -191,6 +196,9 @@ async fn run_lifecycle<D: StartupDeadline>(
                 bridge.check_failure()?;
                 return Ok(());
             }
+            if matches!(wake, Wake::Rebuild) {
+                break;
+            }
             if matches!(wake, Wake::Configuration) {
                 retry_delay = Duration::from_secs(1);
             }
@@ -211,40 +219,9 @@ async fn run_lifecycle<D: StartupDeadline>(
                 continue;
             };
             if candidate.rebuild {
-                app.stop_actions();
-                drop(runner);
-                bridge.check_failure()?;
-                // Dropping the actual runner releases transport, IM, responder,
-                // handlers and socket. Only now reacquire the latest inputs.
-                let latest = match app.plan() {
-                    Ok(latest) => latest,
-                    Err(error) => {
-                        log::warn!(
-                            "Late configuration prepare failed; restarting the committed configuration: {error}"
-                        );
-                        app.fail(error.to_string());
-                        retry_at = Some(Instant::now() + retry_delay);
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-                        break;
-                    }
-                };
-                if let Some(latest) = latest {
-                    let prepared = app.prepare(latest);
-                    match app.apply(prepared) {
-                        Ok(()) => {
-                            retry_at = None;
-                            retry_delay = Duration::from_secs(1);
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "Configuration apply failed; keeping committed configuration: {error}"
-                            );
-                            retry_at = Some(Instant::now() + retry_delay);
-                            retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-                        }
-                    }
-                } else {
-                    retry_at = None;
+                finishing_advertisement = bridge.request_rebuild();
+                if finishing_advertisement {
+                    continue;
                 }
                 break;
             }
@@ -262,6 +239,40 @@ async fn run_lifecycle<D: StartupDeadline>(
                     retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                 }
             }
+        }
+        app.stop_actions();
+        drop(runner);
+        bridge.check_failure()?;
+        // Reacquire the latest inputs after releasing the old protocol and socket.
+        let latest = match app.plan() {
+            Ok(latest) => latest,
+            Err(error) => {
+                log::warn!(
+                    "Late configuration prepare failed; restarting the committed configuration: {error}"
+                );
+                app.fail(error.to_string());
+                retry_at = Some(Instant::now() + retry_delay);
+                retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+                continue;
+            }
+        };
+        if let Some(latest) = latest {
+            let prepared = app.prepare(latest);
+            match app.apply(prepared) {
+                Ok(()) => {
+                    retry_at = None;
+                    retry_delay = Duration::from_secs(1);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Configuration apply failed; keeping committed configuration: {error}"
+                    );
+                    retry_at = Some(Instant::now() + retry_delay);
+                    retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+                }
+            }
+        } else {
+            retry_at = None;
         }
     }
 }

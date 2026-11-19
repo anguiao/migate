@@ -1,5 +1,7 @@
 //! Isolated processes exercise the ordinary application lifecycle and real Matter sockets.
 mod advertisement;
+#[cfg(target_os = "linux")]
+mod avahi;
 
 // This helper file is shared by the two test crates.
 #[path = "../../../../tests/support/process.rs"]
@@ -173,15 +175,7 @@ fn unavailable_system_bus_causes_a_diagnostic_exit() {
 fn unavailable_avahi_causes_a_diagnostic_exit() {
     let directory = tempfile::tempdir().unwrap();
     let mut command = ready_bridge_command(directory.path(), 0);
-    let address = format!("unix:path={}/test-bus", directory.path().display());
-    let mut bus = TestProcess::spawn(Command::new("dbus-daemon").args([
-        "--session",
-        "--nofork",
-        "--print-address=1",
-        "--address",
-        &address,
-    ]));
-    bus.wait_for_output(Stream::Stdout, &address);
+    let (_bus, address) = avahi::private_bus(directory.path());
     command.env("DBUS_SYSTEM_BUS_ADDRESS", &address);
     let (status, _, stderr) = TestProcess::spawn(&mut command).wait_for_exit();
     assert!(!status.success());
@@ -379,12 +373,24 @@ fn bridge_helper_child() {
                     future::pending().await
                 };
                 let topology = async {
-                    while !remove.try_exists()? {
-                        async_io::Timer::after(Duration::from_millis(10)).await;
+                    let mut change = 0;
+                    loop {
+                        while !remove.try_exists()? {
+                            async_io::Timer::after(Duration::from_millis(10)).await;
+                        }
+                        fs::remove_file(&remove)?;
+                        change += 1;
+                        if change == 1 {
+                            source.remove("test-outlet");
+                        } else {
+                            let mut scope = crate::storage::tests::fixtures::scope();
+                            scope.home_id = format!("home-{change}");
+                            source.scope(scope);
+                        }
+                        source.stage();
+                        log::info!("Fake source staged configuration {change}");
+                        future::yield_now().await;
                     }
-                    source.remove("test-outlet");
-                    source.stage();
-                    future::pending().await
                 };
                 future::or(commands, topology).await
             };
