@@ -18,6 +18,8 @@ sudo apt install build-essential cmake pkg-config avahi-daemon avahi-utils
 cargo build --locked --release
 ```
 
+在内存较少的 Linux 主机上，若 `rustc` 或链接进程被 `SIGKILL` 终止，且内核日志确认内存耗尽，可用 `cargo build --locked --release -j 1` 降低构建并行度，并按需提供交换空间。
+
 ## 前台首配
 
 在仓库根目录，以将运行网桥的普通用户操作。数据目录放在目标主机的本地磁盘上，虚拟机使用来宾系统的磁盘。已有配对时，从原网桥日志的 `Data directory` 确认原数据目录，用它替换示例中的 `"$HOME/.migate"`，直接执行第二条命令。
