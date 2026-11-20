@@ -15,19 +15,9 @@ fn status_text(c: &Control) -> String {
         .unwrap()
 }
 
-async fn eventually(mut predicate: impl FnMut() -> bool) {
-    let ok = future::or(
-        async {
-            async_io::Timer::after(Duration::from_secs(15)).await;
-            false
-        },
-        async {
-            until(&mut predicate).await;
-            true
-        },
-    )
-    .await;
-    assert!(ok, "timed out waiting for direct bath-heater behavior");
+#[track_caller]
+fn eventually(predicate: impl FnMut() -> bool) -> impl Future<Output = ()> {
+    until_with_timeout(Duration::from_secs(15), predicate)
 }
 
 async fn settle(c: &Control) {

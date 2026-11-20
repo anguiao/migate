@@ -64,19 +64,9 @@ fn work(c: &Control) -> Rc<crate::xiaomi::adapter::work::DeviceWork> {
         .clone()
 }
 
-async fn eventually(mut predicate: impl FnMut() -> bool) {
-    let ok = future::or(
-        async {
-            async_io::Timer::after(Duration::from_secs(10)).await;
-            false
-        },
-        async {
-            until(&mut predicate).await;
-            true
-        },
-    )
-    .await;
-    assert!(ok, "timed out waiting for device behavior");
+#[track_caller]
+fn eventually(predicate: impl FnMut() -> bool) -> impl Future<Output = ()> {
+    until_with_timeout(Duration::from_secs(10), predicate)
 }
 
 fn standard_peer() -> Rc<Peer> {

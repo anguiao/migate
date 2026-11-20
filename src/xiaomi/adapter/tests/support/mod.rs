@@ -341,6 +341,17 @@ pub(super) fn until(mut predicate: impl FnMut() -> bool) -> impl Future<Output =
     }
 }
 
+#[track_caller]
+pub(super) fn until_with_timeout(
+    timeout: Duration,
+    predicate: impl FnMut() -> bool,
+) -> impl Future<Output = ()> {
+    future::or(until(predicate), async move {
+        async_io::Timer::after(timeout).await;
+        panic!("test condition timed out after {timeout:?}");
+    })
+}
+
 pub(super) struct OnTestPanic<F: Fn()>(pub(super) F);
 
 impl<F: Fn()> Drop for OnTestPanic<F> {
@@ -400,23 +411,23 @@ pub(super) async fn advance_to(clock: &TestClock, deadline: Duration) {
     clock.advance(deadline - clock.now());
 }
 
-pub(super) async fn exhaust_read_retries(
+#[track_caller]
+pub(super) fn exhaust_read_retries(
     clock: &TestClock,
     work: &crate::xiaomi::adapter::work::DeviceWork,
     id: &str,
     binding: crate::xiaomi::capability::PropertyBinding,
-) {
-    until(|| {
+) -> impl Future<Output = ()> {
+    until(move || {
         let refresh = work.refresh.borrow();
         let now = clock.now();
-        if let Some(retry) = refresh.snapshot().pending.into_iter().find(|read| {
-            read.id == id && read.input.property() == Some(binding) && read.ready_at > now
-        }) {
-            clock.advance(retry.ready_at - now);
+        if let Some(deadline) = refresh.property_ready_at(id, binding)
+            && deadline > now
+        {
+            clock.advance(deadline - now);
         }
         refresh.property_problem(id, binding).is_some() && !refresh.contains(id, binding)
     })
-    .await;
 }
 
 pub(super) fn accepted(did: &str, siid: u32, code: i32) -> Value {

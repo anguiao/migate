@@ -1,6 +1,17 @@
 use super::*;
 
 impl RefreshState {
+    pub(in crate::xiaomi::adapter) fn property_ready_at(
+        &self,
+        id: &str,
+        binding: PropertyBinding,
+    ) -> Option<Duration> {
+        self.pending
+            .iter()
+            .find(|read| read.id == id && read.input.property() == Some(binding))
+            .map(|read| read.ready_at)
+    }
+
     pub(in crate::xiaomi::adapter) fn fail_initial_for_test(
         &mut self,
         id: &str,
