@@ -219,7 +219,7 @@ async fn run_lifecycle<D: StartupDeadline>(
                 continue;
             };
             if candidate.rebuild {
-                finishing_advertisement = bridge.request_rebuild();
+                finishing_advertisement = bridge.request_rebuild().is_pending();
                 if finishing_advertisement {
                     continue;
                 }

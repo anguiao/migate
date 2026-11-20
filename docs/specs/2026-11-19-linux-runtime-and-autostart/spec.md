@@ -16,9 +16,9 @@ MiGate 需要在局域网里完成两个方向的发现。
 | 让 Apple Home 找到 MiGate | 通过 Bonjour 发布 Matter 服务，使用 `AstroMdns`。 | 通过系统 D-Bus 将 Matter 服务注册到 Avahi，使用 `AvahiMdns`。 |
 | 让 MiGate 找到小米主中枢 | 通过 `mdns-sd` 浏览 `_miot-central._tcp.local.`。 | 使用相同的浏览和解析流程。 |
 
-平台选择放在 Matter 公告的创建入口和 Cargo 目标依赖中。macOS 启用 `rs-matter` 的 `astro-dnssd`，Linux 启用 `zbus`。两个后端都发布协议栈根据配对窗口和已保存的 fabric 生成的记录，包括配对时的 `_matterc._udp` 和已配对网桥的 `_matter._tcp`。小米认证命令独立于 Matter 公告后端。[项目锁定版本的 mDNS 后端说明](https://github.com/project-chip/rs-matter/blob/c86233d310902503995738b3137884a3a7dc1764/README.md#build)
+编译时按目标系统选择 Matter 公告后端和 Cargo 依赖。Linux 启用 `rs-matter` 的 `zbus`，macOS 启用 `astro-dnssd`。两个后端都发布协议栈根据配对窗口和已保存的 fabric 生成的记录，包括配对时的 `_matterc._udp` 和已配对网桥的 `_matter._tcp`。小米认证命令独立于 Matter 公告后端。[项目锁定版本的 mDNS 后端说明](https://github.com/project-chip/rs-matter/blob/c86233d310902503995738b3137884a3a7dc1764/README.md#build)
 
-公告使用 Matter 套接字实际绑定的端口，包括 `MIGATE_MATTER_PORT=0` 时由系统分配的端口。同一进程因设备配置变化重建 Matter 实例时，复用公告对象和端口，按新实例的服务集合更新记录。端口绑定、系统 D-Bus 连接或 Avahi 注册失败时，网桥以非零状态退出，日志指出失败的操作。
+公告使用 Matter 套接字实际绑定的端口，包括 `MIGATE_MATTER_PORT=0` 时由系统分配的端口。同一进程因设备配置变化重建 Matter 实例时，共享生命周期向公告后端请求重建。Bonjour 可以立即放行，Avahi 会先等本轮正在处理的注册或撤销操作完成。随后复用公告对象和端口，按新实例的服务集合更新记录。端口绑定、系统 D-Bus 连接或 Avahi 注册失败时，网桥以非零状态退出，日志指出失败的操作。
 
 ## 从前台交给系统服务
 

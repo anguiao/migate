@@ -1,3 +1,4 @@
+use crate::RuntimeError;
 use futures_lite::future;
 use rs_matter::{
     basic_info::BasicInfoConfig,
@@ -10,9 +11,12 @@ use rs_matter::{
         network::{MatterLocalService, mdns::avahi::AvahiMdns},
         session::Sessions,
     },
-    utils::sync::Notification,
+    utils::{sync::Notification, zbus},
 };
-use std::cell::Cell;
+use std::{cell::Cell, task::Poll};
+
+#[derive(Default)]
+pub(super) struct Publisher(Option<AvahiMdns>);
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Phase {
@@ -30,38 +34,50 @@ pub(super) struct Rebuild {
 }
 
 impl Rebuild {
-    pub(super) fn request(&self) -> bool {
+    pub(super) fn request(&self) -> Poll<()> {
         if self.phase.get() != Phase::Serving {
             // This run has made no entry group changes before its first snapshot.
-            return false;
+            return Poll::Ready(());
         }
         self.phase.set(Phase::RebuildRequested);
         self.requested.notify();
-        true
+        Poll::Pending
     }
+}
 
-    pub(super) fn finished(&self) -> bool {
-        self.phase.get() == Phase::Finished
-    }
-
+impl Publisher {
     pub(super) async fn run(
-        &self,
-        mdns: &mut AvahiMdns,
+        &mut self,
         matter: &dyn TransportHost,
-    ) -> Result<(), Error> {
-        let host = Host {
-            matter,
-            rebuild: self,
+        rebuild: &Rebuild,
+    ) -> Result<(), RuntimeError> {
+        let mdns = match &mut self.0 {
+            Some(mdns) => mdns,
+            slot @ None => {
+                let bus = zbus::Connection::system().await.map_err(|error| {
+                    format!("Failed to connect to the system D-Bus for Matter mDNS: {error}")
+                })?;
+                slot.insert(AvahiMdns::new(bus))
+            }
         };
+        let host = Host { matter, rebuild };
         let result = future::or(mdns.run(&host), async {
-            self.requested.wait().await;
+            rebuild.requested.wait().await;
             matter.transport().notify_mdns_changed();
             future::pending().await
         })
         .await;
         match result {
-            Err(error) if self.finished() && error.code() == ErrorCode::Cancelled => Ok(()),
-            result => result,
+            Err(error)
+                if rebuild.phase.get() == Phase::Finished
+                    && error.code() == ErrorCode::Cancelled =>
+            {
+                Ok(())
+            }
+            Err(error) => {
+                Err(format!("Failed to advertise Matter services with Avahi: {error}").into())
+            }
+            Ok(()) => Err("Matter instance ended unexpectedly".into()),
         }
     }
 }
