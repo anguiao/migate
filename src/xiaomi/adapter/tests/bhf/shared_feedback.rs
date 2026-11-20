@@ -219,6 +219,7 @@ fn a_pending_readback_keeps_the_last_valid_speed_time_and_drops_the_stale_group_
             c.announce();
             let control = &c;
             c.peer(standard_peer(), |peer| async move {
+                let heater = function(control, HEATER);
                 let blow = function(control, BLOW);
                 let ventilation = function(control, VENTILATION);
                 eventually(|| {
@@ -251,7 +252,8 @@ fn a_pending_readback_keeps_the_last_valid_speed_time_and_drops_the_stale_group_
                 // A new notification makes the already in-flight group read
                 // stale, but cannot erase the last confirmed speed or its time.
                 peer.notify_value_at(DID, HEATING, json!(false), Some(900), false);
-                eventually(|| work(control).shared_feedback().pending).await;
+                eventually(|| heater.snapshot().heater().unwrap().power.source_time == Some(900))
+                    .await;
                 assert_eq!(blow.snapshot().fan().unwrap().speed, before);
                 assert_eq!(ventilation.snapshot().fan().unwrap().speed.value, Some(1));
 
@@ -264,7 +266,7 @@ fn a_pending_readback_keeps_the_last_valid_speed_time_and_drops_the_stale_group_
                 let (release_fresh, fresh_gate) = flume::bounded(1);
                 control.cloud.lock().unwrap().rpc_gate = Some(fresh_gate);
                 release.send(()).unwrap();
-                async_io::Timer::after(Duration::from_millis(100)).await;
+                eventually(|| control.cloud.lock().unwrap().rpc_reads.len() > reads + 1).await;
                 // The stale 32 (invalid ventilation) must not replace the
                 // confirmed low level before the replacement read arrives.
                 assert_eq!(ventilation.snapshot().fan().unwrap().speed.value, Some(1));
