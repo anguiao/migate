@@ -4,8 +4,7 @@ use super::*;
 fn hub_standard_properties_coexist_with_direct_shared_feedback_and_low_speed() {
     let (rig, direct) = setup();
     let (rig, listener, cloud) = with_cloud_rig(rig);
-    let (allow_cloud, gate) = flume::bounded(1);
-    rig.cloud.lock().unwrap().home_gate = Some(gate);
+    rig.cloud.lock().unwrap().home_status = 503;
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             c.announce();
@@ -26,7 +25,8 @@ fn hub_standard_properties_coexist_with_direct_shared_feedback_and_low_speed() {
                             .is_some_and(|fan| fan.power.value == Some(true))
                 })
                 .await;
-                allow_cloud.send(()).unwrap();
+                control.cloud.lock().unwrap().home_status = 200;
+                control.context.request_sync();
                 eventually(|| {
                     control
                         .context
@@ -34,7 +34,6 @@ fn hub_standard_properties_coexist_with_direct_shared_feedback_and_low_speed() {
                         .is_ok()
                 })
                 .await;
-                control.cloud.lock().unwrap().home_gate = None;
 
                 heater
                     .begin_heater(crate::device::HeaterCommand::Power(true))

@@ -319,6 +319,8 @@ fn a_failed_first_power_read_releases_the_next_fan_command() {
                     assert_eq!(blow.snapshot().fan().unwrap().power.value, None);
                     let on = blow.begin_fan(FanCommand::Power(true)).unwrap();
                     let off = blow.begin_fan(FanCommand::Power(false)).unwrap();
+                    let device = work(control);
+                    exhaust_read_retries(&control.clock, &device, BLOW, BLOW_POWER).await;
                     assert_eq!(on.accepted().await, Err(CommandError::UnknownState));
                     off.accepted().await.unwrap();
                     let peer = hub.state.borrow();
