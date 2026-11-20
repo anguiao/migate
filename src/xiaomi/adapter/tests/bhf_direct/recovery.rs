@@ -365,13 +365,15 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
         endpoints.insert(old_address, old.address);
         endpoints.insert(new_address, new.address);
     }
-    rig.network.lan_timeout.set(Duration::from_millis(100));
     rig.network.discover_at(new.address);
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|c| async move {
         let blow = function(&c, BLOW);
         eventually(|| {
             c.context.direct_candidate(DID).is_ok()
+                && c.context.directory.borrow().devices[DID]
+                    .cloud_access
+                    .is_some()
                 && blow
                     .snapshot()
                     .fan()

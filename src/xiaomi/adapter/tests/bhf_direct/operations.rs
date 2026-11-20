@@ -325,8 +325,9 @@ fn diagnostics_show_low_speed_and_shared_candidates_without_hub() {
             c.peer(standard_peer(), |_hub| async move {
                 eventually(|| {
                     control.context.direct_candidate(DID).is_ok()
+                        && control.context.cloud_observation_candidate(DID, true).is_ok()
                         && work(control).function_observer(HEATER).is_some()
-                        && work(control).shared_feedback().source.is_some()
+                        && work(control).shared_feedback().source == Some(PathKind::Direct)
                 })
                 .await;
                 let text = status_text(control);
