@@ -205,20 +205,20 @@ fn first_cloud_read_failure_unblocks_without_waiting_for_its_retry() {
 #[test]
 fn cloud_offline_result_counts_before_it_retires_the_read_path() {
     let rig = Rig::new(true, &["one"]);
-    rig.clock
-        .automatic
-        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let (release, gate) = flume::bounded(1);
     {
         let mut cloud = rig.cloud.lock().unwrap();
         cloud.online.insert("one".into());
+        cloud.read_gates.insert(("one".into(), 2, 1), gate);
         cloud.read_codes.insert(("one".into(), 2, 1), -704_042_011);
     }
     block_on(rig.run(|c| async move {
         let source = super::super::SourceHandle(c.context.clone());
         let configuration = c.store.devices().load_configuration().unwrap();
+        until(|| !c.cloud.lock().unwrap().property_reads.is_empty()).await;
+        assert!(c.context.cloud_candidate("one", true).is_ok());
         assert!(!source.initial_reads_ready(&configuration));
-        until(|| c.context.cloud_candidate("one", true).is_ok()).await;
-        c.clock.advance(Duration::from_millis(201));
+        release.send(()).unwrap();
         until(|| source.initial_reads_ready(&configuration)).await;
         assert!(
             !c.context.directory.borrow().devices["one"]
