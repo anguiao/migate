@@ -272,12 +272,26 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
 
                     // Priming includes every requested attribute. Its HS/XY
                     // must describe the active white light, not the RGB cache.
-                    let started = std::time::Instant::now();
                     let (id, priming) = subscribe_paths_with_min_interval(&client, &paths, 2)
                         .await
                         .unwrap();
                     assert_colors(&priming, &cool_white);
                     wait_committed(&state).await;
+
+                    // Keep one report unconfirmed so both mode changes are pending together.
+                    function
+                        .observe_light(LightPatch {
+                            brightness_percent: Some(35.0),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    let mut held = Exchange::accept(client.transport()).await.unwrap();
+                    let level = read_report_data(&mut held, id).await.unwrap();
+                    assert_eq!(
+                        level.lighting[&(2, 8, 0)].1,
+                        crate::matter::units::level_from_brightness(35.0) as u16
+                    );
+                    held.acknowledge().await.unwrap();
                     function
                         .observe_light(LightPatch {
                             color: Some(Rgb {
@@ -295,16 +309,15 @@ fn lighting_subscription_reports_active_color_groups_modes_and_shared_versions()
                     assert_eq!(intermediate.lighting[&(2, 0x300, 0)].1, 0);
                     assert_eq!(intermediate.lighting[&(2, 0x300, 1)].1, 254);
                     assert_eq!(intermediate.lighting[&(2, 0x300, 8)].1, 0);
-                    assert!(started.elapsed() < Duration::from_secs(2));
                     function
                         .observe_light(LightPatch {
                             mode: Some(LightMode::Temperature),
                             ..Default::default()
                         })
                         .unwrap();
-                    // Both mode changes fall within the same report interval.
-                    // Even previously marked RGB attributes must encode the
-                    // final CT projection when the actual ReportData is built.
+                    send_report_status(&mut held).await.unwrap();
+                    held.acknowledge().await.unwrap();
+                    // Even previously marked RGB attributes must encode the final CT projection.
                     let merged = receive_observed(&client, id).await.unwrap();
                     assert_colors(&merged, &cool_white);
                     assert_ne!(

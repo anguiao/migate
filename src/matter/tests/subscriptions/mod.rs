@@ -683,6 +683,13 @@ async fn read_paths(client: &Matter<'_>, paths: &[AttrPath]) -> Result<Observed,
 }
 async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Error> {
     let mut exchange = Exchange::accept(client.transport()).await?;
+    let observed = read_report_data(&mut exchange, id).await?;
+    send_report_status(&mut exchange).await?;
+    exchange.acknowledge().await?;
+    Ok(observed)
+}
+
+async fn read_report_data(exchange: &mut Exchange<'_>, id: u32) -> Result<Observed, Error> {
     let mut observed = Observed::default();
     loop {
         exchange.recv_fetch().await?;
@@ -694,18 +701,21 @@ async fn receive_observed(client: &Matter<'_>, id: u32) -> Result<Observed, Erro
             observed.add(&report);
             report.more_chunks.unwrap_or(false)
         };
-        exchange
-            .send_with(|_, buffer| {
-                StatusResp::write(buffer, IMStatusCode::Success)?;
-                Ok(Some(OpCode::StatusResponse.into()))
-            })
-            .await?;
         if !more {
-            break;
+            exchange.rx_done()?;
+            return Ok(observed);
         }
+        send_report_status(exchange).await?;
     }
-    exchange.acknowledge().await?;
-    Ok(observed)
+}
+
+async fn send_report_status(exchange: &mut Exchange<'_>) -> Result<(), Error> {
+    exchange
+        .send_with(|_, buffer| {
+            StatusResp::write(buffer, IMStatusCode::Success)?;
+            Ok(Some(OpCode::StatusResponse.into()))
+        })
+        .await
 }
 
 mod air_conditioner;
