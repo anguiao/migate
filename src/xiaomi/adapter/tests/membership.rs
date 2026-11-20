@@ -311,7 +311,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
         let peer = Rc::new(Peer::default());
         let control = &c;
         c.peer(peer, |peer| async move {
-            until(|| control.context.directory.borrow().scope.is_some()).await;
+            until(|| control.context.directory.borrow().scope_valid() && peer.lists() > 0).await;
             control.cloud.lock().unwrap().members = vec!["multi".into()];
             peer.list_changed(&["multi"]);
             initialized(control, &peer, &["multi"]).await;
@@ -326,6 +326,7 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
                 .cloned()
                 .unwrap();
             let old = function(&context, "multi", "outlet:3");
+            let gateway = context.local_candidate("multi", false).unwrap();
             control.cloud.lock().unwrap().members.clear();
             peer.list_changed(&["multi"]);
             until(|| {
@@ -347,6 +348,8 @@ fn an_empty_bridge_adds_removes_and_readds_with_stable_identity_and_name() {
                 old.execute(Command::On).await,
                 Err(crate::device::CommandError::Cancelled)
             );
+            // The old unsubscribe acknowledgments precede this reply on the gateway connection.
+            gateway.get_devices(|_| {}).await.result.unwrap();
             peer.notify("multi", 3, true);
             control.cloud.lock().unwrap().members = vec!["multi".into()];
             peer.list_changed(&["multi"]);

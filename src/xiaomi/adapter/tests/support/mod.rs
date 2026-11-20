@@ -335,8 +335,15 @@ pub(super) fn until(mut predicate: impl FnMut() -> bool) -> impl Future<Output =
     let caller = std::panic::Location::caller();
     async move {
         let _waiting = OnTestPanic(|| eprintln!("Waiting for the test condition at {caller}"));
-        while !predicate() {
+        // Let ready futures run, then give socket peers and child processes time on the CPU.
+        for _ in 0..8 {
+            if predicate() {
+                return;
+            }
             future::yield_now().await;
+        }
+        while !predicate() {
+            async_io::Timer::after(Duration::from_millis(1)).await;
         }
     }
 }
@@ -372,8 +379,9 @@ pub(super) fn function(
         .function(id)
         .unwrap()
 }
-pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
-    until(|| {
+#[track_caller]
+pub(super) fn initialized(c: &Control, peer: &Peer, dids: &[&str]) -> impl Future<Output = ()> {
+    until(move || {
         dids.iter().all(|did| {
             c.context
                 .physical(&DeviceKey::new("xiaomi", *did))
@@ -404,7 +412,6 @@ pub(super) async fn initialized(c: &Control, peer: &Peer, dids: &[&str]) {
             .count()
             >= 1
     })
-    .await;
 }
 pub(super) async fn advance_to(clock: &TestClock, deadline: Duration) {
     until(|| clock.deadlines.lock().unwrap().contains(&deadline)).await;
