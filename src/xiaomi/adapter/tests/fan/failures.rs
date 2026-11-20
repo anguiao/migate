@@ -68,6 +68,26 @@ fn cloud_speed_waits_for_each_single_property_receipt() {
     }));
 }
 
+async fn settle_fan_feedback(control: &Control) {
+    let device = work(control);
+    until(|| {
+        let fan = fan(control);
+        fan.power.value == Some(false)
+            && fan.speed.value == Some(40)
+            && fan.swing.value == Some(false)
+            && device.fan_mode_observation("fan:2").value == Some(1)
+            && device.function_observer("fan:2").is_some()
+            && [POWER, MODE, SPEED, SWING]
+                .iter()
+                .all(|binding| !device.refresh.borrow().contains("fan:2", *binding))
+    })
+    .await;
+    control
+        .clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[test]
 fn each_local_step_failure_or_timeout_stops_the_sequence() {
     for failure in 0..3 {
@@ -82,7 +102,7 @@ fn each_local_step_failure_or_timeout_stops_the_sequence() {
                 peer.value("one", POWER, json!(false));
                 let control = &c;
                 c.peer(peer, |peer| async move {
-                    until(|| fan(control).power.value == Some(false) && fan(control).speed.value == Some(40) && work(control).fan_mode_observation("fan:2").value == Some(1) && fan(control).swing.value == Some(false)).await;
+                    settle_fan_feedback(control).await;
                     peer.state.borrow_mut().hold_writes = true;
                     let function = function(&control.context, "one", "fan:2");
                     let before = function.snapshot().fan();
@@ -122,13 +142,7 @@ fn each_cloud_step_failure_or_timeout_stops_the_sequence() {
             let (rig, listener, cloud) = cloud_rig();
             block_on(rig.run(|c| async move {
                 future::or(cloud.run(&listener), async {
-                    until(|| {
-                        fan(&c).power.value == Some(false)
-                            && fan(&c).speed.value == Some(40)
-                            && work(&c).fan_mode_observation("fan:2").value == Some(1)
-                            && fan(&c).swing.value == Some(false)
-                    })
-                    .await;
+                    settle_fan_feedback(&c).await;
                     let function = function(&c.context, "one", "fan:2");
                     let before = function.snapshot().fan();
                     let (release, gate) = flume::bounded(1);
