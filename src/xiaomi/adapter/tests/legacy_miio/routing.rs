@@ -6,6 +6,8 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
 
     let did = "308540429";
     let (rig, peer) = setup(did);
+    // Keep cloud synchronization from replacing the staged profile during the direct command.
+    rig.cloud.lock().unwrap().home_status = 503;
     block_on(rig.run_result_without_publication(|control| async move {
         until(|| {
             control.context.direct_candidate(did).is_ok()
@@ -26,8 +28,7 @@ fn uncommitted_profile_does_not_replace_the_running_direct_source() {
         {
             let mut live = control.context.directory.borrow_mut();
             let slot = live.devices.get_mut(did).unwrap();
-            // There is no newer authoritative cloud model in this scenario.
-            slot.cloud_access = None;
+            assert!(slot.cloud_access.is_none());
             slot.latest_description = Some(candidate.into());
         }
         assert!(control.context.legacy_mapping(did).is_some());
