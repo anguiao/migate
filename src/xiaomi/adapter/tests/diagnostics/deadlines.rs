@@ -202,6 +202,16 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                     report.contains("Gateway certificate: valid until"),
                     "{report}"
                 );
+                // A separate directory authentication after the clock jump may update completed_at.
+                let (_release, directory) = flume::bounded(1);
+                let homes = {
+                    let mut cloud = control.cloud.lock().unwrap();
+                    cloud.home_gate = Some(directory);
+                    cloud.homes
+                };
+                control.context.request_sync();
+                until(|| control.cloud.lock().unwrap().homes > homes).await;
+                let completed_at = control.context.diagnostics().auth.completed_at();
                 let previous_reason = control.context.directory.borrow().devices["one"]
                     .routing_history
                     .as_ref()
@@ -285,7 +295,7 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                 .await;
                 assert_eq!(
                     control.context.diagnostics().auth.completed_at(),
-                    before.auth.completed_at()
+                    completed_at
                 );
                 control.context.status_changed.notify(usize::MAX);
                 for _ in 0..10 {
