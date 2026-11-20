@@ -201,7 +201,7 @@ fn avahi_errors_during_a_requested_rebuild_are_fatal() {
         &"Injected Avahi commit failure",
     ))
     .unwrap();
-    let (status, _, stderr) = process.wait_for_exit();
+    let (status, _, stderr) = process.wait_for_exit(TIMEOUT);
     assert!(!status.success(), "{stderr}");
     assert!(
         stderr.contains("Failed to advertise Matter services with Avahi"),

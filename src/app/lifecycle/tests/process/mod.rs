@@ -23,6 +23,7 @@ use std::{
 
 const MATTER_LISTENING: &str = "Matter UDP listening on port ";
 const MDNS_UPDATED: &str = "mDNS services updated";
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 // A native DNS-SD registration can wait ten seconds for its callback.
 const MDNS_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -37,7 +38,10 @@ impl TestProcess {
         let mut process = Self::spawn(&mut helper_command(directory, port, initial));
 
         // The source and terminal must make progress while Matter is gated.
-        process.wait_for_output(Stream::Stderr, "Fake source awaiting initial read");
+        let ready = "Fake source awaiting initial read";
+        process.wait_for_output_matching(Stream::Stderr, ready, STARTUP_TIMEOUT, |stderr| {
+            stderr.contains(ready)
+        });
         process.send("status\n");
         process.wait_for_output(Stream::Stdout, "test-outlet (Test Outlet): initializing\n");
         process.wait_for_output(Stream::Stdout, "  outlet:2 (主电源): unknown");
@@ -152,7 +156,7 @@ fn occupied_matter_port_causes_a_diagnostic_exit() {
     let reserved = UdpSocket::bind(matter_address(0)).unwrap();
     let port = reserved.local_addr().unwrap().port();
     let process = TestProcess::spawn(&mut ready_bridge_command(directory.path(), port));
-    let (status, _, stderr) = process.wait_for_exit();
+    let (status, _, stderr) = process.wait_for_exit(STARTUP_TIMEOUT);
     assert!(!status.success());
     assert!(
         stderr.contains(&format!("Failed to bind Matter UDP port {port}")),
@@ -169,7 +173,7 @@ fn unavailable_system_bus_causes_a_diagnostic_exit() {
         "DBUS_SYSTEM_BUS_ADDRESS",
         format!("unix:path={}/missing-bus", directory.path().display()),
     );
-    let (status, _, stderr) = TestProcess::spawn(&mut command).wait_for_exit();
+    let (status, _, stderr) = TestProcess::spawn(&mut command).wait_for_exit(STARTUP_TIMEOUT);
     assert!(!status.success());
     assert!(
         stderr.contains("Failed to connect to the system D-Bus for Matter mDNS"),
@@ -184,7 +188,7 @@ fn unavailable_avahi_causes_a_diagnostic_exit() {
     let mut command = ready_bridge_command(directory.path(), 0);
     let (_bus, address) = avahi::private_bus(directory.path());
     command.env("DBUS_SYSTEM_BUS_ADDRESS", &address);
-    let (status, _, stderr) = TestProcess::spawn(&mut command).wait_for_exit();
+    let (status, _, stderr) = TestProcess::spawn(&mut command).wait_for_exit(STARTUP_TIMEOUT);
     assert!(!status.success());
     assert!(
         stderr.contains("Failed to advertise Matter services with Avahi"),

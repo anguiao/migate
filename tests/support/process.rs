@@ -127,18 +127,18 @@ impl TestProcess {
                 .unwrap()
                 .success()
         );
-        self.wait_for_exit()
+        self.wait_for_exit(TIMEOUT)
     }
 
-    pub(crate) fn wait_for_exit(mut self) -> (ExitStatus, String, String) {
-        let deadline = Instant::now() + TIMEOUT;
+    pub(crate) fn wait_for_exit(mut self, timeout: Duration) -> (ExitStatus, String, String) {
+        let deadline = Instant::now() + timeout;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
             }
             assert!(
                 Instant::now() < deadline,
-                "process did not exit within {TIMEOUT:?}: {}",
+                "process did not exit within {timeout:?}: {}",
                 self.output().1
             );
             thread::sleep(POLL_INTERVAL);
