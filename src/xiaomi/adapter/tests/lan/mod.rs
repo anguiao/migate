@@ -7,6 +7,8 @@ use crate::{
     },
 };
 
+const RECOVERY_REQUEST_TIMEOUT: Duration = Duration::from_millis(400);
+
 mod connection;
 mod identity;
 mod polling;

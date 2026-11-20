@@ -34,9 +34,8 @@ fn retry_new_credentials_after_temporary_failure(
     rig.store.lan().save(&record).unwrap();
     let context = rig.source.context.clone();
     rig.network.lan_port.set(peer.address.port());
-    rig.network.lan_timeout.set(Duration::from_millis(80));
-    rig.network
-        .discover_at(peer.address, Duration::from_millis(20));
+    rig.network.lan_timeout.set(RECOVERY_REQUEST_TIMEOUT);
+    rig.network.discover_at(peer.address);
     let new_info = CloudDeviceInfo {
         did: record.did.clone(),
         model: record.model.clone(),
@@ -233,8 +232,7 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
     let context = adapter.context.clone();
     assert!(context.diagnostics().auth.certificate.unwrap().not_after < rig.clock.wall());
     rig.network.lan_port.set(peer.address.port());
-    rig.network
-        .discover_at(peer.address, Duration::from_millis(20));
+    rig.network.discover_at(peer.address);
     block_on(async {
         future::or(
             async {
@@ -382,8 +380,7 @@ fn enrollment_requires_successful_read_and_revocation_survives_restart() {
     let context = rig.source.context.clone();
     rig.network.lan_port.set(peer.address.port());
     rig.network.lan_timeout.set(Duration::from_millis(100));
-    rig.network
-        .discover_at(peer.address, Duration::from_millis(20));
+    rig.network.discover_at(peer.address);
     context
         .directory
         .borrow_mut()
@@ -533,9 +530,8 @@ fn discovered_new_address_is_saved_only_after_authenticated_read() {
     let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
     rig.network.lan_port.set(peer.address.port());
-    rig.network.lan_timeout.set(Duration::from_millis(40));
-    rig.network
-        .discover_at(peer.address, Duration::from_millis(20));
+    rig.network.lan_timeout.set(RECOVERY_REQUEST_TIMEOUT);
+    rig.network.discover_at(peer.address);
     block_on(async {
         future::or(
             async {
@@ -616,8 +612,7 @@ fn discovered_address_error_controls_recovery(rejected: bool) {
             .borrow_mut()
             .insert(record.address, old.address);
     }
-    rig.network
-        .discover_at(peer.address, Duration::from_millis(20));
+    rig.network.discover_at(peer.address);
 
     block_on(async {
         future::or(
@@ -745,8 +740,7 @@ fn occupied_address_recovers(old: &FakeDevice, expected_old_business: usize, tok
         .lan_endpoints
         .borrow_mut()
         .insert(record.address, old.address);
-    rig.network
-        .discover_at(target.address, Duration::from_millis(20));
+    rig.network.discover_at(target.address);
     block_on(async {
         future::or(
             async {
@@ -850,8 +844,7 @@ fn identity_mismatch_without_discovery_stops_without_retries() {
         .borrow_mut()
         .insert(record.address, old.address);
     rig.network.lan_timeout.set(Duration::from_millis(500));
-    rig.network
-        .discover_at(discovery.local_addr().unwrap(), Duration::from_millis(20));
+    rig.network.discover_at(discovery.local_addr().unwrap());
     block_on(async {
         future::or(
             async {

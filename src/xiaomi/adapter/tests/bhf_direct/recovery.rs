@@ -366,8 +366,7 @@ fn v13_credential_and_address_replacement_moves_standard_and_shared_direct_traff
         endpoints.insert(new_address, new.address);
     }
     rig.network.lan_timeout.set(Duration::from_millis(100));
-    rig.network
-        .discover_at(new.address, Duration::from_millis(20));
+    rig.network.discover_at(new.address);
     rig.clock.automatic.store(true, Ordering::Relaxed);
     block_on(rig.run(|c| async move {
         let blow = function(&c, BLOW);

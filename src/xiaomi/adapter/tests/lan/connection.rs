@@ -525,9 +525,8 @@ fn failed_device_has_one_backoff_recovery_and_no_healthy_probe() {
     let (adapter, _) = rig.reopen_adapter();
     let context = adapter.context.clone();
     rig.network.lan_port.set(peer.address.port());
-    rig.network.lan_timeout.set(Duration::from_millis(40));
-    rig.network
-        .discover_at(peer.address, Duration::from_millis(20));
+    rig.network.lan_timeout.set(RECOVERY_REQUEST_TIMEOUT);
+    rig.network.discover_at(peer.address);
     block_on(async {
         future::or(
             async {

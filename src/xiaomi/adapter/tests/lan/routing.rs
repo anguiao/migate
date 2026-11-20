@@ -555,13 +555,13 @@ fn a_held_direct_read_does_not_block_the_next_read_for_another_device() {
             until(|| !works[1].refresh.borrow().contains("fan:2", power)).await;
             let completed = second.reads.load(Ordering::Relaxed);
             works[1].refresh_property("fan:2", speed);
-            async_io::Timer::after(Duration::from_millis(100)).await;
-            let progressed = second.reads.load(Ordering::Relaxed) > completed;
+            until(|| {
+                second.reads.load(Ordering::Relaxed) > completed
+                    && !works[1].refresh.borrow().contains("fan:2", speed)
+            })
+            .await;
+            assert!(works[0].refresh.borrow().contains("fan:2", power));
             first.hold_read.store(false, Ordering::Relaxed);
-            assert!(
-                progressed,
-                "one held device must not block another device's subsequent read"
-            );
         })
     }));
 }

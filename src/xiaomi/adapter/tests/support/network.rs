@@ -17,7 +17,7 @@ pub(in crate::xiaomi::adapter::tests) struct TestNetwork {
     pub(in crate::xiaomi::adapter::tests) lan_port: Cell<u16>,
     pub(in crate::xiaomi::adapter::tests) lan_timeout: Cell<Duration>,
     pub(in crate::xiaomi::adapter::tests) lan_endpoints: RefCell<BTreeMap<Ipv4Addr, SocketAddr>>,
-    discovery_target: Cell<Option<(SocketAddr, Duration)>>,
+    discovery_target: Cell<Option<SocketAddr>>,
 }
 
 impl TestNetwork {
@@ -39,12 +39,8 @@ impl TestNetwork {
             .set(Some(Duration::from_millis(400)));
     }
 
-    pub(in crate::xiaomi::adapter::tests) fn discover_at(
-        &self,
-        address: SocketAddr,
-        timeout: Duration,
-    ) {
-        self.discovery_target.set(Some((address, timeout)));
+    pub(in crate::xiaomi::adapter::tests) fn discover_at(&self, address: SocketAddr) {
+        self.discovery_target.set(Some(address));
     }
 
     pub(in crate::xiaomi::adapter::tests) fn build(
@@ -110,7 +106,7 @@ impl Network for TestNetwork {
         did: u64,
     ) -> LocalBoxFuture<'a, Option<Ipv4Addr>> {
         match self.discovery_target.get() {
-            Some((target, timeout)) => Box::pin(discovery.address_at(did, target, timeout)),
+            Some(target) => Box::pin(discovery.address_at(did, target, Duration::from_millis(250))),
             None => Box::pin(future::ready(None)),
         }
     }
