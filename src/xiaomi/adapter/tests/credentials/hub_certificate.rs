@@ -74,6 +74,12 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
         c.clock
             .automatic
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // The pending request captured its 401. A new credential must get its own response.
+        {
+            let mut cloud = c.cloud.lock().unwrap();
+            cloud.cert_status = 200;
+            cloud.cert_gate = None;
+        }
         let key = c.context.ha_key().unwrap();
         c.context
             .token_rejected(
@@ -96,11 +102,6 @@ fn late_old_certificate_401_keeps_fresh_auth_and_retries_with_current_credential
                 == "fresh-access"
         })
         .await;
-        {
-            let mut cloud = c.cloud.lock().unwrap();
-            cloud.cert_status = 200;
-            cloud.cert_gate = None;
-        }
         release.send(()).unwrap();
         until(|| c.cloud.lock().unwrap().certs == 2).await;
         until(|| {

@@ -119,7 +119,11 @@ fn token_deadline_is_polled_while_initial_mijia_directory_is_pending() {
         cloud.cert_gate = Some(certificate);
     }
     block_on(rig.run(|c| async move {
-        until(|| c.cloud.lock().unwrap().homes == 1).await;
+        until(|| {
+            let cloud = c.cloud.lock().unwrap();
+            cloud.homes == 1 && cloud.certs == 1
+        })
+        .await;
         c.clock.advance(Duration::from_secs(4));
         async_io::Timer::after(Duration::from_millis(20)).await;
         assert_eq!(c.cloud.lock().unwrap().tokens, 0);
@@ -138,7 +142,6 @@ fn token_deadline_is_polled_while_initial_mijia_directory_is_pending() {
         })
         .await;
         assert_eq!(c.cloud.lock().unwrap().tokens, 1);
-        assert_eq!(c.cloud.lock().unwrap().certs, 1);
         assert_eq!(
             c.context
                 .credentials
