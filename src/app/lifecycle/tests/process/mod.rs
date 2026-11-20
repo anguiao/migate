@@ -302,9 +302,9 @@ fn helper_command(directory: &Path, port: u16, initial: bool) -> Command {
 
 #[test]
 #[ignore = "subprocess entry point used by the bridge lifecycle tests"]
-fn bridge_helper_child() {
+fn bridge_helper_child() -> Result<(), String> {
     let Some(directory) = std::env::var_os("MIGATE_TEST_HELPER_DIRECTORY") else {
-        return;
+        return Ok(());
     };
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -398,7 +398,7 @@ fn bridge_helper_child() {
                 shutdown_signal().await?;
                 Ok(())
             };
-            let result = future::block_on(run_xiaomi_bridge(
+            future::block_on(run_xiaomi_bridge(
                 BridgeOptions {
                     store: &store,
                     identity: &identity,
@@ -411,12 +411,10 @@ fn bridge_helper_child() {
                 blocking::Unblock::new(std::io::stdout()),
                 interrupt,
                 |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
-            ));
-            if let Err(error) = result {
-                panic!("isolated bridge failed: {error}");
-            }
+            ))
+            .map_err(|error| format!("isolated bridge failed: {error}"))
         })
         .unwrap()
         .join()
-        .unwrap();
+        .unwrap()
 }
