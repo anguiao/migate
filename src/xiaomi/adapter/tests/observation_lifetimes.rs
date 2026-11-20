@@ -3,12 +3,6 @@ use crate::xiaomi::capability::PropertyBinding;
 
 const POWER: PropertyBinding = PropertyBinding { siid: 2, piid: 1 };
 
-fn observation_rig(members: &[&str]) -> Rig {
-    let rig = Rig::new(true, members);
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
-    rig
-}
-
 fn device_work(c: &Control, did: &str) -> Rc<super::super::work::DeviceWork> {
     c.context.directory.borrow().devices[did]
         .work
@@ -63,7 +57,7 @@ async fn release_operation(peer: &Peer, operation: &str, did: &str, siid: u32, v
 
 #[test]
 fn an_accepted_write_invalidates_an_older_held_local_read() {
-    block_on(observation_rig(&["one", "two"]).run(|c| async move {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
@@ -91,7 +85,7 @@ fn an_accepted_write_invalidates_an_older_held_local_read() {
 
 #[test]
 fn a_source_change_and_new_read_do_not_invalidate_a_held_write_without_notifications() {
-    block_on(observation_rig(&["one", "two"]).run(|c| async move {
+    block_on(Rig::new(true, &["one", "two"]).run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
@@ -188,7 +182,7 @@ fn a_native_replacement_keeps_a_late_write_receipt_out_of_the_new_sink() {
 
 #[test]
 fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
-    block_on(observation_rig(&["multi"]).run(|c| async move {
+    block_on(Rig::new(true, &["multi"]).run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(Rc::new(Peer::default()), |peer| async move {
@@ -235,7 +229,7 @@ fn a_duplicate_description_preserves_a_held_write_and_its_consumer() {
 
 #[test]
 fn local_disconnect_preserves_the_work_instance_and_cloud_command_consumer() {
-    let rig = observation_rig(&["one"]);
+    let rig = Rig::new(true, &["one"]);
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         c.announce();

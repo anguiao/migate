@@ -5,7 +5,6 @@ fn manual_rig(members: &[&str]) -> Rig {
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
     rig
 }
 
@@ -65,7 +64,6 @@ fn periodic_hub_reads_are_bounded_fair_and_yield_to_command_feedback() {
         "device14", "device15", "device16",
     ];
     let rig = Rig::new(true, &dids).with_stall_timeout(Duration::from_secs(10));
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
     block_on(rig.run(|c| async move {
         c.announce();
         let peer = Rc::new(Peer::default());

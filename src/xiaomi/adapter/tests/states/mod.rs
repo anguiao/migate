@@ -118,11 +118,6 @@ fn motion_peer() -> Rc<Peer> {
     peer
 }
 
-fn held_contact_rig() -> Rig {
-    let rig = contact_rig();
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
-    rig
-}
 fn held_contact_peer() -> Rc<Peer> {
     let peer = Rc::new(Peer::default());
     peer.value("one", CONTACT, json!(true));

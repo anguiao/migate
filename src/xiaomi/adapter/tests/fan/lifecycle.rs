@@ -4,9 +4,7 @@ use futures_lite::future::poll_once;
 
 #[test]
 fn retired_instance_cannot_resume_a_sent_speed_or_affect_its_replacement() {
-    let rig = rig();
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
-    block_on(rig.run(|c| async move {
+    block_on(rig().run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(peer(), |peer| async move {

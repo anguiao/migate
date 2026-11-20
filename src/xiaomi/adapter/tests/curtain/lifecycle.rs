@@ -3,7 +3,9 @@ use super::*;
 #[test]
 fn curtain_rejection_and_timeout_are_reported_without_replay() {
     use crate::device::{CommandError, CurtainCommand};
-    block_on(rig().run(|c| async move {
+    let rig = rig();
+    rig.network.use_short_gateway_request_timeout();
+    block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(peer(), |peer| async move {
@@ -47,9 +49,7 @@ fn curtain_rejection_and_timeout_are_reported_without_replay() {
 #[test]
 fn retired_curtain_cancels_queued_work_and_old_receipt_cannot_overtake_replacement() {
     use crate::device::{CommandError, CurtainCommand};
-    let rig = rig();
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
-    block_on(rig.run(|c| async move {
+    block_on(rig().run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(peer(), |peer| async move {

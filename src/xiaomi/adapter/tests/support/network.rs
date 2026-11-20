@@ -12,7 +12,7 @@ use std::{cell::Cell, net::Ipv4Addr};
 pub(in crate::xiaomi::adapter::tests) struct TestNetwork {
     gateway_ca: Option<String>,
     pub(in crate::xiaomi::adapter::tests) notification_results: Cell<usize>,
-    pub(in crate::xiaomi::adapter::tests) gateway_timeout: Cell<Duration>,
+    gateway_request_timeout: Cell<Option<Duration>>,
     pub(in crate::xiaomi::adapter::tests) notification_address: Cell<Option<SocketAddr>>,
     pub(in crate::xiaomi::adapter::tests) lan_port: Cell<u16>,
     pub(in crate::xiaomi::adapter::tests) lan_timeout: Cell<Duration>,
@@ -25,13 +25,18 @@ impl TestNetwork {
         Rc::new(Self {
             gateway_ca,
             notification_results: Cell::new(0),
-            gateway_timeout: Cell::new(Duration::from_millis(150)),
+            gateway_request_timeout: Cell::new(None),
             notification_address: Cell::new(None),
             lan_port: Cell::new(lan::PORT),
             lan_timeout: Cell::new(lan::TIMEOUT),
             lan_endpoints: RefCell::default(),
             discovery_target: Cell::new(None),
         })
+    }
+
+    pub(in crate::xiaomi::adapter::tests) fn use_short_gateway_request_timeout(&self) {
+        self.gateway_request_timeout
+            .set(Some(Duration::from_millis(400)));
     }
 
     pub(in crate::xiaomi::adapter::tests) fn discover_at(
@@ -69,7 +74,7 @@ impl Network for TestNetwork {
                 address,
                 credentials,
                 ca,
-                self.gateway_timeout.get(),
+                self.gateway_request_timeout.get(),
             )),
             None => Box::pin(central::connect(address, credentials)),
         }

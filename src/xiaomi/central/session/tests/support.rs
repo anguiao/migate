@@ -1,11 +1,35 @@
 use super::*;
+use crate::storage::XiaomiRecord;
 use crate::xiaomi::{
     capability::PropertyBinding,
     central::{CentralError, RequestOutcome, SendDecision, SendHooks},
     property::{PropertyReading, PropertyResults},
 };
 use serde_json::Value;
-use std::{future::Future, time::Duration};
+use std::{future::Future, net::SocketAddr, time::Duration};
+
+pub(in crate::xiaomi) async fn connect(
+    address: SocketAddr,
+    credentials: &XiaomiRecord,
+    ca: &str,
+    request_timeout: Option<Duration>,
+) -> Result<(SessionHandle, SessionDriver), CentralError> {
+    let stream = connect_mqtt(address, credentials, ca).await?;
+    let (mut handle, driver) = start(
+        Box::new(stream),
+        &credentials.hub.as_ref().unwrap().virtual_did,
+        Timing {
+            request: Duration::from_secs(2),
+            keepalive: None,
+        },
+    )
+    .await?;
+    // A missing business reply can time out independently of the MQTT handshake and QoS 2.
+    if let Some(timeout) = request_timeout {
+        handle.timing.request = timeout;
+    }
+    Ok((handle, driver))
+}
 
 pub(super) fn queued_handle(timing: Timing) -> SessionHandle {
     SessionHandle {

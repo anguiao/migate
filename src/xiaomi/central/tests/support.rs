@@ -174,7 +174,7 @@ pub(super) async fn exchange_tls(
     .await
 }
 
-pub(in crate::xiaomi) use super::super::session::tests::support::Broker;
+pub(in crate::xiaomi) use super::super::session::tests::support::{Broker, connect};
 
 pub(in crate::xiaomi::central) async fn connect_mqtt(
     address: SocketAddr,
@@ -184,22 +184,4 @@ pub(in crate::xiaomi::central) async fn connect_mqtt(
     let stream = tls::connect(address, credentials, ca).await?;
     disable_nagle(stream.get_ref().0.get_ref());
     Ok(stream)
-}
-
-pub(in crate::xiaomi) async fn connect(
-    address: SocketAddr,
-    credentials: &XiaomiRecord,
-    ca: &str,
-    request: Duration,
-) -> Result<(SessionHandle, SessionDriver), CentralError> {
-    let stream = connect_mqtt(address, credentials, ca).await?;
-    session::tests::start(
-        Box::new(stream),
-        &credentials.hub.as_ref().unwrap().virtual_did,
-        session::Timing {
-            request,
-            keepalive: None,
-        },
-    )
-    .await
 }

@@ -72,7 +72,11 @@ fn cloud_speed_waits_for_each_single_property_receipt() {
 fn each_local_step_failure_or_timeout_stops_the_sequence() {
     for failure in 0..3 {
         for timeout in [false, true] {
-            block_on(rig().run(|c| async move {
+            let rig = rig();
+            if timeout {
+                rig.network.use_short_gateway_request_timeout();
+            }
+            block_on(rig.run(|c| async move {
                 c.announce();
                 let peer = peer();
                 peer.value("one", POWER, json!(false));
@@ -264,6 +268,7 @@ fn partial_fan_acceptance_reads_only_after_the_last_step_and_keeps_each_receipt(
 fn fan_partial_acceptance_then_timeout_reads_over_the_hub() {
     use crate::xiaomi::adapter::StepReceipt;
     let (rig, listener, cloud) = cloud_rig();
+    rig.network.use_short_gateway_request_timeout();
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             c.announce();

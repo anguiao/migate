@@ -94,10 +94,7 @@ fn own_echo_cache_same_value_and_invalid_notifications_do_not_take_over_but_exte
 
 #[test]
 fn removing_and_readding_preserves_feedback_until_accepted_history_expires() {
-    let rig = Rig::light("xiaomi.light.ceil04");
-    // Keep the deliberately held receipt alive across replacement and feedback.
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
-    block_on(rig.run(|c| async move {
+    block_on(Rig::light("xiaomi.light.ceil04").run(|c| async move {
         c.announce();
         let peer = peer_values(&c);
         let control = &c;

@@ -299,7 +299,11 @@ fn invalid_battery_data_and_read_failures_preserve_last_value_and_measurements()
 #[test]
 fn battery_subscription_denial_or_timeout_does_not_block_measurement_notifications() {
     for timeout in [false, true] {
-        block_on(Rig::sensors(&["sensor"]).run(|c| async move {
+        let rig = Rig::sensors(&["sensor"]);
+        if timeout {
+            rig.network.use_short_gateway_request_timeout();
+        }
+        block_on(rig.run(|c| async move {
             c.announce();
             let peer = sensor_peer(21.0, 45.0);
             peer.value("sensor", BATTERY, json!(55));

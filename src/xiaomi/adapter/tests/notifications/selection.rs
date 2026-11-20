@@ -275,7 +275,6 @@ fn new_and_restored_pushless_devices_read_and_control_without_local_notification
 fn real_source_handoff_and_cloud_read_preserve_inflight_write_rules_and_fifo() {
     for notify_after_send in [false, true] {
         let (rig, listener, cloud) = with_cloud_peer(&["one"]);
-        rig.network.gateway_timeout.set(Duration::from_secs(2));
         block_on(rig.run(|c| async move {
             future::or(cloud.run(&listener), async {
                 c.announce();
@@ -438,6 +437,7 @@ fn losing_cloud_connection_reopens_the_exhausted_local_fallback_window() {
 #[test]
 fn device_timeout_keeps_local_notifications_until_connection_is_lost() {
     let (rig, listener, cloud) = with_cloud_peer(&["one"]);
+    rig.network.use_short_gateway_request_timeout();
     let property = "device/one/up/properties_changed/2/1";
     let (release, gate) = flume::bounded(1);
     rig.cloud.lock().unwrap().home_gate = Some(gate);

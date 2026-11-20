@@ -85,7 +85,11 @@ fn discovery_timeout_keeps_its_reason_and_diagnostic_wakes_do_not_skip_retry() {
 #[test]
 fn whole_gateway_list_failures_preserve_confirmed_access_and_availability() {
     for timeout in [false, true] {
-        block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        let rig = Rig::new(true, &["one", "multi"]);
+        if timeout {
+            rig.network.use_short_gateway_request_timeout();
+        }
+        block_on(rig.run(|c| async move {
             c.announce();
             let peer = Rc::new(Peer::default());
             let control = &c;
@@ -129,6 +133,7 @@ fn a_full_list_timeout_keeps_existing_routes_and_retries_after_one_minute() {
     use crate::xiaomi::adapter::routing::{ControlPath, PathPriority};
 
     let rig = Rig::new(true, &["one", "two"]);
+    rig.network.use_short_gateway_request_timeout();
     rig.cloud
         .lock()
         .unwrap()
@@ -188,6 +193,9 @@ fn a_full_list_timeout_keeps_existing_routes_and_retries_after_one_minute() {
 fn gateway_list_retries_recover_without_events_and_preserve_cloud_diagnostics() {
     for timeout in [false, true] {
         let rig = Rig::new(true, &["one"]);
+        if timeout {
+            rig.network.use_short_gateway_request_timeout();
+        }
         rig.cloud.lock().unwrap().status = 503;
         block_on(rig.run(|c| async move {
             c.announce();

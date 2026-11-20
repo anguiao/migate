@@ -3,7 +3,11 @@ use super::*;
 #[test]
 fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
     for timeout in [false, true] {
-        block_on(Rig::new(true, &["one", "multi"]).run(|c| async move {
+        let rig = Rig::new(true, &["one", "multi"]);
+        if timeout {
+            rig.network.use_short_gateway_request_timeout();
+        }
+        block_on(rig.run(|c| async move {
             c.announce();
             let peer = Rc::new(Peer::default());
             let sub = ("multi".into(), 9, 1);

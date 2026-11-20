@@ -45,9 +45,7 @@ fn native_motion_needs_both_subscriptions_but_keeps_illuminance_and_read_snapsho
 
 #[test]
 fn native_motion_readiness_does_not_wait_for_optional_battery_subscription() {
-    let rig = motion_rig();
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
-    block_on(rig.run(|c| async move {
+    block_on(motion_rig().run(|c| async move {
         c.announce();
         let peer = motion_peer();
         peer.state
@@ -81,7 +79,7 @@ fn native_motion_readiness_does_not_wait_for_optional_battery_subscription() {
 
 #[test]
 fn native_state_ready_after_initial_read_requires_a_new_read_baseline() {
-    block_on(held_contact_rig().run(|c| async move {
+    block_on(contact_rig().run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(held_contact_peer(), |peer| async move {
@@ -110,7 +108,7 @@ fn native_state_ready_after_initial_read_requires_a_new_read_baseline() {
 
 #[test]
 fn native_state_notification_in_the_suback_batch_establishes_the_baseline_without_an_extra_read() {
-    block_on(held_contact_rig().run(|c| async move {
+    block_on(contact_rig().run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(held_contact_peer(), |peer| async move {
@@ -143,7 +141,7 @@ fn native_state_notification_in_the_suback_batch_establishes_the_baseline_withou
 
 #[test]
 fn retained_state_cannot_replace_the_last_observation_or_cancel_recovery_baseline() {
-    block_on(held_contact_rig().run(|c| async move {
+    block_on(contact_rig().run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(held_contact_peer(), |peer| async move {

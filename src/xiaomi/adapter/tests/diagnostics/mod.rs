@@ -193,7 +193,6 @@ fn cloud_control_without_ready_notifications_is_sync_limited() {
 #[test]
 fn command_diagnostics_keep_inflight_actual_path_when_control_selection_changes() {
     let rig = Rig::new(true, &["one"]);
-    rig.network.gateway_timeout.set(Duration::from_secs(2));
     rig.cloud.lock().unwrap().online.insert("one".into());
     block_on(rig.run(|c| async move {
         c.announce();

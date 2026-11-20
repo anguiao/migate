@@ -210,7 +210,9 @@ fn terminal_power_zero_speed_and_swing_write_only_their_own_properties() {
 
 #[test]
 fn off_waits_for_the_old_step_timeout_and_ignores_its_late_receipt() {
-    block_on(rig().run(|c| async move {
+    let rig = rig();
+    rig.network.use_short_gateway_request_timeout();
+    block_on(rig.run(|c| async move {
         c.announce();
         let control = &c;
         c.peer(peer(), |peer| async move {

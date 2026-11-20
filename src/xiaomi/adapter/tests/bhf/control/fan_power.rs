@@ -294,6 +294,7 @@ fn a_failed_first_power_read_releases_the_next_fan_command() {
             .insert(binding.clone(), -704);
         let hub = standard_peer();
         if timeout {
+            rig.network.use_short_gateway_request_timeout();
             hub.state.borrow_mut().read_timeout.insert(binding);
         } else {
             hub.state.borrow_mut().read_fail.insert(binding);

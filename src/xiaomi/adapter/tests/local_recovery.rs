@@ -7,6 +7,7 @@ use crate::xiaomi::{
 #[test]
 fn one_device_read_timeout_keeps_other_devices_on_the_hub() {
     let rig = Rig::new(true, &["one", "two"]);
+    rig.network.use_short_gateway_request_timeout();
     rig.cloud
         .lock()
         .unwrap()
@@ -78,6 +79,7 @@ fn one_device_read_timeout_keeps_other_devices_on_the_hub() {
 #[test]
 fn sent_write_timeout_is_not_replayed_and_other_devices_stay_on_the_hub() {
     let rig = Rig::new(true, &["one", "two"]);
+    rig.network.use_short_gateway_request_timeout();
     rig.cloud
         .lock()
         .unwrap()

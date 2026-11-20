@@ -1,4 +1,4 @@
-pub(in crate::xiaomi::central) use super::connection::start;
+use super::connection::start;
 
 mod cancellation;
 mod devices;
