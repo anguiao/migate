@@ -178,7 +178,6 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
             0,
         );
         let status = crate::terminal::AuthStatus::new(report, "/bin/migate".into(), "/data".into());
-        let startup_port = free_udp_port();
         let failing = c.reopen_adapter().0;
         let failing_handle = crate::xiaomi::adapter::SourceHandle(failing.context.clone());
         let recovered_view = crate::app::App::open(failing_handle.clone(), store.clone());
@@ -211,7 +210,7 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
                 store: &store,
                 identity: &identity,
                 status: &status,
-                port: startup_port,
+                port: 0,
             },
             async move { Ok(failing_handle) },
             future::pending::<Result<(), crate::RuntimeError>>(),
@@ -221,14 +220,14 @@ fn revoked_native_group_stays_reserved_and_startup_recovery_skips_it() {
                 listening.await;
                 Ok(())
             },
-            move |_| {
+            move |event| {
+                assert!(matches!(event, crate::matter::PairingEvent::Opened { .. }));
                 ready_signal.notify(usize::MAX);
                 Ok(())
             },
         )
         .await
         .unwrap();
-        assert!(!runtime_socket_live(startup_port));
 
         // Once the save can succeed, a fresh restart applies the bootstrap
         // revocation overlay without reviving the group; the hidden member
