@@ -116,19 +116,21 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                             .snapshot()
                             .availability,
                         Availability::Unavailable(_)
-                    )
+                    ) && read_work.observer().is_none()
                 })
                 .await;
                 peer.state.borrow_mut().online.insert("one".into(), true);
                 peer.list_changed(&["one"]);
                 until(|| {
-                    function(&control.context, "one", "outlet:2")
-                        .snapshot()
-                        .power()
+                    read_work.observer().is_some()
+                        && !read_work.refresh.borrow().contains("outlet:2", read_binding)
+                        && function(&control.context, "one", "outlet:2").snapshot().power()
                         == Some(Power::On)
                 })
                 .await;
-                assert_eq!(peer.count("get", "one", 2), failed_reads + 1);
+                // Availability and the new notification baseline can request separate reads.
+                let recovered_reads = peer.count("get", "one", 2) - failed_reads;
+                assert!((1..=2).contains(&recovered_reads), "{recovered_reads}");
             })
             .await;
         }));

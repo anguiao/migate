@@ -92,20 +92,16 @@ fn pending_description_subscriptions_and_reads_recover_independently() {
             }
             let control = &c;
             c.peer(peer, |peer| async move {
-                until(|| {
-                    peer.count("subscribe", "one", 2) >= 9 && peer.count("get", "one", 2) >= 9
-                })
-                .await;
                 let work = control.context.directory.borrow().devices["one"]
                     .work
                     .clone()
                     .unwrap();
-                until(|| {
-                    work.local_exhausted()
-                        && !work.refresh.borrow().contains("light:2", BRIGHTNESS)
-                        && !work.refresh.borrow().contains("light:2", TEMPERATURE)
-                })
-                .await;
+                for binding in [BRIGHTNESS, TEMPERATURE] {
+                    exhaust_read_retries(&control.clock, &work, "light:2", binding).await;
+                }
+                until(|| work.local_exhausted()).await;
+                assert!(peer.count("subscribe", "one", 2) >= 9);
+                assert!(peer.count("get", "one", 2) >= 9);
                 let urn = "urn:miot-spec-v2:device:light:0000A001:xiaomi-ceil04:2:0000C802";
                 {
                     let mut cloud = control.cloud.lock().unwrap();
