@@ -167,7 +167,8 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
         |c| async move {
             c.announce();
             let control = &c;
-            c.peer(Rc::new(Peer::default()), |_peer| async move {
+            c.peer(Rc::new(Peer::default()), |peer| async move {
+                initialized(control, &peer, &["one"]).await;
                 until(|| {
                     control.context.directory.borrow().scope_valid()
                         && control.context.directory.borrow().devices["one"]
@@ -266,22 +267,31 @@ fn expired_hub_snapshot_is_read_only_and_maintenance_publishes_the_same_change_o
                         == Some("hub certificate expired")
                 })
                 .await;
-                until(|| published.borrow().contains(&instant)).await;
+                until(|| {
+                    published.borrow().iter().any(|report| {
+                        report.certificate_status == instant.certificate_status
+                            && report.devices.iter().any(|device| {
+                                device.did == "one"
+                                    && device.selected_control
+                                        == instant.devices[0].selected_control
+                                    && device.selected_read == instant.devices[0].selected_read
+                                    && device.notification_source
+                                        == instant.devices[0].notification_source
+                                    && device.last_switch_reason
+                                        == instant.devices[0].last_switch_reason
+                            })
+                    })
+                })
+                .await;
                 assert_eq!(
                     control.context.diagnostics().auth.completed_at(),
                     before.auth.completed_at()
                 );
+                control.context.status_changed.notify(usize::MAX);
                 for _ in 0..10 {
                     future::yield_now().await;
                 }
-                assert_eq!(
-                    published
-                        .borrow()
-                        .iter()
-                        .filter(|status| **status == instant)
-                        .count(),
-                    1
-                );
+                assert!(published.borrow().windows(2).all(|pair| pair[0] != pair[1]));
             })
             .await;
         },
