@@ -17,10 +17,10 @@ use std::collections::BTreeMap;
 
 mod lighting;
 
-const OUTLET: &str = include_str!("../../../tests/fixtures/miot/outlet.json");
-const MULTI: &str = include_str!("../../../tests/fixtures/miot/cuco-cp7pd.json");
-const CEILING: &str = include_str!("../../../tests/fixtures/miot/xiaomi-light-ceil04.json");
-const LS2307: &str = include_str!("../../../tests/fixtures/miot/devcea-light-ls2307.json");
+const OUTLET: &str = include_str!("../../../../tests/fixtures/miot/outlet.json");
+const MULTI: &str = include_str!("../../../../tests/fixtures/miot/cuco-cp7pd.json");
+const CEILING: &str = include_str!("../../../../tests/fixtures/miot/xiaomi-light-ceil04.json");
+const LS2307: &str = include_str!("../../../../tests/fixtures/miot/devcea-light-ls2307.json");
 
 #[test]
 fn persists_the_complete_original_miot_description() {

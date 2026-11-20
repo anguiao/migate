@@ -7,7 +7,7 @@ const SWING: PropertyBinding = PropertyBinding { siid: 2, piid: 4 };
 const SPEED: PropertyBinding = PropertyBinding { siid: 8, piid: 1 };
 fn rig() -> Rig {
     let instance = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/dmaker-p5c.json"
+        "../../../../../tests/fixtures/miot/dmaker-p5c.json"
     ))
     .unwrap();
     Rig::custom_lights(&[("one", "dmaker.fan.p5c", instance)])

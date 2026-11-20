@@ -4,7 +4,7 @@ mod advertisement;
 mod avahi;
 
 // This helper file is shared by the two test crates.
-#[path = "../../../../tests/support/process.rs"]
+#[path = "../../../../../tests/support/process.rs"]
 mod process_support;
 use crate::app::tests::support::outlet;
 use crate::xiaomi::adapter::tests::app_source::AppSource;

@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 fn instance() -> Value {
     // Public MIoT instance: urn:miot-spec-v2:device:air-condition-outlet:0000A045:lumi-mcn04:1
     serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/lumi-mcn04.json"
+        "../../../../../tests/fixtures/miot/lumi-mcn04.json"
     ))
     .unwrap()
 }

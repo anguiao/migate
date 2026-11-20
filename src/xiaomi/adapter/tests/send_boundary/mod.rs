@@ -770,7 +770,7 @@ fn unsent_stop_keeps_its_actual_result_in_command_diagnostics() {
 fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_bytes() {
     use crate::xiaomi::capability::{EventBinding, PropertyBinding};
     let instance = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/xiaomi-pir1.json"
+        "../../../../../tests/fixtures/miot/xiaomi-pir1.json"
     ))
     .unwrap();
     block_on(
@@ -853,7 +853,7 @@ fn a_state_notification_satisfies_a_reserved_baseline_before_its_first_socket_by
 
 fn curtain_rig() -> Rig {
     let description = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/xiaomi-acn010.json"
+        "../../../../../tests/fixtures/miot/xiaomi-acn010.json"
     ))
     .unwrap();
     Rig::custom_lights(&[("one", "xiaomi.curtain.acn010", description)])

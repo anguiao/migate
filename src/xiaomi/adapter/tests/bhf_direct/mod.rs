@@ -26,7 +26,7 @@ const VENTILATION_POWER: PropertyBinding = PropertyBinding { siid: 3, piid: 4 };
 
 fn v13() -> Value {
     serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/yeelink-bhf-light-v13.json"
+        "../../../../../tests/fixtures/miot/yeelink-bhf-light-v13.json"
     ))
     .unwrap()
 }

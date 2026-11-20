@@ -24,10 +24,10 @@ use std::{future::Future, net::UdpSocket, rc::Rc, task::Poll, time::Duration};
 const WINDOW_SECONDS: u16 = 900;
 
 #[cfg(target_os = "linux")]
-#[path = "bridge/avahi.rs"]
+#[path = "avahi.rs"]
 mod mdns;
 #[cfg(target_os = "macos")]
-#[path = "bridge/bonjour.rs"]
+#[path = "bonjour.rs"]
 mod mdns;
 #[cfg(test)]
 mod tests;

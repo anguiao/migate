@@ -26,7 +26,7 @@ fn rig() -> Rig {
     Rig::profile_light(
         "zimi.switch.dhkg05",
         serde_json::from_str(include_str!(
-            "../../../../tests/fixtures/miot/zimi-dhkg05.json"
+            "../../../../../tests/fixtures/miot/zimi-dhkg05.json"
         ))
         .unwrap(),
     )

@@ -1,7 +1,7 @@
 //! Test-only inspection and state transitions for `DeviceWork`.
 //!
 //! Production callers use the concrete attach/prepare/observer operations in
-//! `work.rs`; these helpers keep private preparation state out of the public
+//! `work/mod.rs`. These helpers keep private preparation state out of the public
 //! surface while existing scenarios keep asserting the same facts.
 
 use super::super::DeviceWork;

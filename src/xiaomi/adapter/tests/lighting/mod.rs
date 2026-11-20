@@ -4,7 +4,7 @@ use crate::xiaomi::capability::PropertyBinding;
 
 fn profile_instance(brightness: bool, temperature: bool) -> Value {
     let mut instance: Value = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/miot/xiaomi-light-ceil04.json"
+        "../../../../../tests/fixtures/miot/xiaomi-light-ceil04.json"
     ))
     .unwrap();
     instance["services"][1]["properties"]
