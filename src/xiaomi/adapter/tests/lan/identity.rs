@@ -190,6 +190,7 @@ fn rejected_new_credential_stops_retrying_and_preserves_old_connection() {
 
 #[test]
 fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them() {
+    use crate::xiaomi::{adapter::lan::read_property, capability::PropertyBinding};
     let instance = serde_json::from_str(include_str!(
         "../../../../../tests/fixtures/miot/dmaker-p5c.json"
     ))
@@ -258,26 +259,25 @@ fn cached_credentials_restore_offline_and_failed_candidate_never_replaces_them()
                             .into_iter()
                             .find(|device| device.did == record.did)
                             .unwrap();
-                        assert!(
-                            status.selected_control.is_some(),
-                            "authenticated LAN must permit offline control"
-                        );
-                        assert!(
-                            status.selected_read.is_some(),
-                            "authenticated LAN must permit offline reads"
-                        );
+                        assert_eq!(status.selected_control, Some(PathKind::Direct));
+                        assert_eq!(status.selected_read, Some(PathKind::Direct));
                         assert_eq!(
                             rig.store.lan().load(&scope, &record.did).unwrap(),
                             Some(record.clone())
                         );
                         assert_eq!(rig.store.devices().load_configuration().unwrap(), before);
-                        let received = peer.packets.load(std::sync::atomic::Ordering::Relaxed);
+                        let client = context.direct_candidate(&record.did).unwrap();
                         rig.clock.advance(Duration::from_secs(120));
-                        async_io::Timer::after(Duration::from_millis(40)).await;
-                        assert_eq!(
-                            peer.packets.load(std::sync::atomic::Ordering::Relaxed),
-                            received
-                        );
+                        let value = read_property(
+                            &client,
+                            &record.did,
+                            PropertyBinding { siid: 2, piid: 1 },
+                            || true,
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(value.value, true);
+                        assert!(context.direct_candidate(&record.did).unwrap().same(&client));
                         let mut info = CloudDeviceInfo {
                             did: record.did.clone(),
                             model: record.model.clone(),
