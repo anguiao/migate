@@ -582,9 +582,42 @@ impl super::StartupDeadline for WaitingDeadline {
 
 #[test]
 fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
+    use std::io::Write;
+
+    const CHILD: &str = "MIGATE_TEST_WITHDRAWAL_PORT";
+    if std::env::var_os(CHILD).is_none() {
+        // The dedicated process can capture the port from its own bridge logger.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::lifecycle::tests::withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"));
+        return;
+    }
+    let (notify_port, bound_port) = flume::unbounded::<u16>();
+    env_logger::Builder::new()
+        .filter_module("migate::matter::bridge", log::LevelFilter::Info)
+        .format(move |output, record| {
+            let message = record.args().to_string();
+            if let Some(port) = message.strip_prefix("Matter UDP listening on port ") {
+                notify_port.send(port.parse().unwrap()).unwrap();
+            }
+            writeln!(output, "{message}")
+        })
+        .init();
     std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             block_on(async {
                 let directory = tempfile::tempdir().unwrap();
                 let store = Store::open(directory.path()).unwrap();
@@ -607,15 +640,12 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 let started_seen = started.listen();
                 let stop = event_listener::Event::new();
                 let stopping = stop.listen();
-                let socket = std::net::UdpSocket::bind("[::1]:0").unwrap();
-                let port = socket.local_addr().unwrap().port();
-                drop(socket);
                 let bridge = super::run_lifecycle(
                     BridgeOptions {
                         store: &store,
                         identity: &identity,
                         status: &status,
-                        port,
+                        port: 0,
                     },
                     async { Ok((app.clone(), gate)) },
                     async {
@@ -639,6 +669,7 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 );
                 let controller = async {
                     started_seen.await;
+                    let port = bound_port.recv_async().await.unwrap();
                     let parts = crate::matter::tests::support::running_parts(port).await;
                     assert!(
                         parts.is_empty(),
@@ -660,14 +691,15 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                         app.current().configuration.root_version,
                     );
                     stop.notify(usize::MAX);
+                    Ok(())
                 };
                 future::or(
                     async {
-                        let (result, ()) = future::zip(bridge, controller).await;
-                        result.unwrap();
+                        future::try_zip(bridge, controller).await.unwrap();
                     },
                     async {
-                        async_io::Timer::after(std::time::Duration::from_secs(10)).await;
+                        // The native registration alone may need ten seconds before the UDP exchange.
+                        async_io::Timer::after(std::time::Duration::from_secs(20)).await;
                         panic!("timed out reading the startup topology")
                     },
                 )
