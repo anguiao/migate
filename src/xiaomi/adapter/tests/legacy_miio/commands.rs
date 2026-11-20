@@ -187,7 +187,7 @@ fn two_mcn02_devices_share_mapping_and_sent_timeout_is_not_replayed() {
             .borrow_mut()
             .insert(address, endpoint);
     }
-    rig.network.lan_timeout.set(Duration::from_millis(100));
+    rig.network.lan_timeout.set(Duration::from_millis(400));
     rig.clock.automatic.store(true, Ordering::Relaxed);
     rig.cloud
         .lock()
@@ -198,15 +198,14 @@ fn two_mcn02_devices_share_mapping_and_sent_timeout_is_not_replayed() {
         Box::pin(async move {
             until(|| {
                 dids.iter().all(|did| {
+                    let state = function(&control.context, did, "air-conditioner:2")
+                        .snapshot()
+                        .air_conditioner()
+                        .unwrap();
                     control.context.direct_candidate(did).is_ok()
                         && control.context.cloud_candidate(did, true).is_ok()
-                        && function(&control.context, did, "air-conditioner:2")
-                            .snapshot()
-                            .air_conditioner()
-                            .unwrap()
-                            .power
-                            .value
-                            == Some(false)
+                        && state.power.value == Some(false)
+                        && state.mode.value == Some(AirConditionerMode::Cool)
                 })
             })
             .await;

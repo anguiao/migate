@@ -14,6 +14,7 @@ fn modes_remain_observable_when_unpublished_and_survive_failed_reads_and_retirem
                 .unwrap();
             until(|| {
                 relay.snapshot().relay_mode() == Some(RelayMode::Wireless)
+                    && relay.snapshot().power() == Some(Power::Off)
                     && work.function_observer("relay:2").is_some()
                     && work.source_binding_ready(
                         &work.function_observer("relay:2").unwrap(),
