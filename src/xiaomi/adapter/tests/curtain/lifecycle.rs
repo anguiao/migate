@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn curtain_rejection_and_timeout_are_reported_without_replay() {
     use crate::device::{CommandError, CurtainCommand};
+    use std::sync::atomic::Ordering;
     let rig = rig();
     rig.network.use_short_gateway_request_timeout();
     block_on(rig.run(|c| async move {
@@ -10,6 +11,8 @@ fn curtain_rejection_and_timeout_are_reported_without_replay() {
         let control = &c;
         c.peer(peer(), |peer| async move {
             settled(control).await;
+            // Keep periodic feedback out of the snapshot while the real request times out.
+            control.clock.automatic.store(false, Ordering::Relaxed);
             let function = function(&control.context, "one", "curtain:2");
             let before = function.snapshot().curtain();
             peer.state.borrow_mut().hold_writes = true;
