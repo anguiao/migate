@@ -146,7 +146,7 @@ fn stage_rebuilds(
     }
     let responses = process.output().0.matches("Available commands:").count();
     process.send("help\n");
-    process.wait_for_output_matching(Stream::Stdout, "help output", |output| {
+    process.wait_for_output_matching(Stream::Stdout, "help output", TIMEOUT, |output| {
         output.matches("Available commands:").count() > responses
     });
     let (_, stderr) = process.output();

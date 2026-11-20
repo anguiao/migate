@@ -23,6 +23,8 @@ use std::{
 
 const MATTER_LISTENING: &str = "Matter UDP listening on port ";
 const MDNS_UPDATED: &str = "mDNS services updated";
+// A native DNS-SD registration can wait ten seconds for its callback.
+const MDNS_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl TestProcess {
     fn bridge(directory: &Path, initial: bool) -> Self {
@@ -67,12 +69,17 @@ impl TestProcess {
     }
 
     fn wait_for_advertisement(&mut self, run: usize) -> (u16, String) {
-        let stderr = self.wait_for_output_matching(Stream::Stderr, MDNS_UPDATED, |stderr| {
-            stderr
-                .split(MATTER_LISTENING)
-                .nth(run)
-                .is_some_and(|run| run.contains(MDNS_UPDATED))
-        });
+        let stderr = self.wait_for_output_matching(
+            Stream::Stderr,
+            MDNS_UPDATED,
+            MDNS_REGISTRATION_TIMEOUT,
+            |stderr| {
+                stderr
+                    .split(MATTER_LISTENING)
+                    .nth(run)
+                    .is_some_and(|run| run.contains(MDNS_UPDATED))
+            },
+        );
         let started = stderr.split(MATTER_LISTENING).nth(run).unwrap();
         let port = started.lines().next().unwrap().parse().unwrap();
         assert_ne!(port, 0);

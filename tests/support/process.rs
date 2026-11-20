@@ -59,16 +59,19 @@ impl TestProcess {
     }
 
     pub(crate) fn wait_for_output(&mut self, stream: Stream, expected: &str) {
-        self.wait_for_output_matching(stream, expected, |output| output.contains(expected));
+        self.wait_for_output_matching(stream, expected, TIMEOUT, |output| {
+            output.contains(expected)
+        });
     }
 
     pub(crate) fn wait_for_output_matching(
         &mut self,
         stream: Stream,
         expected: &str,
+        timeout: Duration,
         matches: impl Fn(&str) -> bool,
     ) -> String {
-        let deadline = Instant::now() + TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let (stdout, stderr) = self.output();
             let status = self.child.try_wait().unwrap();
@@ -85,7 +88,7 @@ impl TestProcess {
             }
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for {expected:?}\nstdout: {stdout}\nstderr: {stderr}"
+                "timed out after {timeout:?} waiting for {expected:?}\nstdout: {stdout}\nstderr: {stderr}"
             );
             thread::sleep(POLL_INTERVAL);
         }
