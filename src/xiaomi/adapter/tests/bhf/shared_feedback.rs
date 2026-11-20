@@ -695,12 +695,15 @@ fn only_an_accepted_valid_new_notification_starts_related_reads() {
 
 #[test]
 fn a_stale_shared_read_failure_cannot_consume_the_new_notification_demand() {
+    use crate::xiaomi::capability::{ReadInput, SHARED_FEEDBACK_CHANNEL};
+
     let (rig, listener, cloud) = rig();
     block_on(rig.run(|c| async move {
         future::or(cloud.run(&listener), async {
             c.announce();
             let control = &c;
             c.peer(standard_peer(), |peer| async move {
+                let heater = function(control, HEATER);
                 let blow = function(control, BLOW);
                 let ventilation = function(control, VENTILATION);
                 eventually(|| {
@@ -729,7 +732,8 @@ fn a_stale_shared_read_failure_cannot_consume_the_new_notification_demand() {
                 eventually(|| control.cloud.lock().unwrap().rpc_reads.len() > reads).await;
 
                 peer.notify_value_at(DID, HEATING, json!(false), Some(960), false);
-                eventually(|| has_shared_demand(control)).await;
+                eventually(|| heater.snapshot().heater().unwrap().power.source_time == Some(960))
+                    .await;
 
                 {
                     let mut state = control.cloud.lock().unwrap();
@@ -740,15 +744,22 @@ fn a_stale_shared_read_failure_cannot_consume_the_new_notification_demand() {
                     state.rpc_gate = None;
                 }
                 release.send(()).unwrap();
-                async_io::Timer::after(Duration::from_millis(100)).await;
+                let device = work(control);
+                let input = ReadInput::SharedFeedback;
+                let key = (SHARED_FEEDBACK_CHANNEL.to_owned(), input);
+                eventually(|| !device.refresh.borrow().snapshot().inflight.contains(&key)).await;
                 assert!(
-                    work(control)
+                    device
                         .refresh
                         .borrow()
-                        .input_problem(
-                            crate::xiaomi::capability::SHARED_FEEDBACK_CHANNEL,
-                            crate::xiaomi::capability::ReadInput::SharedFeedback,
-                        )
+                        .contains_input(SHARED_FEEDBACK_CHANNEL, input),
+                    "the follow-up read must remain pending after the stale failure"
+                );
+                assert!(
+                    device
+                        .refresh
+                        .borrow()
+                        .input_problem(SHARED_FEEDBACK_CHANNEL, input)
                         .is_none(),
                     "a stale shared failure must not record a problem for the newer demand"
                 );
