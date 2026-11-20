@@ -191,9 +191,17 @@ fn stopped_recovery_survives_restart_without_disabling_a_valid_session() {
         record.recovery.stop = Some(RecoveryStop::Rejected);
         rig.store.xiaomi().fixture_replace(&record).unwrap();
         let (adapter, _) = rig.reopen_adapter();
+        let context = adapter.context.clone();
         rig.cloud.lock().unwrap().online.insert("one".into());
         block_on(future::or(adapter.run(|_| {}), async {
-            async_io::Timer::after(Duration::from_millis(80)).await;
+            until_with_timeout(Duration::from_secs(5), || {
+                if rejected {
+                    context.credentials.borrow().mijia_rejected().is_some()
+                } else {
+                    context.cloud_candidate("one", true).is_ok()
+                }
+            })
+            .await;
             Ok(())
         }))
         .unwrap();
