@@ -334,19 +334,19 @@ pub(super) fn announcement(
 pub(super) fn until(mut predicate: impl FnMut() -> bool) -> impl Future<Output = ()> {
     let caller = std::panic::Location::caller();
     async move {
-        let _waiting = WaitingForCondition(caller);
+        let _waiting = OnTestPanic(|| eprintln!("Waiting for the test condition at {caller}"));
         while !predicate() {
             future::yield_now().await;
         }
     }
 }
 
-struct WaitingForCondition(&'static std::panic::Location<'static>);
+pub(super) struct OnTestPanic<F: Fn()>(pub(super) F);
 
-impl Drop for WaitingForCondition {
+impl<F: Fn()> Drop for OnTestPanic<F> {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            eprintln!("Waiting for the test condition at {}", self.0);
+            (self.0)();
         }
     }
 }

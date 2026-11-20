@@ -21,7 +21,19 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 peer.state.borrow_mut().read_fail.insert(read.clone());
             }
             let control = &c;
-            c.peer(peer, |peer| async move {
+            let _diagnostics = OnTestPanic(|| {
+                let status = control.context.diagnostics();
+                let mode = if timeout { "no reply" } else { "rejected" };
+                eprintln!(
+                    "Retry scenario ({mode}) at {:?}: reads(one/2.1)={}, subscriptions(multi/9.1)={}, gateway={:?}, pending={:?}",
+                    control.clock.now(),
+                    peer.count("get", "one", 2),
+                    peer.count("subscribe", "multi", 9),
+                    status.gateway,
+                    status.pending
+                );
+            });
+            c.peer(peer.clone(), |peer| async move {
                 until(|| {
                     control
                         .context
