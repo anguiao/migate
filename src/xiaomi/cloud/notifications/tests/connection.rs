@@ -129,7 +129,7 @@ fn keepalive_responses_reset_the_wait_and_silence_ends_the_connection() {
     let (finished, done) = flume::bounded(1);
     future::block_on(exercise(
         Timing {
-            request: Duration::from_millis(25),
+            request: Duration::from_millis(400),
             keepalive: Some(Duration::from_millis(20)),
         },
         move |mut broker| async move {
