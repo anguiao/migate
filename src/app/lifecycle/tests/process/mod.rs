@@ -28,13 +28,11 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const MDNS_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 impl TestProcess {
-    fn bridge(directory: &Path, initial: bool) -> Self {
+    fn start_gated(directory: &Path, port: u16, initial: bool) -> Self {
         let gate = directory.join("source-ready");
         if gate.exists() {
             fs::remove_file(&gate).unwrap();
         }
-        let reserved = UdpSocket::bind(matter_address(0)).unwrap();
-        let port = reserved.local_addr().unwrap().port();
         let mut process = Self::spawn(&mut helper_command(directory, port, initial));
 
         // The source and terminal must make progress while Matter is gated.
@@ -47,12 +45,13 @@ impl TestProcess {
         process.wait_for_output(Stream::Stdout, "  outlet:2 (主电源): unknown");
         let (_, stderr) = process.output();
         assert!(!stderr.contains(MATTER_LISTENING), "{stderr}");
-        // Retaining the port prevents any unrelated process from acquiring it;
-        // an early Matter bind would cause the child to exit with an error.
         assert!(process.child.try_wait().unwrap().is_none(), "{stderr}");
+        process
+    }
 
-        drop(reserved);
-        fs::write(&gate, b"ready").unwrap();
+    fn bridge(directory: &Path, initial: bool) -> Self {
+        let mut process = Self::start_gated(directory, 0, initial);
+        fs::write(directory.join("source-ready"), b"ready").unwrap();
         process.wait_for_output(
             Stream::Stderr,
             &format!(
@@ -60,14 +59,13 @@ impl TestProcess {
                 if initial { "on" } else { "off" }
             ),
         );
-        let (listening_port, logs) = process.wait_for_advertisement(1);
+        let (port, logs) = process.wait_for_advertisement(1);
         let (_, stderr) = process.output();
         assert!(
             stderr.find("Fake source initial read:").unwrap()
                 < stderr.find(MATTER_LISTENING).unwrap(),
             "{stderr}"
         );
-        assert_eq!(listening_port, port);
         assert_resolves(&commissionable_name(&logs), COMMISSIONABLE_SERVICE, port);
         process
     }
@@ -155,7 +153,8 @@ fn occupied_matter_port_causes_a_diagnostic_exit() {
     let directory = tempfile::tempdir().unwrap();
     let reserved = UdpSocket::bind(matter_address(0)).unwrap();
     let port = reserved.local_addr().unwrap().port();
-    let process = TestProcess::spawn(&mut ready_bridge_command(directory.path(), port));
+    let process = TestProcess::start_gated(directory.path(), port, false);
+    fs::write(directory.path().join("source-ready"), b"ready").unwrap();
     let (status, _, stderr) = process.wait_for_exit(STARTUP_TIMEOUT);
     assert!(!status.success());
     assert!(
