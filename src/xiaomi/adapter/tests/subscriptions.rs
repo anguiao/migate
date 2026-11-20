@@ -1,4 +1,5 @@
 use super::*;
+use crate::xiaomi::capability::PropertyBinding;
 
 #[test]
 fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
@@ -33,19 +34,28 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                         })
                 })
                 .await;
+                let (read_work, subscription_work) = {
+                    let directory = control.context.directory.borrow();
+                    (
+                        directory.devices["one"].work.clone().unwrap(),
+                        directory.devices["multi"].work.clone().unwrap(),
+                    )
+                };
+                let read_binding = PropertyBinding { siid: 2, piid: 1 };
                 until(|| {
-                    !control.context.directory.borrow().devices["one"]
-                        .work
-                        .as_ref()
-                        .unwrap()
-                        .refresh
-                        .borrow()
-                        .contains(
-                            "outlet:2",
-                            crate::xiaomi::capability::PropertyBinding { siid: 2, piid: 1 },
-                        )
+                    let refresh = read_work.refresh.borrow();
+                    let now = control.clock.now();
+                    if let Some(retry) = refresh.snapshot().pending.into_iter().find(|read| {
+                        read.id == "outlet:2"
+                            && read.input.property() == Some(read_binding)
+                            && read.ready_at > now
+                    }) {
+                        control.clock.advance(retry.ready_at - now);
+                    }
+                    !refresh.contains("outlet:2", read_binding)
                 })
                 .await;
+                until(|| subscription_work.test_local_exhausted()).await;
                 assert!(
                     control
                         .context
@@ -76,9 +86,9 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                     Availability::Available
                 );
                 control.clock.advance(Duration::from_secs(10));
-                for _ in 0..10 {
-                    future::yield_now().await;
-                }
+                // Complete a gateway round trip after advancing beyond the retry window.
+                let gateway = control.context.local_candidate("one", false).unwrap();
+                gateway.get_devices(|_| {}).await.result.unwrap();
                 let failed_reads = 4;
                 assert_eq!(peer.count("get", "one", 2), failed_reads);
                 assert_eq!(peer.count("subscribe", "multi", 9), 4);
@@ -93,13 +103,8 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                 }
                 peer.list_changed(&["multi"]);
                 until(|| {
-                    control.context.directory.borrow().devices["multi"]
-                        .work
-                        .as_ref()
-                        .unwrap()
-                        .test_local_subscribed_contains(
-                            crate::xiaomi::capability::PropertyBinding { siid: 9, piid: 1 },
-                        )
+                    subscription_work
+                        .test_local_subscribed_contains(PropertyBinding { siid: 9, piid: 1 })
                 })
                 .await;
                 assert_eq!(peer.count("get", "one", 2), 4);
@@ -123,9 +128,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                         == Some(Power::On)
                 })
                 .await;
-                let expected = failed_reads + 1;
-                until(|| peer.count("get", "one", 2) == expected).await;
-                assert_eq!(peer.count("get", "one", 2), expected);
+                assert_eq!(peer.count("get", "one", 2), failed_reads + 1);
             })
             .await;
         }));

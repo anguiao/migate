@@ -330,9 +330,24 @@ pub(super) fn announcement(
         .as_resolved_service(),
     ))
 }
-pub(super) async fn until(mut predicate: impl FnMut() -> bool) {
-    while !predicate() {
-        future::yield_now().await;
+#[track_caller]
+pub(super) fn until(mut predicate: impl FnMut() -> bool) -> impl Future<Output = ()> {
+    let caller = std::panic::Location::caller();
+    async move {
+        let _waiting = WaitingForCondition(caller);
+        while !predicate() {
+            future::yield_now().await;
+        }
+    }
+}
+
+struct WaitingForCondition(&'static std::panic::Location<'static>);
+
+impl Drop for WaitingForCondition {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            eprintln!("Waiting for the test condition at {}", self.0);
+        }
     }
 }
 pub(super) fn function(
