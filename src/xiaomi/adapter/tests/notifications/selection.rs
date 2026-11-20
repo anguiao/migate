@@ -45,8 +45,13 @@ fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
     let (rig, listener, cloud) = with_cloud_peer(&["multi"]);
     let held = "device/multi/up/properties_changed/9/1";
     cloud.state.borrow_mut().hold.insert(held.into());
+    let (start_cloud, local_ready) = flume::bounded(1);
     block_on(rig.run(|c| async move {
-        future::or(cloud.run(&listener), async {
+        let serve_cloud = async {
+            local_ready.recv_async().await.unwrap();
+            cloud.run(&listener).await;
+        };
+        future::or(serve_cloud, async {
             c.announce();
             let control = &c;
             let cloud = &cloud;
@@ -57,14 +62,12 @@ fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
                     .clock
                     .automatic
                     .store(false, std::sync::atomic::Ordering::Relaxed);
-                async_io::Timer::after(Duration::from_millis(20)).await;
                 let paths = [
                     "device/multi/up/properties_changed/2/1",
                     "device/multi/up/properties_changed/3/1",
                     "device/multi/up/properties_changed/4/1",
                     held,
                 ];
-                let counts = paths.map(|path| cloud.count(path));
                 let handle = control
                     .context
                     .hub
@@ -74,6 +77,7 @@ fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
                     .handle
                     .clone();
                 local_device_offline(&control.context, &handle, "multi");
+                start_cloud.send(()).unwrap();
                 until(|| {
                     cloud
                         .state
@@ -88,7 +92,7 @@ fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
                 cloud.qos2("multi", 3, true, 41);
                 until(|| cloud.received(41, false)).await;
                 local.notify("multi", 3, true);
-                async_io::Timer::after(Duration::from_millis(20)).await;
+                handle.get_devices(|_| {}).await.result.unwrap();
                 assert_eq!(outlet.snapshot().power(), Some(Power::Off));
                 cloud.state.borrow_mut().hold.remove(held);
                 cloud.release(held);
@@ -107,8 +111,8 @@ fn partial_cloud_preparation_after_local_revocation_cannot_activate_old_qos2() {
                 assert_eq!(outlet.snapshot().power(), Some(Power::Off));
                 cloud.property("multi", 3, true);
                 until(|| outlet.snapshot().power() == Some(Power::On)).await;
-                for (path, count) in paths.into_iter().zip(counts) {
-                    assert_eq!(cloud.count(path), count + 1);
+                for path in paths {
+                    assert_eq!(cloud.count(path), 1, "{path}");
                 }
             })
             .await;
