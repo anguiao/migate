@@ -54,19 +54,7 @@ fn subscription_and_read_retries_are_bounded_and_later_events_restore_them() {
                     )
                 };
                 let read_binding = PropertyBinding { siid: 2, piid: 1 };
-                until(|| {
-                    let refresh = read_work.refresh.borrow();
-                    let now = control.clock.now();
-                    if let Some(retry) = refresh.snapshot().pending.into_iter().find(|read| {
-                        read.id == "outlet:2"
-                            && read.input.property() == Some(read_binding)
-                            && read.ready_at > now
-                    }) {
-                        control.clock.advance(retry.ready_at - now);
-                    }
-                    !refresh.contains("outlet:2", read_binding)
-                })
-                .await;
+                exhaust_read_retries(&control.clock, &read_work, "outlet:2", read_binding).await;
                 until(|| subscription_work.test_local_exhausted()).await;
                 assert!(
                     control

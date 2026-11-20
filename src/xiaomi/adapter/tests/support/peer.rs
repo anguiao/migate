@@ -111,13 +111,12 @@ impl Peer {
         self.state.borrow_mut().send.push(packet);
         self.changed.notify(usize::MAX);
     }
-    pub(in super::super) async fn release_property(
+    pub(in super::super) fn held_property_index(
         &self,
         did: &str,
         binding: crate::xiaomi::capability::PropertyBinding,
-        value: Value,
-    ) {
-        let matches = |publish: &Publish| {
+    ) -> Option<usize> {
+        self.state.borrow().held.iter().position(|(publish, _)| {
             let payload = decode_mips(&publish.payload).unwrap().payload;
             payload["did"] == did
                 && (payload["siid"] == binding.siid && payload["piid"] == binding.piid
@@ -126,22 +125,16 @@ impl Peer {
                             item["siid"] == binding.siid && item["piid"] == binding.piid
                         })
                     }))
-        };
-        until(|| {
-            self.state
-                .borrow()
-                .held
-                .iter()
-                .any(|(publish, _)| matches(publish))
         })
-        .await;
-        let index = self
-            .state
-            .borrow()
-            .held
-            .iter()
-            .position(|(publish, _)| matches(publish))
-            .unwrap();
+    }
+    pub(in super::super) async fn release_property(
+        &self,
+        did: &str,
+        binding: crate::xiaomi::capability::PropertyBinding,
+        value: Value,
+    ) {
+        until(|| self.held_property_index(did, binding).is_some()).await;
+        let index = self.held_property_index(did, binding).unwrap();
         let (publish, _) = self.state.borrow_mut().held.remove(index);
         let client = self.state.borrow().client_id.clone();
         self.send(response(&client, &publish, value));

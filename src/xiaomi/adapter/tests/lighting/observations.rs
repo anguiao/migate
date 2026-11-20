@@ -298,12 +298,7 @@ fn malformed_light_read_retries_its_property_without_changing_snapshot() {
                 .work
                 .clone()
                 .unwrap();
-            until(|| {
-                let refresh = work.refresh.borrow();
-                refresh.property_problem("light:2", BRIGHTNESS).is_some()
-                    && !refresh.contains("light:2", BRIGHTNESS)
-            })
-            .await;
+            exhaust_read_retries(&control.clock, &work, "light:2", BRIGHTNESS).await;
             assert_eq!(
                 light.snapshot().lighting().unwrap().brightness_percent,
                 None
@@ -405,14 +400,9 @@ fn new_mode_only_refreshes_its_missing_color_without_retiring_brightness_read() 
                     .brightness_percent
                     .is_some()
                     && light.snapshot().lighting().unwrap().mode == Some(LightMode::Temperature)
-                    && work
-                        .refresh
-                        .borrow()
-                        .property_problem("light:2", COLOR)
-                        .is_some()
-                    && !work.refresh.borrow().contains("light:2", COLOR)
             })
             .await;
+            exhaust_read_retries(&control.clock, &work, "light:2", COLOR).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("light:2", BRIGHTNESS);
             until(|| {
@@ -463,12 +453,7 @@ fn repeated_same_mode_coalesces_an_existing_missing_color_read() {
                     .clone()
                     .unwrap();
                 let key = super::super::super::observations::key("light:2", active);
-                until(|| {
-                    let refresh = work.refresh.borrow();
-                    refresh.property_problem("light:2", active).is_some()
-                        && !refresh.contains("light:2", active)
-                })
-                .await;
+                exhaust_read_retries(&control.clock, &work, "light:2", active).await;
                 peer.state.borrow_mut().hold_reads = true;
                 peer.notify_value("one", MODE, json!(if rgb { 1 } else { 0 }), false);
                 until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
@@ -529,16 +514,10 @@ fn a_changed_mode_retires_an_old_read_of_its_missing_active_color() {
                 .work
                 .clone()
                 .unwrap();
-            let key = super::super::super::observations::key("light:2", COLOR);
-            until(|| {
-                let refresh = work.refresh.borrow();
-                refresh.property_problem("light:2", COLOR).is_some()
-                    && !refresh.contains("light:2", COLOR)
-            })
-            .await;
+            exhaust_read_retries(&control.clock, &work, "light:2", COLOR).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("light:2", COLOR);
-            until(|| work.refresh.borrow().snapshot().inflight.contains(&key)).await;
+            until(|| peer.held_property_index("one", COLOR).is_some()).await;
             let stamp = work.observations.read_stamp_input(
                 "light:2",
                 crate::xiaomi::capability::ReadInput::Property(COLOR),
@@ -576,22 +555,11 @@ fn an_old_exhausted_read_failure_cannot_remove_a_new_mode_refresh() {
                 .clone()
                 .unwrap();
             let key = super::super::super::observations::key("light:2", COLOR);
-            until(|| {
-                let refresh = work.refresh.borrow();
-                refresh.property_problem("light:2", COLOR).is_some()
-                    && !refresh.contains("light:2", COLOR)
-            })
-            .await;
+            exhaust_read_retries(&control.clock, &work, "light:2", COLOR).await;
             peer.state.borrow_mut().hold_reads = true;
             work.refresh_property("light:2", COLOR);
             work.refresh.borrow_mut().exhaust_pending("light:2", COLOR);
-            until(|| {
-                peer.state.borrow().held.iter().any(|(publish, _)| {
-                    let payload = decode_mips(&publish.payload).unwrap().payload;
-                    payload["siid"] == COLOR.siid && payload["piid"] == COLOR.piid
-                })
-            })
-            .await;
+            until(|| peer.held_property_index("one", COLOR).is_some()).await;
             peer.notify_value("one", MODE, json!(1), false);
             until(|| light.snapshot().lighting().unwrap().mode == Some(LightMode::Rgb)).await;
             peer.release_property("one", COLOR, json!({"code":-1}))

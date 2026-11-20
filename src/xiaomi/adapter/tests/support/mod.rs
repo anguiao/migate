@@ -399,6 +399,26 @@ pub(super) async fn advance_to(clock: &TestClock, deadline: Duration) {
     until(|| clock.deadlines.lock().unwrap().contains(&deadline)).await;
     clock.advance(deadline - clock.now());
 }
+
+pub(super) async fn exhaust_read_retries(
+    clock: &TestClock,
+    work: &crate::xiaomi::adapter::work::DeviceWork,
+    id: &str,
+    binding: crate::xiaomi::capability::PropertyBinding,
+) {
+    until(|| {
+        let refresh = work.refresh.borrow();
+        let now = clock.now();
+        if let Some(retry) = refresh.snapshot().pending.into_iter().find(|read| {
+            read.id == id && read.input.property() == Some(binding) && read.ready_at > now
+        }) {
+            clock.advance(retry.ready_at - now);
+        }
+        refresh.property_problem(id, binding).is_some() && !refresh.contains(id, binding)
+    })
+    .await;
+}
+
 pub(super) fn accepted(did: &str, siid: u32, code: i32) -> Value {
     json!({"result":[{"did":did,"siid":siid,"piid":1,"code":code}]})
 }
