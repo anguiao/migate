@@ -6,7 +6,7 @@ use super::{
 use futures_lite::{StreamExt, future};
 use rs_matter::utils::zbus::{
     Connection, Message, MessageStream, connection,
-    fdo::{RequestNameFlags, RequestNameReply},
+    fdo::{DBusProxy, RequestNameFlags, RequestNameReply},
     message::Type,
 };
 use std::{collections::HashMap, fs, path::Path, process::Command};
@@ -254,6 +254,66 @@ fn avahi_ownership_loss_and_replacement_are_fatal_after_registration() {
         assert!(!status.success(), "{stderr}");
         assert!(
             stderr.contains("Avahi D-Bus name owner changed"),
+            "{stderr}"
+        );
+    }
+}
+
+fn signal_group_state(peer: &Connection, destination: &str, group: &str, state: i32, error: &str) {
+    future::block_on(async {
+        peer.emit_signal(
+            Some(destination),
+            group,
+            "org.freedesktop.Avahi.EntryGroup",
+            "StateChanged",
+            &(state, error),
+        )
+        .await
+        .unwrap();
+        // Wait for the bus to handle this signal before a different peer sends the next one.
+        DBusProxy::new(peer).await.unwrap().get_id().await.unwrap();
+    });
+}
+
+#[test]
+fn avahi_terminal_entry_group_states_are_fatal_only_for_our_groups() {
+    for (state, label) in [(3, "collision"), (4, "failure")] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut command = ready_bridge_command(directory.path(), 0);
+        let (_bus, address) = private_bus(directory.path());
+        let mut avahi = AvahiPeer::new(&address);
+        let mut process = TestProcess::spawn(command.env("DBUS_SYSTEM_BUS_ADDRESS", &address));
+
+        let commit = avahi.hold_reply_to("Commit");
+        let header = commit.header();
+        let group = header.path().unwrap().as_str();
+        let bridge = header.sender().unwrap().as_str();
+        avahi.release(commit.clone());
+        process.wait_for_output(Stream::Stderr, "mDNS services updated");
+
+        let unrelated = future::block_on(
+            connection::Builder::address(address.as_str())
+                .unwrap()
+                .build(),
+        )
+        .unwrap();
+        signal_group_state(
+            &avahi.connection,
+            unrelated.unique_name().unwrap().as_str(),
+            group,
+            state,
+            "other client's group",
+        );
+        signal_group_state(&unrelated, bridge, group, state, "unrelated sender");
+        signal_group_state(&avahi.connection, bridge, group, 2, "group established");
+        signal_group_state(&avahi.connection, bridge, group, state, "our group failed");
+
+        let (status, _, stderr) = process.wait_for_exit(TIMEOUT);
+        assert!(!status.success(), "{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "Avahi Matter entry group reported {label}: our group failed"
+            )),
             "{stderr}"
         );
     }
