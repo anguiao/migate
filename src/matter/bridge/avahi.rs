@@ -1,5 +1,5 @@
 use crate::RuntimeError;
-use futures_lite::future;
+use futures_lite::{StreamExt, future};
 use rs_matter::{
     basic_info::BasicInfoConfig,
     error::{Error, ErrorCode},
@@ -11,12 +11,48 @@ use rs_matter::{
         network::{MatterLocalService, mdns::avahi::AvahiMdns},
         session::Sessions,
     },
-    utils::{sync::Notification, zbus},
+    utils::{
+        sync::Notification,
+        zbus::{self, fdo},
+    },
 };
 use std::{cell::Cell, task::Poll};
 
+const AVAHI_NAME: &str = "org.freedesktop.Avahi";
+
 #[derive(Default)]
-pub(super) struct Publisher(Option<AvahiMdns>);
+pub(super) struct Publisher(Option<Client>);
+
+struct Client {
+    mdns: AvahiMdns,
+    // Keep the subscription as long as the cached entry groups, including across rebuilds.
+    owner_changes: fdo::NameOwnerChangedStream,
+}
+
+impl Client {
+    async fn connect() -> Result<Self, RuntimeError> {
+        let connection = zbus::Connection::system().await.map_err(|error| {
+            format!("Failed to connect to the system D-Bus for Matter mDNS: {error}")
+        })?;
+        let owner_changes = fdo::DBusProxy::new(&connection)
+            .await?
+            .receive_name_owner_changed_with_args(&[(0, AVAHI_NAME)])
+            .await?;
+        Ok(Self {
+            mdns: AvahiMdns::new(connection),
+            owner_changes,
+        })
+    }
+}
+
+async fn watch_avahi_owner(changes: &mut fdo::NameOwnerChangedStream) -> Result<(), RuntimeError> {
+    while let Some(signal) = changes.next().await {
+        if signal.args()?.old_owner().is_some() {
+            return Err("Avahi D-Bus name owner changed while publishing Matter services".into());
+        }
+    }
+    Err("Avahi D-Bus name owner stream ended".into())
+}
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Phase {
@@ -51,34 +87,34 @@ impl Publisher {
         matter: &dyn TransportHost,
         rebuild: &Rebuild,
     ) -> Result<(), RuntimeError> {
-        let mdns = match &mut self.0 {
-            Some(mdns) => mdns,
-            slot @ None => {
-                let bus = zbus::Connection::system().await.map_err(|error| {
-                    format!("Failed to connect to the system D-Bus for Matter mDNS: {error}")
-                })?;
-                slot.insert(AvahiMdns::new(bus))
-            }
+        let client = match &mut self.0 {
+            Some(client) => client,
+            slot @ None => slot.insert(Client::connect().await?),
         };
         let host = Host { matter, rebuild };
-        let result = future::or(mdns.run(&host), async {
+        let publish = async {
+            match client.mdns.run(&host).await {
+                Err(error)
+                    if rebuild.phase.get() == Phase::Finished
+                        && error.code() == ErrorCode::Cancelled =>
+                {
+                    Ok(())
+                }
+                Err(error) => Err(error.into()),
+                Ok(()) => Err("Matter instance ended unexpectedly".into()),
+            }
+        };
+        let notify_rebuild = async {
             rebuild.requested.wait().await;
             matter.transport().notify_mdns_changed();
-            future::pending().await
-        })
-        .await;
-        match result {
-            Err(error)
-                if rebuild.phase.get() == Phase::Finished
-                    && error.code() == ErrorCode::Cancelled =>
-            {
-                Ok(())
-            }
-            Err(error) => {
-                Err(format!("Failed to advertise Matter services with Avahi: {error}").into())
-            }
-            Ok(()) => Err("Matter instance ended unexpectedly".into()),
-        }
+            future::pending::<Result<(), RuntimeError>>().await
+        };
+        future::or(
+            watch_avahi_owner(&mut client.owner_changes),
+            future::or(publish, notify_rebuild),
+        )
+        .await
+        .map_err(|error| format!("Failed to advertise Matter services with Avahi: {error}").into())
     }
 }
 

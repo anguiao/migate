@@ -26,7 +26,7 @@ MiGate 需要在局域网里完成两个方向的发现。
 
 仓库提供一份 systemd 系统服务模板和一份 macOS LaunchDaemon 模板。用户在模板中指定运行网桥的普通用户、已构建程序的绝对路径，以及通过 `--data-dir` 传入的数据目录绝对路径。程序和数据目录应在系统启动时可访问。先停止前台进程，再启用服务，后台网桥由同一目录恢复米家凭据、设备端点和 Matter 配对。
 
-- **Linux** 由系统级 systemd 在开机时拉起 MiGate，并安排 Avahi 先启动。网桥运行期间若 Avahi 单独重启，Avahi 就绪后应自动重新发布当前的 Matter 服务。允许 systemd 连带重启 MiGate，已配对的 Apple Home 用原配对恢复控制。通过 `systemctl` 查看服务状态，通过 `journalctl` 查看运行日志。
+- **Linux** 由系统级 systemd 在开机时拉起 MiGate，并安排 Avahi 先启动。网桥运行期间若 Avahi 单独重启，Avahi 就绪后应自动重新发布当前的 Matter 服务。系统服务可随 Avahi 重启。Avahi 已有的 D-Bus 名称所有者消失或被替换时，仍在运行的 MiGate 以非零状态退出，由 systemd 重试。已配对的 Apple Home 用原配对恢复控制。通过 `systemctl` 查看服务状态，通过 `journalctl` 查看运行日志。
 - **macOS** 由系统域的 LaunchDaemon 在桌面用户登录前启动 MiGate。通过 `launchctl` 查看服务状态，运行日志写到模板指定的路径。若冷启动停在 FileVault 解锁界面，需先解锁启动卷。[Apple 后台服务说明](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html) · [FileVault 启动说明](https://support.apple.com/guide/security/volume-encryption-with-filevault-sec4c6dc1b6e/1/web/1)
 
 服务在没有交互终端时持续运行，响应 `SIGTERM` 正常退出。后台网桥异常退出后，两端均由系统服务管理器自动重试，连续启动之间保留间隔，直至网桥恢复或管理员停服。

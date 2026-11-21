@@ -66,7 +66,7 @@ sudo systemctl enable --now migate.service
 
 ### 查看状态和日志
 
-网桥异常退出后，systemd 每次等 10 秒再重试，直到恢复或管理员停服。单独重启 Avahi 时，正在运行的网桥会随之重启并重新公告 Matter 服务。
+网桥异常退出后，systemd 每次等 10 秒再重试，直到恢复或管理员停服。单独重启 Avahi 时，网桥会恢复 Matter 公告。Avahi 进程异常退出时，可用 `journalctl -u migate.service` 查看网桥检测到的 Avahi 连接变化和后续重试。
 
 ```sh
 systemctl status migate.service

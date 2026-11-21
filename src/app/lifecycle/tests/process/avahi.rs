@@ -4,8 +4,14 @@ use super::{
     MATTER_LISTENING, Stream, TestProcess, process_support::TIMEOUT, ready_bridge_command,
 };
 use futures_lite::{StreamExt, future};
-use rs_matter::utils::zbus::{Connection, Message, MessageStream, connection, message::Type};
+use rs_matter::utils::zbus::{
+    Connection, Message, MessageStream, connection,
+    fdo::{RequestNameFlags, RequestNameReply},
+    message::Type,
+};
 use std::{collections::HashMap, fs, path::Path, process::Command};
+
+const AVAHI_NAME: &str = "org.freedesktop.Avahi";
 
 pub(super) fn private_bus(directory: &Path) -> (TestProcess, String) {
     let address = format!("unix:path={}/test-bus", directory.display());
@@ -43,7 +49,7 @@ impl AvahiPeer {
                 .unwrap();
             let messages = MessageStream::from(&connection);
             connection
-                .request_name("org.freedesktop.Avahi")
+                .request_name_with_flags(AVAHI_NAME, RequestNameFlags::AllowReplacement.into())
                 .await
                 .unwrap();
             Self {
@@ -208,4 +214,47 @@ fn avahi_errors_during_a_requested_rebuild_are_fatal() {
         "{stderr}"
     );
     assert!(stderr.contains("Injected Avahi commit failure"), "{stderr}");
+}
+
+#[test]
+fn avahi_ownership_loss_and_replacement_are_fatal_after_registration() {
+    for replace in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut command = ready_bridge_command(directory.path(), 0);
+        let (_bus, address) = private_bus(directory.path());
+        let mut avahi = AvahiPeer::new(&address);
+        let mut process = TestProcess::spawn(command.env("DBUS_SYSTEM_BUS_ADDRESS", &address));
+
+        let commit = avahi.hold_reply_to("Commit");
+        avahi.release(commit);
+        process.wait_for_output(Stream::Stderr, "mDNS services updated");
+
+        let _replacement =
+            if replace {
+                let replacement = future::block_on(
+                    connection::Builder::address(address.as_str())
+                        .unwrap()
+                        .build(),
+                )
+                .unwrap();
+                assert_eq!(
+                    future::block_on(replacement.request_name_with_flags(
+                        AVAHI_NAME,
+                        RequestNameFlags::ReplaceExisting.into(),
+                    ))
+                    .unwrap(),
+                    RequestNameReply::PrimaryOwner
+                );
+                Some(replacement)
+            } else {
+                future::block_on(avahi.connection.clone().close()).unwrap();
+                None
+            };
+        let (status, _, stderr) = process.wait_for_exit(TIMEOUT);
+        assert!(!status.success(), "{stderr}");
+        assert!(
+            stderr.contains("Avahi D-Bus name owner changed"),
+            "{stderr}"
+        );
+    }
 }
