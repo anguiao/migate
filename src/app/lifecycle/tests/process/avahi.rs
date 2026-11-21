@@ -9,7 +9,7 @@ use rs_matter::utils::zbus::{
     fdo::{DBusProxy, RequestNameFlags, RequestNameReply},
     message::Type,
 };
-use std::{collections::HashMap, fs, path::Path, process::Command};
+use std::{collections::HashMap, fs, path::Path, process::Command, time::Duration};
 
 const AVAHI_NAME: &str = "org.freedesktop.Avahi";
 
@@ -316,5 +316,31 @@ fn avahi_terminal_entry_group_states_are_fatal_only_for_our_groups() {
             )),
             "{stderr}"
         );
+    }
+}
+
+#[test]
+fn avahi_missing_commit_and_free_replies_are_fatal() {
+    for method in ["Commit", "Free"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut command = ready_bridge_command(directory.path(), 0);
+        let (_bus, address) = private_bus(directory.path());
+        let mut avahi = AvahiPeer::new(&address);
+        let mut process = TestProcess::spawn(command.env("DBUS_SYSTEM_BUS_ADDRESS", &address));
+
+        if method == "Free" {
+            let commit = avahi.hold_reply_to("Commit");
+            avahi.release(commit);
+            process.wait_for_output(Stream::Stderr, "mDNS services updated");
+            fs::write(directory.path().join("source-remove"), b"change").unwrap();
+        }
+        let _withheld = avahi.hold_reply_to(method);
+        let (status, _, stderr) = process.wait_for_exit(Duration::from_secs(15));
+        assert!(!status.success(), "{method}: {stderr}");
+        assert!(
+            stderr.contains("Failed to advertise Matter services with Avahi"),
+            "{method}: {stderr}"
+        );
+        assert!(stderr.contains("timed out"), "{method}: {stderr}");
     }
 }

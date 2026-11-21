@@ -16,12 +16,13 @@ use rs_matter::{
         zbus::{self, fdo},
     },
 };
-use std::{cell::Cell, future::Future, pin::Pin, task::Poll};
+use std::{cell::Cell, future::Future, pin::Pin, task::Poll, time::Duration};
 
 const AVAHI_NAME: &str = "org.freedesktop.Avahi";
 const ENTRY_GROUP_INTERFACE: &str = "org.freedesktop.Avahi.EntryGroup";
 const ENTRY_GROUP_COLLISION: i32 = 3;
 const ENTRY_GROUP_FAILURE: i32 = 4;
+const METHOD_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
 pub(super) struct Publisher(Option<Client>);
@@ -34,7 +35,14 @@ struct Client {
 
 impl Client {
     async fn connect() -> Result<Self, RuntimeError> {
-        let connection = zbus::Connection::system().await.map_err(|error| {
+        let connection = async {
+            zbus::connection::Builder::system()?
+                .method_timeout(METHOD_TIMEOUT)
+                .build()
+                .await
+        }
+        .await
+        .map_err(|error| {
             format!("Failed to connect to the system D-Bus for Matter mDNS: {error}")
         })?;
         let dbus = fdo::DBusProxy::new(&connection).await?;
