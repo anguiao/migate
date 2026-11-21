@@ -31,6 +31,7 @@ fn account_tls() -> &'static AccountTls {
             "account.xiaomi.com",
             "c3.account.xiaomi.com",
             "c3.lp.account.xiaomi.com",
+            "ak.lp.account.xiaomi.com",
             "sts.api.io.mi.com",
         ];
         let leaf = CertificateParams::new(names.map(str::to_owned)).unwrap();

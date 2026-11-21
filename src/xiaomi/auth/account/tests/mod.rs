@@ -217,33 +217,83 @@ fn qr_login_starts_a_fresh_account_request() {
 }
 
 #[test]
-fn qr_polling_accepts_the_reported_official_endpoint() {
-    let mut metadata: Value = serde_json::from_str(&qr_body()).unwrap();
-    metadata["lp"] = json!("https://c3.lp.account.xiaomi.com/lp/s?ticket=poll-secret");
-    let (base, requests) = mock_server(vec![
-        MockResponse::json(200, &metadata.to_string()),
-        MockResponse::json(200, &poll_body(UID)),
-        response(
-            200,
-            "Set-Cookie: serviceToken=service-secret; Path=/\r\n",
-            "",
-        ),
-    ]);
-    let client = AccountClient::for_test(&base, Duration::from_secs(1));
-    let attempt = block_on(client.start_qr(identity())).unwrap();
-    block_on(attempt.poll(Some(UID))).unwrap();
-    let requests: Vec<_> = requests.try_iter().collect();
-    assert_eq!(requests.len(), 3);
-    assert!(requests[1].target.starts_with("/lp/s?"));
+fn qr_polling_accepts_the_reported_official_endpoints() {
+    for (login_host, polling_host) in [
+        ("c3.account.xiaomi.com", "c3.lp.account.xiaomi.com"),
+        ("ak.account.xiaomi.com", "ak.lp.account.xiaomi.com"),
+    ] {
+        let mut metadata: Value = serde_json::from_str(&qr_body()).unwrap();
+        metadata["loginUrl"] = json!(format!(
+            "https://{login_host}/longPolling/login?ticket=qr-secret"
+        ));
+        metadata["lp"] = json!(format!("https://{polling_host}/lp/s?ticket=poll-secret"));
+        let (base, requests) = mock_server(vec![
+            MockResponse::json(200, &metadata.to_string()),
+            MockResponse::json(200, &poll_body(UID)),
+            response(
+                200,
+                "Set-Cookie: serviceToken=service-secret; Path=/\r\n",
+                "",
+            ),
+        ]);
+        let client = AccountClient::for_test(&base, Duration::from_secs(1));
+        let attempt = block_on(client.start_qr(identity())).unwrap();
+        block_on(attempt.poll(Some(UID))).unwrap();
+        let requests: Vec<_> = requests.try_iter().collect();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[1].target, "/lp/s?ticket=poll-secret");
+    }
+}
 
+#[test]
+fn qr_metadata_limits_urls_to_their_official_host_and_path() {
     for url in [
         "http://c3.lp.account.xiaomi.com/lp/s?ticket=secret",
         "https://c3.lp.account.xiaomi.com:444/lp/s?ticket=secret",
         "https://c3.lp.account.xiaomi.com.evil.invalid/lp/s?ticket=secret",
         "https://account.xiaomi.com/lp/s?ticket=secret",
         "https://c3.lp.account.xiaomi.com/lp/other?ticket=secret",
+        "http://ak.lp.account.xiaomi.com/lp/s?ticket=secret",
+        "https://ak.lp.account.xiaomi.com:444/lp/s?ticket=secret",
+        "https://ak.lp.account.xiaomi.com.evil.invalid/lp/s?ticket=secret",
+        "https://ak.account.xiaomi.com/lp/s?ticket=secret",
+        "https://ak.lp.account.xiaomi.com/lp/other?ticket=secret",
+        "https://ak.lp.account.xiaomi.com/longPolling/login?ticket=secret",
     ] {
-        metadata["lp"] = json!(url);
+        assert_rejects_qr_metadata("lp", url);
+    }
+    for (field, url) in [
+        (
+            "loginUrl",
+            "http://ak.account.xiaomi.com/longPolling/login?ticket=secret",
+        ),
+        (
+            "loginUrl",
+            "https://ak.account.xiaomi.com:444/longPolling/login?ticket=secret",
+        ),
+        (
+            "loginUrl",
+            "https://ak.account.xiaomi.com.evil.invalid/longPolling/login?ticket=secret",
+        ),
+        (
+            "loginUrl",
+            "https://ak.account.xiaomi.com/oauth2/authorize?ticket=secret",
+        ),
+        (
+            "loginUrl",
+            "https://ak.lp.account.xiaomi.com/longPolling/login?ticket=secret",
+        ),
+        (
+            "qr",
+            "https://ak.account.xiaomi.com/longPolling/login?ticket=secret",
+        ),
+    ] {
+        assert_rejects_qr_metadata(field, url);
+    }
+
+    fn assert_rejects_qr_metadata(field: &str, url: &str) {
+        let mut metadata: Value = serde_json::from_str(&qr_body()).unwrap();
+        metadata[field] = json!(url);
         let (base, requests) = mock_server(vec![MockResponse::json(200, &metadata.to_string())]);
         let client = AccountClient::for_test(&base, Duration::from_secs(1));
         assert_eq!(

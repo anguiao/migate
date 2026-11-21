@@ -229,10 +229,13 @@ pub(super) fn validate_qr_metadata(
     polling: &Url,
     stage: AccountStage,
 ) -> Result<(), AccountError> {
-    for value in [login_url, qr_url] {
+    for (value, is_login_url) in [(login_url, true), (qr_url, false)] {
         let url = Url::parse(value).map_err(|_| AccountError::protocol(stage))?;
         validate_common(&url, stage)?;
-        if !account_host(&url) {
+        let ak_login_url = is_login_url
+            && url.host_str() == Some("ak.account.xiaomi.com")
+            && url.path() == "/longPolling/login";
+        if !account_host(&url) && !ak_login_url {
             return Err(AccountError::protocol(stage));
         }
     }
@@ -266,7 +269,10 @@ pub(super) fn validate_request_url(url: &Url, stage: AccountStage) -> Result<(),
         }
         AccountStage::QrPolling => {
             (account_host(url) && url.path() == "/longPolling/login")
-                || (url.host_str() == Some("c3.lp.account.xiaomi.com") && url.path() == "/lp/s")
+                || (matches!(
+                    url.host_str(),
+                    Some("c3.lp.account.xiaomi.com" | "ak.lp.account.xiaomi.com")
+                ) && url.path() == "/lp/s")
         }
         AccountStage::ServiceLogin => {
             url.host_str() == Some("account.xiaomi.com") && url.path() == "/pass/serviceLogin"
