@@ -1,7 +1,6 @@
 use super::{
-    PairingEvent,
+    PairingControl, PairingEvent,
     model::{self, basic_info},
-    pairing,
     storage::StoreAdapter,
 };
 use crate::{
@@ -18,10 +17,9 @@ use rs_matter::{
     im::{InteractionModel, InteractionModelState},
     respond::DefaultResponder,
     transport::{MATTER_SOCKET_BIND_ADDR, exchange::MatterBuffers},
+    utils::timers::Instant,
 };
-use std::{future::Future, net::UdpSocket, rc::Rc, task::Poll, time::Duration};
-
-const WINDOW_SECONDS: u16 = 900;
+use std::{future::Future, net::UdpSocket, rc::Rc, task::Poll};
 
 #[cfg(target_os = "linux")]
 #[path = "avahi.rs"]
@@ -75,6 +73,7 @@ pub(crate) struct Bridge<'a> {
     pub(super) store: StoreAdapter,
     renamer: Rc<dyn LabelWriter>,
     advertisement_rebuild: mdns::Rebuild,
+    pairing: PairingControl,
 }
 impl<'a> Bridge<'a> {
     pub(crate) fn new(store: &Store, identity: &'a Identity, renamer: Rc<dyn LabelWriter>) -> Self {
@@ -83,6 +82,7 @@ impl<'a> Bridge<'a> {
             store: StoreAdapter::new(store.matter()),
             renamer,
             advertisement_rebuild: Default::default(),
+            pairing: PairingControl::default(),
         }
     }
 
@@ -94,6 +94,10 @@ impl<'a> Bridge<'a> {
     /// A pending request finishes when the advertisement runner returns.
     pub(crate) fn request_rebuild(&self) -> Poll<()> {
         self.advertisement_rebuild.request()
+    }
+
+    pub(crate) fn pairing_control(&self) -> PairingControl {
+        self.pairing.clone()
     }
 
     /// Run until the advertisement is ready for a requested rebuild or a task fails.
@@ -136,20 +140,13 @@ impl<'a> Bridge<'a> {
         )?;
         log::info!("Matter UDP listening on port {bound_port}");
         let responder = DefaultResponder::new(&im);
-        let opened = !matter.has_fabrics();
-        if opened {
-            matter.open_basic_comm_window(WINDOW_SECONDS, &crypto, &())?;
-            report_pairing(pairing::opened(&info, WINDOW_SECONDS)?)?;
-        }
-        let timeout = async {
-            if opened {
-                async_io::Timer::after(Duration::from_secs(WINDOW_SECONDS.into())).await;
-                if !matter.has_fabrics() {
-                    report_pairing(PairingEvent::Expired)?;
-                }
-            }
-            std::future::pending::<Result<(), RuntimeError>>().await
-        };
+        let pairing = self.pairing.run(
+            &matter,
+            |seconds| im.open_basic_comm_window(seconds),
+            || im.close_comm_window(),
+            Instant::now,
+            report_pairing,
+        );
         let fatal = async { Err::<(), RuntimeError>(store.wait_failure().await.into()) };
         let transport = protocol_task("transport", matter.run(&crypto, &socket, &socket, &socket));
         let mdns = advertisement
@@ -160,7 +157,7 @@ impl<'a> Bridge<'a> {
         use futures_lite::future::or;
         let result = or(
             fatal,
-            or(timeout, or(transport, or(mdns, or(respond, job)))),
+            or(pairing, or(transport, or(mdns, or(respond, job)))),
         )
         .await;
         // A protocol task may return an error before the storage watcher is polled again.

@@ -19,6 +19,7 @@ pub(crate) mod units;
 pub(crate) use bridge::Advertisement;
 pub(crate) use bridge::{Bridge, LabelWriter};
 pub use pairing::PairingEvent;
+pub(crate) use pairing::{PairingControl, PairingStatus};
 pub(crate) use storage::subscription_keys;
 
 pub(crate) use model::{
