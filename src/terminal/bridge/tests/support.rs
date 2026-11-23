@@ -147,10 +147,10 @@ pub(super) async fn run_input(
     store: &DeviceStore,
     status: &AuthStatus,
     input: impl futures_lite::io::AsyncBufRead + Unpin,
-    output: impl futures_lite::io::AsyncWrite + Unpin,
+    mut output: impl futures_lite::io::AsyncWrite + Unpin,
 ) -> Result<(), RuntimeError> {
     let session = Session::default();
-    let mut output = Output::terminal(output);
+    let mut output = Output::terminal(&mut output);
     read_terminal(input, async |words| {
         if let Some(reply) = view(devices, store)?
             .handle_words(words, status, diagnostics)

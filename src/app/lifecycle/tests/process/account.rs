@@ -1,7 +1,7 @@
 use super::{advertisement::store_test_fabric, matter_address};
 use crate::{
     app::{
-        App, BridgeOptions,
+        App, BridgeOptions, BridgeTerminal,
         lifecycle::account::BridgeAccount,
         tests::support::{outlet, status},
     },
@@ -11,21 +11,28 @@ use crate::{
         Power,
     },
     matter::{PairingEvent, tests::support::running_parts},
-    storage::{InstanceLock, Store, XiaomiStore, tests::xiaomi_credentials},
+    storage::{InstanceLock, SOCKET_FILE_NAME, Store, XiaomiStore, tests::xiaomi_credentials},
     terminal::{
+        auth::OnlineAuth,
         bridge::Management,
         management::{Client, Listener},
     },
-    xiaomi::adapter::tests::app_source::AppSource,
+    xiaomi::{
+        adapter::tests::app_source::AppSource,
+        auth::tests::{controlled_login, wait_for_test_signal},
+    },
 };
+use async_io::{Async, Timer};
 use event_listener::Event;
 use futures_lite::{
     future::{self, block_on, poll_once},
-    io::Cursor,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Cursor},
 };
 use std::{
     cell::{Cell, RefCell},
     net::UdpSocket,
+    os::unix::net::UnixStream,
+    path::Path,
     pin::pin,
     rc::Rc,
     time::Duration,
@@ -36,6 +43,9 @@ const SECOND_UID: &str = "next-account";
 const OLD_OUTLET: &str = "test-outlet";
 const NEXT_OUTLET: &str = "next-outlet";
 const FABRIC_KEY: u16 = rs_matter::persist::FABRIC_KEYS_START + 1;
+const LOGIN_BUSY: &str = "The auth login command is in progress. Please retry shortly.\n";
+const SIGNED_OUT: &str = "Waiting for Xiaomi sign-in.\n";
+const LOGGED_OUT: &str = "Xiaomi credentials removed.\n";
 
 #[test]
 fn account_recovery_keeps_the_management_connection_and_uses_the_new_matter_window() {
@@ -57,7 +67,7 @@ fn exercise_account_changes(paired: bool) {
 }
 
 async fn account_changes(paired: bool) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = tempfile::tempdir_in("/tmp").unwrap();
     let instance = InstanceLock::acquire(directory.path()).unwrap();
     let listener = Listener::bind(&instance).unwrap();
     let store = Store::open(directory.path()).unwrap();
@@ -81,6 +91,7 @@ async fn account_changes(paired: bool) {
     };
     let management = Management::new(&status);
     let account = BridgeAccount::new(xiaomi.clone(), &management).unwrap();
+    let peers = controlled_login(&store, FIRST_UID);
     let scope_confirmed = Event::new();
     let finished = Event::new();
     let stopping = finished.listen();
@@ -165,7 +176,14 @@ async fn account_changes(paired: bool) {
                 stopping.await;
                 Ok(())
             },
-            management.serve(Cursor::new([]), Vec::new(), Some(&listener)),
+            account.serve(
+                OnlineAuth::new(&peers.auth, Path::new("migate"), directory.path()),
+                BridgeTerminal {
+                    input: Cursor::new([]),
+                    output: Vec::new(),
+                    listener: Some(&listener),
+                },
+            ),
         ),
         |event| {
             if let PairingEvent::Opened { qr_payload, .. } = event {
@@ -177,12 +195,31 @@ async fn account_changes(paired: bool) {
 
     let controller = async {
         let mut terminal = Client::connect(directory.path()).await.unwrap().unwrap();
-        let waiting = (false, "Waiting for Xiaomi sign-in.\n".to_string());
+        let waiting = (false, SIGNED_OUT.to_string());
         assert_eq!(command(&mut terminal, &["pairing"]).await, waiting);
         assert_eq!(starts.get(), 0);
 
-        commit_login(&xiaomi, FIRST_UID, "access");
-        account.credentials_changed();
+        let scanner = start_login(directory.path()).await;
+        wait_for_test_signal(peers.token_started.clone()).await;
+        assert_eq!(
+            command(&mut terminal, &["auth", "logout"]).await,
+            (false, LOGIN_BUSY.into())
+        );
+        let (ok, report) = command(&mut terminal, &["status"]).await;
+        assert!(ok && report.starts_with(SIGNED_OUT), "{report}");
+        assert!(!report.contains("Scan this QR code"), "{report}");
+        drop(scanner);
+        let (ok, report) = check_after_login(&mut terminal).await;
+        assert!(
+            !ok && report.contains("Xiaomi account: not signed in"),
+            "{report}"
+        );
+        peers.token_release.send(()).unwrap();
+        assert!(xiaomi.load().unwrap().is_none());
+
+        let scanner = start_login(directory.path()).await;
+        wait_for_test_signal(peers.certificate_started.clone()).await;
+        assert_eq!(xiaomi.load().unwrap().unwrap().uid, FIRST_UID);
         assert_pairing(&mut terminal, &opens, paired, 1).await;
         let old_endpoint = store
             .devices()
@@ -194,10 +231,33 @@ async fn account_changes(paired: bool) {
         let (old_source, old_device, late_read) = active.borrow_mut().take().unwrap();
         let old_app = Rc::new(App::open(old_source.clone(), store.clone()));
         let old_device = old_device.unwrap();
+        drop(scanner);
+        assert_eq!(
+            command(&mut terminal, &["auth", "check"]).await,
+            (false, LOGIN_BUSY.into())
+        );
+        peers.certificate_release.send(()).unwrap();
+        while xiaomi
+            .current_snapshot()
+            .record
+            .unwrap()
+            .hub
+            .unwrap()
+            .certificate_pem
+            .is_none()
+        {
+            Timer::after(Duration::from_millis(1)).await;
+        }
+        let (ok, report) = check_after_login(&mut terminal).await;
+        assert!(ok, "{report}");
 
         // A check and a committed same-account login both keep the live instance.
         xiaomi.stop_ha_refresh().unwrap();
-        account.credentials_changed();
+        let (ok, report) = command(&mut terminal, &["auth", "check"]).await;
+        assert!(
+            !ok && report.contains("Xiaomi authentication check failed"),
+            "{report}"
+        );
         assert!(matches!(
             old_source.diagnostics().auth.ha,
             crate::xiaomi::auth::AuthenticationState::SignInRequired(_)
@@ -225,45 +285,54 @@ async fn account_changes(paired: bool) {
         let mut queued = pin!(old_function.execute(Command::Off));
         assert!(poll_once(queued.as_mut()).await.is_none());
 
-        xiaomi.logout().unwrap();
-        account.credentials_changed();
-        assert!(!old_source.has_scope());
-        assert!(
-            old_app
-                .configuration_access(&old_app.current())
-                .unwrap()
-                .descriptions
-                .is_empty()
-        );
-        assert!(old_app.rename(outlet().key(), "Late old name").is_err());
-        assert!(queued.await.is_err());
-        assert!(matches!(
-            old_function.execute(Command::On).await,
-            Err(CommandError::Cancelled)
-        ));
-        late_read.unwrap()();
-        assert_eq!(old_function.snapshot().power(), Some(Power::Off));
-        let mut logout = pin!(account.wait_for_logout());
-        assert!(poll_once(logout.as_mut()).await.is_none());
-        respond.try_send(()).unwrap();
-        logout.await;
+        let (ack, ()) = future::zip(
+            async {
+                let ack = command(&mut terminal, &["auth", "logout"]).await;
+                assert_eq!(shutdowns.get(), 1);
+                assert!(UdpSocket::bind(matter_address(port)).is_ok());
+                ack
+            },
+            async {
+                while xiaomi.current_snapshot().record.is_some() {
+                    Timer::after(Duration::from_millis(1)).await;
+                }
+                assert!(!old_source.has_scope());
+                assert!(
+                    old_app
+                        .configuration_access(&old_app.current())
+                        .unwrap()
+                        .descriptions
+                        .is_empty()
+                );
+                assert!(old_app.rename(outlet().key(), "Late old name").is_err());
+                assert!(queued.await.is_err());
+                assert!(matches!(
+                    old_function.execute(Command::On).await,
+                    Err(CommandError::Cancelled)
+                ));
+                late_read.unwrap()();
+                assert_eq!(old_function.snapshot().power(), Some(Power::Off));
+                respond.try_send(()).unwrap();
+            },
+        )
+        .await;
+        assert_eq!(ack, (true, LOGGED_OUT.into()));
         assert!(!sent_control.await.0);
         assert!(sent.try_recv().is_err());
-        assert_eq!(shutdowns.get(), 1);
-        assert!(UdpSocket::bind(matter_address(port)).is_ok());
         assert_eq!(command(&mut terminal, &["pairing", "open"]).await, waiting);
         assert_eq!(
             command(&mut terminal, &["on", OLD_OUTLET, "outlet:2"]).await,
             waiting
         );
 
-        commit_login(&xiaomi, FIRST_UID, "recovered-access");
-        account.credentials_changed();
+        let (ok, report) = command(&mut terminal, &["auth", "login"]).await;
+        assert!(ok, "{report}");
         assert_pairing(&mut terminal, &opens, paired, 2).await;
         assert!(command(&mut terminal, &["status", OLD_OUTLET]).await.0);
-        xiaomi.logout().unwrap();
-        account.credentials_changed();
-        account.wait_for_logout().await;
+        assert_eq!(
+            command(&mut terminal, &["auth", "logout"]).await,
+            (true, LOGGED_OUT.into())
+        );
         assert_eq!(shutdowns.get(), 2);
 
         commit_login(&xiaomi, SECOND_UID, "next-access");
@@ -365,6 +434,47 @@ async fn command(client: &mut Client, words: &[&str]) -> (bool, String) {
     let mut output = Vec::new();
     let success = client.execute(words, &mut output).await.unwrap();
     (success, String::from_utf8(output).unwrap())
+}
+
+async fn start_login(directory: &Path) -> BufReader<Async<UnixStream>> {
+    let mut stream = BufReader::new(
+        Async::<UnixStream>::connect(directory.join(SOCKET_FILE_NAME))
+            .await
+            .unwrap(),
+    );
+    let mut line = String::new();
+    stream.read_line(&mut line).await.unwrap();
+    assert_eq!(line, "migate/1\n");
+    stream
+        .get_mut()
+        .write_all(b"[\"auth\",\"login\"]\n")
+        .await
+        .unwrap();
+    loop {
+        line.clear();
+        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let text = frame["output"]
+            .as_str()
+            .expect("login ended before QR output");
+        if text.contains("Waiting for scan confirmation") {
+            assert!(
+                text.contains("Scan this QR code") && text.contains('█'),
+                "{text}"
+            );
+            return stream;
+        }
+    }
+}
+
+async fn check_after_login(client: &mut Client) -> (bool, String) {
+    loop {
+        let result = command(client, &["auth", "check"]).await;
+        if result.1 != LOGIN_BUSY {
+            return result;
+        }
+        Timer::after(Duration::from_millis(1)).await;
+    }
 }
 
 async fn assert_pairing(

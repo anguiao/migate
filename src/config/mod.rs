@@ -31,7 +31,14 @@ impl AuthCommand {
         }
     }
 
-    pub(crate) fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn from_words(words: &[&str]) -> Option<Self> {
+        match words {
+            ["auth", name] => Self::parse(name),
+            _ => None,
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
         match name {
             "login" => Some(Self::Login),
             "check" => Some(Self::Check),

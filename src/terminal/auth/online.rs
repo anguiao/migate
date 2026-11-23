@@ -5,7 +5,7 @@ use crate::{
     terminal::management::{Output, Session},
     xiaomi::auth::AuthService,
 };
-use futures_lite::{future, io::AsyncWrite};
+use futures_lite::future;
 use std::{cell::Cell, io, path::Path};
 
 /// Share one executor across the bridge's foreground and socket sessions.
@@ -32,7 +32,7 @@ impl<'a> OnlineAuth<'a> {
         &self,
         command: AuthCommand,
         session: &Session,
-        output: &mut Output<impl AsyncWrite + Unpin>,
+        output: &mut Output<'_>,
         credentials_changed: impl Fn(),
         stop_account: impl AsyncFnOnce() -> Result<(), RuntimeError>,
     ) -> io::Result<bool> {
@@ -82,7 +82,7 @@ impl<'a> OnlineAuth<'a> {
     async fn login(
         &self,
         session: &Session,
-        output: &mut Output<impl AsyncWrite + Unpin>,
+        output: &mut Output<'_>,
         credentials_changed: impl Fn(),
     ) -> Result<(), RuntimeError> {
         let committed = Cell::new(false);

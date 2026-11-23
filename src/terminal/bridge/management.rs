@@ -5,14 +5,11 @@ use crate::{
     matter::PairingControl,
     terminal::{
         current_time,
-        management::{Listener, Output, Session, read_terminal},
+        management::{self, Listener, Output, Session},
         pairing::write_status,
     },
 };
-use futures_lite::{
-    future,
-    io::{AsyncBufRead, AsyncWrite},
-};
+use futures_lite::io::{AsyncBufRead, AsyncWrite};
 use std::{cell::RefCell, io, rc::Rc};
 
 enum BridgeState {
@@ -70,32 +67,17 @@ impl<'a> Management<'a> {
         output: impl AsyncWrite + Unpin,
         listener: Option<&Listener<'_>>,
     ) -> Result<(), RuntimeError> {
-        let foreground = async {
-            let session = Session::default();
-            let mut output = Output::terminal(output);
-            read_terminal(input, async |words| {
-                self.execute(words, &session, &mut output).await?;
-                Ok(())
-            })
-            .await
-            .map_err(|error| format!("Terminal I/O failed: {error}"))?;
-            log::info!("Terminal input ended; bridge is still running");
-            future::pending().await
-        };
-        let sockets = async {
-            match listener {
-                Some(listener) => listener.serve(self).await,
-                None => future::pending().await,
-            }
-        };
-        future::or(foreground, sockets).await
+        management::serve(input, output, listener, async |words, session, output| {
+            self.execute(words, session, output).await
+        })
+        .await
     }
 
     pub(crate) async fn execute(
         &self,
         words: &[&str],
         session: &Session,
-        output: &mut Output<impl AsyncWrite + Unpin>,
+        output: &mut Output<'_>,
     ) -> io::Result<bool> {
         if matches!(words, ["pairing"] | ["pairing", "open"]) {
             let (success, text) = match self.pairing(words.len() == 2).await {

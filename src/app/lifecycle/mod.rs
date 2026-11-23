@@ -8,9 +8,10 @@ use super::{
 use crate::{
     RuntimeError,
     matter::{Advertisement, Bridge, PairingEvent},
-    terminal::{bridge::Management, management::Listener},
+    terminal::{auth::OnlineAuth, bridge::Management, management::Listener},
     xiaomi::{
         adapter::{SourceHandle, XiaomiAdapter},
+        auth::AuthService,
         cloud::CloudClient,
         discovery::Discovery,
     },
@@ -85,13 +86,15 @@ pub async fn run_xiaomi_bridge_with_terminal(
 pub async fn run_managed_xiaomi_bridge(
     options: BridgeOptions<'_>,
     cloud: CloudClient,
+    auth: &AuthService,
     terminal: BridgeTerminal<'_, impl AsyncBufRead + Unpin, impl AsyncWrite + Unpin>,
     interrupt: impl Future<Output = Result<(), RuntimeError>>,
     pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
 ) -> Result<(), RuntimeError> {
     let management = Management::new(options.status);
     let account = BridgeAccount::new(options.store.xiaomi(), &management)?;
-    let sessions = management.serve(terminal.input, terminal.output, terminal.listener);
+    let (executable, data_dir) = options.status.invocation_paths();
+    let sessions = account.serve(OnlineAuth::new(auth, executable, data_dir), terminal);
     account
         .run(
             options,

@@ -1,13 +1,17 @@
-use super::{BridgeOptions, run_source_bridge};
+use super::{BridgeOptions, BridgeTerminal, run_source_bridge};
 use crate::{
     RuntimeError,
+    config::AuthCommand,
     matter::{Advertisement, PairingEvent},
     storage::{StorageError, XiaomiStore},
-    terminal::bridge::Management,
+    terminal::{auth::OnlineAuth, bridge::Management, management},
     xiaomi::adapter::SourceHandle,
 };
 use event_listener::Event;
-use futures_lite::future;
+use futures_lite::{
+    future,
+    io::{AsyncBufRead, AsyncWrite},
+};
 use std::{cell::RefCell, future::Future, pin::pin};
 
 /// The live source belongs to the saved account while terminal sessions belong
@@ -69,7 +73,7 @@ impl<'a> BridgeAccount<'a> {
 
     /// Return only after the old Matter runner, advertisement and source have
     /// been dropped. New device requests are revoked at the commit itself.
-    pub(super) async fn wait_for_logout(&self) {
+    async fn wait_for_logout(&self) {
         loop {
             let changed = self.changed.listen();
             if self.active.borrow().is_none() {
@@ -77,6 +81,37 @@ impl<'a> BridgeAccount<'a> {
             }
             changed.await;
         }
+    }
+
+    pub(super) async fn serve(
+        &self,
+        online: OnlineAuth<'_>,
+        terminal: BridgeTerminal<'_, impl AsyncBufRead + Unpin, impl AsyncWrite + Unpin>,
+    ) -> Result<(), RuntimeError> {
+        management::serve(
+            terminal.input,
+            terminal.output,
+            terminal.listener,
+            async |words, session, output| {
+                if let Some(command) = AuthCommand::from_words(words) {
+                    return online
+                        .execute(
+                            command,
+                            session,
+                            output,
+                            || self.credentials_changed(),
+                            async || {
+                                self.credentials_changed();
+                                self.wait_for_logout().await;
+                                Ok(())
+                            },
+                        )
+                        .await;
+                }
+                self.management.execute(words, session, output).await
+            },
+        )
+        .await
     }
 
     pub(super) async fn run<Ready, Network>(

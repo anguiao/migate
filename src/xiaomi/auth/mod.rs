@@ -22,4 +22,4 @@ pub use report::{
 pub use service::AuthService;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

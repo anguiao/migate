@@ -32,6 +32,7 @@ enum Failure {
     Token,
     TokenDelay,
     TokenPending,
+    TokenAndCertificatePending,
     HomeUid,
     HomeMixedUid,
     HomeMissing,
@@ -39,16 +40,16 @@ enum Failure {
     CertificatePending,
 }
 
-struct Peers {
-    auth: AuthService,
+pub(crate) struct Peers {
+    pub(crate) auth: AuthService,
     account: Receiver<ReceivedRequest>,
     mijia: Receiver<ReceivedRequest>,
     ha: Receiver<ReceivedRequest>,
-    token_started: Arc<AtomicBool>,
-    token_release: flume::Sender<()>,
-    certificate_started: Arc<AtomicBool>,
+    pub(crate) token_started: Arc<AtomicBool>,
+    pub(crate) token_release: flume::Sender<()>,
+    pub(crate) certificate_started: Arc<AtomicBool>,
     certificate_finished: Arc<AtomicBool>,
-    certificate_release: flume::Sender<()>,
+    pub(crate) certificate_release: flume::Sender<()>,
 }
 
 fn response(status: u16, headers: &str, body: &str) -> MockResponse {
@@ -63,7 +64,15 @@ fn redirect(location: &str) -> MockResponse {
 fn qr_body() -> String {
     json!({"loginUrl":"https://c3.account.xiaomi.com/longPolling/scan?ticket=qr-secret", "lp":"https://c3.lp.account.xiaomi.com/longPolling/login?ticket=poll-secret", "qr":"https://c3.account.xiaomi.com/longPolling/qr?ticket=qr-secret", "timeout":60}).to_string()
 }
+pub(crate) fn controlled_login(store: &Store, uid: &'static str) -> Peers {
+    make_peers_for(store, Failure::TokenAndCertificatePending, uid)
+}
+
 fn make_peers(store: &Store, failure: Failure) -> Peers {
+    make_peers_for(store, failure, "uid")
+}
+
+fn make_peers_for(store: &Store, failure: Failure, uid: &'static str) -> Peers {
     let mut step = 0usize;
     let mut redirect_uri = String::new();
     let mut state = String::new();
@@ -78,7 +87,7 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
                 response(200, "Set-Cookie: qrSession=qr-cookie; Domain=account.xiaomi.com; Path=/\r\n", &body)
             }
             1 => {
-                let response = MockResponse::json(200, &format!("&&&START&&&{}", json!({"code":0,"userId":if failure == Failure::WrongQrUid {"other"} else {"uid"},"cUserId":"cuser-new","passToken":"pass-new","ssecurity":"c2VjdXJpdHk=","location":"https://sts.api.io.mi.com/sts?ticket=sts-secret"})));
+                let response = MockResponse::json(200, &format!("&&&START&&&{}", json!({"code":0,"userId":if failure == Failure::WrongQrUid {"other"} else {uid},"cUserId":"cuser-new","passToken":"pass-new","ssecurity":"c2VjdXJpdHk=","location":"https://sts.api.io.mi.com/sts?ticket=sts-secret"})));
                 if failure == Failure::Expired { response.delayed(Duration::from_millis(1200)) } else { response }
             }
             2 if failure == Failure::Sts => MockResponse::json(503, "unavailable"),
@@ -96,7 +105,7 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
             6 => response(200, "Content-Type: text/html\r\n", "consent SPA"),
             7 if failure == Failure::Consent => MockResponse::json(200, r#"{"code":96012}"#),
             7 if failure == Failure::Verification => MockResponse::json(200, r#"{"notificationUrl":"https://account.xiaomi.com/pass/notification?ticket=verify-secret"}"#),
-            7 => MockResponse::json(200, &json!({"code":0,"data":{"user":{"userId":if failure == Failure::ContextUid {"other"} else {"uid"}},"client_id":crate::xiaomi::cloud::CLIENT_ID.to_string(),"redirect_uri":redirect_uri,"pt":"pt-secret","device_id":"0123456789abcdef0123456789abcdef","followup":followup,"scope_id":"1 2","_ssign":"ssign-secret"}}).to_string()),
+            7 => MockResponse::json(200, &json!({"code":0,"data":{"user":{"userId":if failure == Failure::ContextUid {"other"} else {uid}},"client_id":crate::xiaomi::cloud::CLIENT_ID.to_string(),"redirect_uri":redirect_uri,"pt":"pt-secret","device_id":"0123456789abcdef0123456789abcdef","followup":followup,"scope_id":"1 2","_ssign":"ssign-secret"}}).to_string()),
             8 => MockResponse::json(200, r#"{"code":0,"data":{"followup":"https://account.xiaomi.com/sts/oauth?ticket=grant-secret"}}"#),
             9 => redirect(&format!("{redirect_uri}?code=code-secret&state={state}")),
             _ => unreachable!(),
@@ -109,10 +118,11 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
         let uid = if failure == Failure::MijiaUid {
             "other"
         } else {
-            "uid"
+            uid
         };
         MockResponse::json(200, &json!({"code":0,"result":{"homelist":[{"uid":uid,"id":"1","dids":[],"roomlist":[]}],"has_more":false}}).to_string())
     });
+    let mut tokens = 0;
     let mut certificates = 0;
     let token_started = Arc::new(AtomicBool::new(false));
     let token_signal = token_started.clone();
@@ -124,10 +134,13 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
     let (certificate_release, certificate_gate) = flume::bounded(1);
     let (ha_base, ha) = dynamic_mock_server(30, move |request| {
         if request.target.contains("get_token") {
+            tokens += 1;
             token_signal.store(true, Ordering::SeqCst);
             if failure == Failure::Token {
                 MockResponse::json(503, "unavailable")
-            } else if failure == Failure::TokenPending {
+            } else if failure == Failure::TokenPending
+                || (failure == Failure::TokenAndCertificatePending && tokens == 1)
+            {
                 MockResponse::json(200, &token_body("access-new", "refresh-new"))
                     .gated(token_gate.clone())
             } else if failure == Failure::TokenDelay {
@@ -144,13 +157,17 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
                     r#"{"code":0,"result":{"homelist":[{"uid":"uid","dids":[]},{"uid":"other","dids":[]}]}}"#,
                 ),
                 Failure::HomeMissing => MockResponse::json(200, &home_body(None, &[])),
-                _ => MockResponse::json(200, &home_body(Some("uid"), &[])),
+                _ => MockResponse::json(200, &home_body(Some(uid), &[])),
             }
         } else if request.target.contains("get_central_crt") {
             certificates += 1;
             if failure == Failure::Certificate && certificates == 1 {
                 MockResponse::json(503, "unavailable")
-            } else if failure == Failure::CertificatePending && certificates == 1 {
+            } else if matches!(
+                failure,
+                Failure::CertificatePending | Failure::TokenAndCertificatePending
+            ) && certificates == 1
+            {
                 certificate_signal.store(true, Ordering::SeqCst);
                 let finished = certificate_completion.clone();
                 certificate_response(request)
@@ -324,7 +341,7 @@ fn cancelling_a_pending_candidate_preserves_the_old_record() {
     assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
 }
 
-async fn wait_for_test_signal(signal: Arc<AtomicBool>) {
+pub(crate) async fn wait_for_test_signal(signal: Arc<AtomicBool>) {
     future::or(wait_for_signal(signal), async {
         async_io::Timer::after(Duration::from_secs(2)).await;
         panic!("timed out waiting for the test peer");
@@ -695,7 +712,8 @@ async fn foreground_login(
     socket: &Async<UnixStream>,
     on_credentials: impl Fn(),
 ) {
-    let mut output = Output::terminal(socket);
+    let mut writer = socket;
+    let mut output = Output::terminal(&mut writer);
     read_foreground(BufReader::new(socket), async |words, session| {
         assert_eq!(words, ["auth", "login"]);
         online

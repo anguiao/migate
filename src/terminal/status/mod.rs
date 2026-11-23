@@ -8,7 +8,11 @@ use crate::xiaomi::{
     adapter::{AdapterStatus, GatewayStatus},
     auth::AuthReport,
 };
-use std::{cell::RefCell, fmt::Write as _, path::PathBuf};
+use std::{
+    cell::RefCell,
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 use time::OffsetDateTime;
 
 struct AdapterLogState {
@@ -48,6 +52,10 @@ impl AuthStatus {
 
     pub fn render(&self, now: i64) -> String {
         format_report(&self.report.borrow(), now, &self.executable, &self.data_dir)
+    }
+
+    pub(crate) fn invocation_paths(&self) -> (&Path, &Path) {
+        (&self.executable, &self.data_dir)
     }
 
     pub(crate) fn signed_out(&self) {

@@ -190,6 +190,7 @@ fn run_bridge(executable: &Path, data_dir: &Path, matter_port: u16) -> Result<()
                 port: matter_port,
             },
             cloud,
+            &auth,
             BridgeTerminal {
                 input: stdin_input(std::io::stdin()),
                 output: blocking::Unblock::new(std::io::stdout()),

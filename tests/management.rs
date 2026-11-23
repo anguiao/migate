@@ -16,6 +16,7 @@ use support::process::{Stream, TIMEOUT, TestProcess};
 
 const SOCKET: &str = "migate.sock";
 const WAITING: &str = "Waiting for Xiaomi home confirmation.";
+const SIGNED_OUT: &str = "Waiting for Xiaomi sign-in.";
 
 fn cli(directory: &Path, args: &[&str]) -> Command {
     let mut process = Command::new(env!("CARGO_BIN_EXE_migate"));
@@ -206,10 +207,16 @@ fn two_cli_clients_share_the_preparing_bridge_and_keep_sessions_independent() {
             .contains(" attach")
     );
     first.interrupt();
+    let (status, out, err) =
+        TestProcess::spawn(&mut cli(directory.path(), &["auth", "logout"])).wait_for_exit(TIMEOUT);
+    assert!(status.success(), "{out}{err}");
+    assert_eq!(out, "Xiaomi credentials removed.\n");
+    second.send("status\n");
+    second.wait_for_output(Stream::Stdout, SIGNED_OUT);
     second.close_input();
     assert!(second.wait_for_exit(TIMEOUT).0.success());
     bridge.send("status\n");
-    bridge.wait_for_output(Stream::Stdout, WAITING);
+    bridge.wait_for_output(Stream::Stdout, SIGNED_OUT);
     bridge.close_input();
     bridge.wait_for_output(
         Stream::Stderr,
@@ -224,6 +231,38 @@ fn two_cli_clients_share_the_preparing_bridge_and_keep_sessions_independent() {
     );
     bridge.stop("-TERM");
     assert!(!directory.path().join(SOCKET).exists());
+}
+
+#[test]
+fn foreground_attach_and_single_commands_check_the_same_unsigned_bridge() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut owner = TestProcess::spawn(&mut cli(directory.path(), &[]));
+    owner.wait_for_output(Stream::Stderr, "Xiaomi account: not signed in");
+
+    let args = "auth check\nstatus\n";
+    owner.send(args);
+    let foreground =
+        owner.wait_for_output_matching(Stream::Stdout, SIGNED_OUT, TIMEOUT, |output| {
+            output.lines().any(|line| line == SIGNED_OUT)
+        });
+    let mut attach = TestProcess::spawn(&mut cli(directory.path(), &["attach"]));
+    attach.send(args);
+    attach.close_input();
+    let (status, attached, error) = attach.wait_for_exit(TIMEOUT);
+    assert!(status.success(), "{error}");
+    let (status, single, error) =
+        TestProcess::spawn(&mut cli(directory.path(), &["auth", "check"])).wait_for_exit(TIMEOUT);
+    assert!(!status.success() && error.is_empty(), "{single}{error}");
+
+    let expected = format!("{single}{SIGNED_OUT}\n");
+    assert!(
+        single.ends_with("Xiaomi authentication check failed\n")
+            && foreground.starts_with(&expected)
+            && attached.starts_with(&expected),
+        "foreground:\n{foreground}\nattach:\n{attached}\none-shot:\n{single}"
+    );
+    let (_out, error) = owner.stop("-TERM");
+    assert!(error.contains("Received SIGTERM"), "{error}");
 }
 
 #[test]

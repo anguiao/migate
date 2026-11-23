@@ -1,9 +1,9 @@
 mod protocol;
 
 use self::protocol::{Frame, GREETING, REQUEST_LIMIT, read_frame, write_frame};
-use super::bridge::Management;
 use crate::{
     RuntimeError,
+    config::AuthCommand,
     storage::{InstanceLock, SOCKET_FILE_NAME},
 };
 use async_io::{Async, Timer};
@@ -68,7 +68,10 @@ impl Listener<'_> {
         })
     }
 
-    pub(crate) async fn serve(&self, management: &Management<'_>) -> Result<(), RuntimeError> {
+    async fn serve(
+        &self,
+        execute: &impl AsyncFn(&[&str], &Session, &mut Output<'_>) -> io::Result<bool>,
+    ) -> Result<(), RuntimeError> {
         let mut sessions = FuturesUnordered::new();
         loop {
             let completed = async {
@@ -84,7 +87,7 @@ impl Listener<'_> {
                     )
                 })?;
             sessions.push(async move {
-                if let Err(error) = serve_session(&stream, management).await {
+                if let Err(error) = serve_session(&stream, execute).await {
                     log::debug!("Management session ended: {error}");
                 }
             });
@@ -327,7 +330,7 @@ pub(crate) async fn read_foreground(
         .read_commands(async |words, input| {
             let session = Session::default();
             let command = execute(words, &session);
-            if words == ["auth", "login"] {
+            if AuthCommand::from_words(words) == Some(AuthCommand::Login) {
                 let disconnected = async {
                     input.wait_for_end().await?;
                     session.close();
@@ -343,6 +346,32 @@ pub(crate) async fn read_foreground(
             Ok(true)
         })
         .await
+}
+
+pub(crate) async fn serve(
+    input: impl AsyncBufRead + Unpin,
+    mut output: impl AsyncWrite + Unpin,
+    listener: Option<&Listener<'_>>,
+    execute: impl AsyncFn(&[&str], &Session, &mut Output<'_>) -> io::Result<bool>,
+) -> Result<(), RuntimeError> {
+    let foreground = async {
+        let mut output = Output::terminal(&mut output);
+        read_foreground(input, async |words, session| {
+            execute(words, session, &mut output).await?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("Terminal I/O failed: {error}"))?;
+        log::info!("Terminal input ended; bridge is still running");
+        future::pending().await
+    };
+    let sockets = async {
+        match listener {
+            Some(listener) => listener.serve(&execute).await,
+            None => future::pending().await,
+        }
+    };
+    future::or(foreground, sockets).await
 }
 
 struct TerminalInput<R> {
@@ -423,13 +452,13 @@ impl Session {
     }
 }
 
-pub(crate) struct Output<W> {
-    writer: W,
+pub(crate) struct Output<'a> {
+    writer: &'a mut (dyn AsyncWrite + Unpin),
     framed: bool,
 }
 
-impl<W: AsyncWrite + Unpin> Output<W> {
-    pub(crate) fn terminal(writer: W) -> Self {
+impl<'a> Output<'a> {
+    pub(crate) fn terminal(writer: &'a mut (impl AsyncWrite + Unpin)) -> Self {
         Self {
             writer,
             framed: false,
@@ -453,10 +482,14 @@ impl<W: AsyncWrite + Unpin> Output<W> {
     }
 }
 
-async fn serve_session(stream: &Async<UnixStream>, management: &Management<'_>) -> io::Result<()> {
+async fn serve_session(
+    stream: &Async<UnixStream>,
+    execute: &impl AsyncFn(&[&str], &Session, &mut Output<'_>) -> io::Result<bool>,
+) -> io::Result<()> {
     let mut input = BufReader::new(stream);
+    let mut writer = stream;
     let mut output = Output {
-        writer: stream,
+        writer: &mut writer,
         framed: true,
     };
     let session = Session::default();
@@ -471,8 +504,8 @@ async fn serve_session(stream: &Async<UnixStream>, management: &Management<'_>) 
             }
             future::pending().await
         };
-        let execute = management.execute(&words, &session, &mut output);
-        let result = future::or(watch, execute).await;
+        let command = execute(&words, &session, &mut output);
+        let result = future::or(watch, command).await;
         if session.closed.get() {
             return Ok(());
         }

@@ -21,6 +21,7 @@ use std::{
     time::Duration,
 };
 
+pub(crate) use login::{controlled_login, wait_for_test_signal};
 use support::*;
 
 mod bridge;
