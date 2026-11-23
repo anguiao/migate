@@ -1,9 +1,9 @@
 use super::{
     AccountErrorKind, AccountStage, AuthError, AuthService, FailureReason,
-    service::verify_account_uid,
+    service::{StoredRecord, verify_account_uid},
 };
 use crate::{
-    storage::{AccountRecovery, RecoveryStop, XiaomiRecord},
+    storage::{AccountRecovery, RecoveryStop},
     xiaomi::mijia::MijiaSession,
 };
 
@@ -22,17 +22,28 @@ impl AuthService {
 
     /// Validate the saved session and make at most one independent recovery attempt.
     /// The caller can classify Account and Cloud errors for its own retry policy.
-    pub(super) async fn maintain_mijia(
-        &self,
-        record: &XiaomiRecord,
-        generation: u64,
-    ) -> Result<MijiaSession, AuthError> {
-        match self.validate_mijia(&record.uid, &record.mijia).await {
-            Ok(()) => Ok(record.mijia.clone()),
-            Err(AuthError::Cloud(error)) if error.is_unauthorized() => {
-                self.recover_mijia(&record.uid, generation).await
-            }
-            Err(error) => Err(error),
+    pub(super) async fn maintain_mijia(&self, stored: &StoredRecord) -> Result<(), AuthError> {
+        let record = &stored.record;
+        let result = match self.validate_mijia(&record.uid, &record.mijia).await {
+            Err(AuthError::Cloud(error)) if error.is_unauthorized() => self
+                .recover_mijia(&record.uid, stored.mijia_generation)
+                .await
+                .map(drop),
+            result => result,
+        };
+        let current = self.store.current_snapshot();
+        if current.login_generation != stored.login_generation {
+            return Err(AuthError::Missing(
+                "Xiaomi login changed during the Mijia check",
+            ));
+        }
+        if current.mijia_generation == stored.mijia_generation {
+            return result;
+        }
+        // A recovery validates the new session before advancing its generation.
+        match current.record.expect("same saved login").recovery.stop {
+            Some(stop) => Err(AuthError::Failure(FailureReason::RecoveryStopped(stop))),
+            None => Ok(()),
         }
     }
 

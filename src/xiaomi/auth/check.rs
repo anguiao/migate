@@ -17,11 +17,8 @@ impl AuthService {
         let refreshes = self.store.ha_refreshes();
         // Retain the attempt even if it finishes during the independent Mijia check.
         let pending = refreshes.in_flight(initial.ha_generation);
-        let mijia = match self
-            .maintain_mijia(&initial.record, initial.mijia_generation)
-            .await
-        {
-            Ok(_) => AuthenticationState::Authenticated,
+        let mijia = match self.maintain_mijia(&initial).await {
+            Ok(()) => AuthenticationState::Authenticated,
             Err(error) => state_for_error(error)?,
         };
         let pending = pending.or_else(|| {

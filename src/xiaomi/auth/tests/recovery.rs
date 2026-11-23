@@ -125,6 +125,63 @@ fn rejected_saved_session_is_restored_once_and_saved_as_one_pair() {
 }
 
 #[test]
+fn an_online_check_adopts_a_background_mijia_recovery_only_for_the_same_login() {
+    enum Change {
+        Recovery,
+        Login,
+        Logout,
+    }
+
+    for change in [Change::Recovery, Change::Login, Change::Logout] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let record = recovery_record();
+        store.xiaomi().fixture_replace(&record).unwrap();
+        let generation = store
+            .xiaomi()
+            .snapshot()
+            .unwrap()
+            .mijia_generation()
+            .unwrap();
+        let (check, account, _, ha) = recovery_service(&store, RecoveryResponse::Success);
+        let result = block_on(async {
+            let mut checking = std::pin::pin!(check.check());
+            assert!(future::poll_once(checking.as_mut()).await.is_none());
+            match change {
+                Change::Recovery => {
+                    let (background, ..) = recovery_service(&store, RecoveryResponse::Success);
+                    let restored = background
+                        .recover_mijia(&record.uid, generation)
+                        .await
+                        .unwrap();
+                    assert_eq!(restored.service_token(), "restored-service");
+                }
+                Change::Login => store
+                    .xiaomi()
+                    .commit_login(
+                        &record.recovery.credentials,
+                        &record.mijia,
+                        &record.ha.client_uuid,
+                        &record.ha.authorization,
+                    )
+                    .unwrap(),
+                Change::Logout => check.logout().unwrap(),
+            }
+            checking.await
+        });
+        assert_eq!(account.try_iter().count(), 0);
+        if matches!(change, Change::Recovery) {
+            let report = result.unwrap();
+            assert!(report.is_success(), "{report:?}");
+            assert_eq!(ha.try_iter().count(), 1);
+        } else {
+            assert!(matches!(result, Err(AuthError::Missing(_))), "{result:?}");
+            assert_eq!(ha.try_iter().count(), 0);
+        }
+    }
+}
+
+#[test]
 fn known_rejected_session_is_restored_without_probing_it_again() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
