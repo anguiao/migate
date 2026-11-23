@@ -1,12 +1,18 @@
-use super::qr;
+use super::{bridge_command, qr};
 use crate::matter::{PairingEvent, PairingStatus};
 use rs_matter::utils::timers::Instant;
 use std::{
     fmt,
     io::{self, Write},
+    path::Path,
 };
 
-pub fn write_event(mut output: impl Write, event: PairingEvent) -> io::Result<()> {
+pub fn write_event(
+    mut output: impl Write,
+    event: PairingEvent,
+    executable: &Path,
+    data_dir: &Path,
+) -> io::Result<()> {
     match event {
         PairingEvent::Opened {
             window_seconds,
@@ -21,21 +27,26 @@ pub fn write_event(mut output: impl Write, event: PairingEvent) -> io::Result<()
             &manual_code,
             &qr_payload,
         )?,
-        PairingEvent::Expired => writeln!(
-            output,
-            "Pairing window expired. Run 'migate pairing open' to reopen it."
-        )?,
+        PairingEvent::Expired => {
+            writeln!(output, "Pairing window expired.")?;
+            write_reopen_hint(&mut output, executable, data_dir)?;
+        }
     }
     output.flush()
 }
 
-pub(crate) fn write_status(mut output: impl Write, status: PairingStatus) -> io::Result<()> {
+pub(crate) fn write_status(
+    mut output: impl Write,
+    status: PairingStatus,
+    executable: &Path,
+    data_dir: &Path,
+) -> io::Result<()> {
     match status {
         PairingStatus::Paired => writeln!(output, "MiGate is already paired.")?,
-        PairingStatus::Closed => writeln!(
-            output,
-            "Pairing window is closed. Run 'migate pairing open' to reopen it."
-        )?,
+        PairingStatus::Closed => {
+            writeln!(output, "Pairing window is closed.")?;
+            write_reopen_hint(&mut output, executable, data_dir)?;
+        }
         PairingStatus::Open {
             expires_at,
             manual_code,
@@ -64,6 +75,14 @@ pub(crate) fn write_status(mut output: impl Write, status: PairingStatus) -> io:
         }
     }
     output.flush()
+}
+
+fn write_reopen_hint(mut output: impl Write, executable: &Path, data_dir: &Path) -> io::Result<()> {
+    writeln!(
+        output,
+        "In the foreground bridge or an attach session, enter 'pairing open'.\nFrom the shell, run\n  {} pairing open",
+        bridge_command(executable, data_dir)
+    )
 }
 
 fn remaining_seconds(expires_at: Instant) -> u64 {

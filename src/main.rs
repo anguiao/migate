@@ -248,7 +248,14 @@ fn run_bridge(executable: &Path, data_dir: &Path, matter_port: u16) -> Result<()
                 listener: Some(&listener),
             },
             interrupt,
-            |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
+            |event| {
+                terminal::pairing::write_event(
+                    std::io::stdout().lock(),
+                    event,
+                    executable,
+                    data_dir,
+                )
+            },
         )
         .await
     })

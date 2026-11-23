@@ -4,6 +4,7 @@ use rs_matter::{
     dm::devices::test::{TEST_DEV_ATT, TEST_DEV_COMM},
     utils::timers::Duration,
 };
+use std::path::Path;
 
 mod live;
 
@@ -30,7 +31,8 @@ fn pairing_event_keeps_codes_and_window_through_terminal_output() {
     assert_eq!(qr.passcode(), manual.passcode());
     let expected_codes = format!("Manual pairing code: {manual_code}\n{qr_payload}\n");
     let mut output = Vec::new();
-    crate::terminal::pairing::write_event(&mut output, event).unwrap();
+    crate::terminal::pairing::write_event(&mut output, event, Path::new("migate"), dir.path())
+        .unwrap();
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("Add MiGate in the Home app."), "{output}");
     assert!(output.contains("open for 15 minutes."), "{output}");
@@ -40,12 +42,38 @@ fn pairing_event_keeps_codes_and_window_through_terminal_output() {
 }
 
 #[test]
-fn expired_event_points_to_the_online_command() {
-    let mut output = Vec::new();
-    crate::terminal::pairing::write_event(&mut output, PairingEvent::Expired).unwrap();
-    let output = String::from_utf8(output).unwrap();
-    assert!(output.contains("Pairing window expired."), "{output}");
-    assert!(output.contains("migate pairing open"), "{output}");
+fn closed_and_expired_windows_point_to_the_current_session_and_shell_instance() {
+    let executable = Path::new("/opt/Mi Gate/migate");
+    let data_dir = Path::new("/tmp/second bridge");
+    let mut expired = Vec::new();
+    crate::terminal::pairing::write_event(
+        &mut expired,
+        PairingEvent::Expired,
+        executable,
+        data_dir,
+    )
+    .unwrap();
+    let mut closed = Vec::new();
+    crate::terminal::pairing::write_status(
+        &mut closed,
+        PairingStatus::Closed,
+        executable,
+        data_dir,
+    )
+    .unwrap();
+
+    for (message, output) in [
+        ("Pairing window expired.", expired),
+        ("Pairing window is closed.", closed),
+    ] {
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains(message), "{output}");
+        assert!(output.contains("enter 'pairing open'"), "{output}");
+        assert!(
+            output.contains("'/opt/Mi Gate/migate' --data-dir '/tmp/second bridge' pairing open"),
+            "{output}"
+        );
+    }
 }
 
 #[test]
@@ -67,6 +95,8 @@ fn status_output_uses_the_current_deadline_and_only_shows_codes_while_open() {
             manual_code,
             qr_payload,
         },
+        Path::new("migate"),
+        dir.path(),
     )
     .unwrap();
     let output = String::from_utf8(output).unwrap();
@@ -89,7 +119,7 @@ fn status_output_uses_the_current_deadline_and_only_shows_codes_while_open() {
         ),
     ] {
         let mut output = Vec::new();
-        write_status(&mut output, status).unwrap();
+        write_status(&mut output, status, Path::new("migate"), dir.path()).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains(description), "{output}");
         assert!(!output.contains("Manual pairing code"), "{output}");

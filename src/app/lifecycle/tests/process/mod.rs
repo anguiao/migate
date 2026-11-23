@@ -418,6 +418,7 @@ fn bridge_helper_child() -> Result<(), String> {
                 shutdown_signal().await?;
                 Ok(())
             };
+            let (executable, data_dir) = status.invocation_paths();
             future::block_on(run_xiaomi_bridge_with_terminal(
                 BridgeOptions {
                     store: &store,
@@ -433,7 +434,14 @@ fn bridge_helper_child() -> Result<(), String> {
                     listener: Some(&listener),
                 },
                 interrupt,
-                |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
+                |event| {
+                    terminal::pairing::write_event(
+                        std::io::stdout().lock(),
+                        event,
+                        executable,
+                        data_dir,
+                    )
+                },
             ))
             .map_err(|error| format!("isolated bridge failed: {error}"))
         })

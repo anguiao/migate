@@ -121,7 +121,8 @@ impl<'a> Management<'a> {
             return Err(self.status.preparation_reason(phase).into());
         }
         let mut rendered = Vec::new();
-        write_status(&mut rendered, result?)?;
+        let (executable, data_dir) = self.status.invocation_paths();
+        write_status(&mut rendered, result?, executable, data_dir)?;
         Ok(String::from_utf8(rendered).expect("pairing status is UTF-8"))
     }
 
