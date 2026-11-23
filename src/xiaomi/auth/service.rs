@@ -36,6 +36,11 @@ impl AuthService {
         self.mijia.clone()
     }
 
+    pub(crate) fn logout(&self) -> Result<(), AuthError> {
+        self.store.logout()?;
+        Ok(())
+    }
+
     pub fn local_status(&self) -> Result<AuthReport, AuthError> {
         let stored = self.load_validated()?;
         Ok(self.report_for(stored.as_ref()))

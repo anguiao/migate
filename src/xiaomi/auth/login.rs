@@ -52,6 +52,14 @@ impl AuthService {
     }
 
     pub async fn complete_login(&self, attempt: LoginAttempt) -> Result<AuthReport, AuthError> {
+        self.complete_login_with_commit(attempt, || {}).await
+    }
+
+    pub(crate) async fn complete_login_with_commit(
+        &self,
+        attempt: LoginAttempt,
+        committed: impl FnOnce(),
+    ) -> Result<AuthReport, AuthError> {
         let expected_uid = attempt
             .previous
             .as_ref()
@@ -109,6 +117,7 @@ impl AuthService {
                 &authorization,
             )
             .map_err(|error| login_step("credential commit", error.into()))?;
+        committed();
 
         let stored = self
             .reload_credentials()

@@ -1,7 +1,19 @@
 use super::*;
-use crate::storage::{AccountRecovery, RecoveryStop};
 use crate::xiaomi::tests::support::ReceivedRequest;
-use std::{path::Path, sync::mpsc::Receiver};
+use crate::{
+    config::AuthCommand,
+    storage::{AccountRecovery, RecoveryStop},
+    terminal::{
+        auth::OnlineAuth,
+        management::{Output, Session, read_foreground},
+    },
+};
+use async_io::{Async, Timer};
+use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::{
+    cell::Cell, net::Shutdown, os::unix::net::UnixStream, path::Path, pin::pin,
+    sync::mpsc::Receiver,
+};
 use url::Url;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -19,6 +31,7 @@ enum Failure {
     Verification,
     Token,
     TokenDelay,
+    TokenPending,
     HomeUid,
     HomeMixedUid,
     HomeMissing,
@@ -32,6 +45,7 @@ struct Peers {
     mijia: Receiver<ReceivedRequest>,
     ha: Receiver<ReceivedRequest>,
     token_started: Arc<AtomicBool>,
+    token_release: flume::Sender<()>,
     certificate_started: Arc<AtomicBool>,
     certificate_finished: Arc<AtomicBool>,
     certificate_release: flume::Sender<()>,
@@ -102,6 +116,7 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
     let mut certificates = 0;
     let token_started = Arc::new(AtomicBool::new(false));
     let token_signal = token_started.clone();
+    let (token_release, token_gate) = flume::bounded(1);
     let certificate_started = Arc::new(AtomicBool::new(false));
     let certificate_signal = certificate_started.clone();
     let certificate_finished = Arc::new(AtomicBool::new(false));
@@ -112,6 +127,9 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
             token_signal.store(true, Ordering::SeqCst);
             if failure == Failure::Token {
                 MockResponse::json(503, "unavailable")
+            } else if failure == Failure::TokenPending {
+                MockResponse::json(200, &token_body("access-new", "refresh-new"))
+                    .gated(token_gate.clone())
             } else if failure == Failure::TokenDelay {
                 MockResponse::json(200, &token_body("access-new", "refresh-new"))
                     .delayed(Duration::from_millis(200))
@@ -157,6 +175,7 @@ fn make_peers(store: &Store, failure: Failure) -> Peers {
         mijia,
         ha,
         token_started,
+        token_release,
         certificate_started,
         certificate_finished,
         certificate_release,
@@ -664,4 +683,216 @@ fn terminal_identifies_failed_credential_commit_and_shows_old_status() {
     );
     assert!(output.contains("Xiaomi account: uid (cn)."), "{output}");
     assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+}
+
+fn terminal_socket_pair() -> (Async<UnixStream>, Async<UnixStream>) {
+    let (server, client) = UnixStream::pair().unwrap();
+    (Async::new(server).unwrap(), Async::new(client).unwrap())
+}
+
+async fn foreground_login(
+    online: &OnlineAuth<'_>,
+    socket: &Async<UnixStream>,
+    on_credentials: impl Fn(),
+) {
+    let mut output = Output::terminal(socket);
+    read_foreground(BufReader::new(socket), async |words, session| {
+        assert_eq!(words, ["auth", "login"]);
+        online
+            .execute(
+                AuthCommand::Login,
+                session,
+                &mut output,
+                &on_credentials,
+                async || panic!("unexpected logout"),
+            )
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_for_qr(socket: &Async<UnixStream>) -> String {
+    let mut input = BufReader::new(socket);
+    let mut output = String::new();
+    let mut line = String::new();
+    loop {
+        assert_ne!(input.read_line(&mut line).await.unwrap(), 0);
+        output.push_str(&line);
+        if line.ends_with("Waiting for scan confirmation...\n") {
+            return output;
+        }
+        line.clear();
+    }
+}
+
+fn run_online_test(test: impl Future<Output = ()>) {
+    block_on(future::or(test, async {
+        Timer::after(Duration::from_secs(3)).await;
+        panic!("online authentication test did not complete");
+    }));
+}
+
+#[test]
+fn foreground_eof_cancels_online_login_before_commit_and_other_sessions_get_busy() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let previous = previous_record();
+    store.xiaomi().fixture_replace(&previous).unwrap();
+    let peers = make_peers(&store, Failure::TokenPending);
+    let online = OnlineAuth::new(&peers.auth, Path::new("migate"), directory.path());
+    let (server, client) = terminal_socket_pair();
+    let login = foreground_login(&online, &server, || panic!("cancelled login committed"));
+
+    let concurrent = async {
+        (&client).write_all(b"auth login\n").await.unwrap();
+        let output = wait_for_qr(&client).await;
+        assert!(output.contains("Scan this QR code"), "{output}");
+        wait_for_test_signal(peers.token_started.clone()).await;
+
+        let session = Session::default();
+        let mut busy = Vec::new();
+        for command in [AuthCommand::Login, AuthCommand::Check, AuthCommand::Logout] {
+            let ok = online
+                .execute(
+                    command,
+                    &session,
+                    &mut Output::terminal(&mut busy),
+                    || panic!("the other session changed credentials"),
+                    async || panic!("the other session logged out"),
+                )
+                .await
+                .unwrap();
+            assert!(!ok);
+        }
+        let busy = String::from_utf8(busy).unwrap();
+        assert_eq!(
+            busy,
+            "The auth login command is in progress. Please retry shortly.\n".repeat(3)
+        );
+        client.get_ref().shutdown(Shutdown::Write).unwrap();
+    };
+    run_online_test(async {
+        future::zip(login, concurrent).await;
+        peers.token_release.send(()).unwrap();
+        assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+
+        let mut output = Vec::new();
+        assert!(
+            online
+                .execute(
+                    AuthCommand::Logout,
+                    &Session::default(),
+                    &mut Output::terminal(&mut output),
+                    || panic!("unexpected check or login"),
+                    async || Ok(()),
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(output, b"Xiaomi credentials removed.\n");
+    });
+    assert!(store.xiaomi().load().unwrap().is_none());
+}
+
+#[test]
+fn online_login_notifies_at_commit_and_continues_certificate_work_after_eof() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let peers = make_peers(&store, Failure::CertificatePending);
+    let online = OnlineAuth::new(&peers.auth, Path::new("migate"), directory.path());
+    let observed = Cell::new(0);
+    let (server, client) = terminal_socket_pair();
+    let on_credentials = || {
+        let record = store.xiaomi().load().unwrap().unwrap();
+        assert_eq!(record.mijia.service_token(), "service-new");
+        assert_eq!(record.ha.authorization.tokens.access_token, "access-new");
+        match observed.get() {
+            0 => {
+                assert!(!peers.certificate_started.load(Ordering::SeqCst));
+                assert!(record.hub.is_none());
+            }
+            1 => assert!(record.hub.unwrap().certificate_pem.is_some()),
+            _ => panic!("unexpected additional credential change"),
+        }
+        observed.set(observed.get() + 1);
+    };
+    run_online_test(async {
+        let mut login = pin!(foreground_login(&online, &server, on_credentials));
+        future::or(
+            async {
+                login.as_mut().await;
+                panic!("login finished while the certificate response was held");
+            },
+            async {
+                (&client).write_all(b"auth login\n").await.unwrap();
+                wait_for_qr(&client).await;
+                wait_for_test_signal(peers.certificate_started.clone()).await;
+            },
+        )
+        .await;
+
+        assert_eq!(observed.get(), 1);
+        client.get_ref().shutdown(Shutdown::Write).unwrap();
+        assert!(future::poll_once(login.as_mut()).await.is_none());
+        peers.certificate_release.send(()).unwrap();
+        login.await;
+    });
+    assert_eq!(observed.get(), 2);
+    let saved = store.xiaomi().load().unwrap().unwrap();
+    assert_eq!(saved.ha.authorization.tokens.access_token, "access-new");
+    assert!(saved.hub.unwrap().certificate_pem.is_some());
+}
+
+#[test]
+fn online_logout_keeps_a_failed_transaction_and_waits_for_stop_after_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path()).unwrap();
+    let previous = previous_record();
+    store.xiaomi().fixture_replace(&previous).unwrap();
+    let auth = AuthService::new(store.xiaomi(), CloudClient::new().unwrap()).unwrap();
+    let online = OnlineAuth::new(&auth, Path::new("migate"), directory.path());
+    let db = Connection::open(store.path()).unwrap();
+    db.execute_batch("CREATE TRIGGER fail_logout BEFORE DELETE ON xiaomi_account BEGIN SELECT RAISE(ABORT, 'test cleanup failure'); END;").unwrap();
+    let session = Session::default();
+    let mut output = Vec::new();
+    let ok = block_on(online.execute(
+        AuthCommand::Logout,
+        &session,
+        &mut Output::terminal(&mut output),
+        || panic!("unexpected check or login"),
+        async || panic!("failed logout triggered cleanup"),
+    ))
+    .unwrap();
+    assert!(!ok);
+    assert!(
+        String::from_utf8(output)
+            .unwrap()
+            .contains("Failed to delete Xiaomi credentials")
+    );
+    assert_eq!(store.xiaomi().load().unwrap(), Some(previous));
+    db.execute_batch("DROP TRIGGER fail_logout;").unwrap();
+
+    let (stopped, wait_for_stop) = flume::bounded(1);
+    let mut output = Vec::new();
+    run_online_test(async {
+        let mut output = Output::terminal(&mut output);
+        let mut logout = pin!(online.execute(
+            AuthCommand::Logout,
+            &session,
+            &mut output,
+            || panic!("unexpected check or login"),
+            async || {
+                assert!(store.xiaomi().load().unwrap().is_none());
+                wait_for_stop.recv_async().await?;
+                Ok(())
+            },
+        ));
+        assert!(future::poll_once(logout.as_mut()).await.is_none());
+        stopped.send(()).unwrap();
+        assert!(logout.await.unwrap());
+    });
+    assert_eq!(output, b"Xiaomi credentials removed.\n");
+    assert!(store.xiaomi().load().unwrap().is_none());
 }

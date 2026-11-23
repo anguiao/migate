@@ -22,6 +22,25 @@ pub enum AuthCommand {
     Logout,
 }
 
+impl AuthCommand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Login => "login",
+            Self::Check => "check",
+            Self::Logout => "logout",
+        }
+    }
+
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "login" => Some(Self::Login),
+            "check" => Some(Self::Check),
+            "logout" => Some(Self::Logout),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -63,18 +82,12 @@ impl Config {
             None => Command::Bridge,
             Some(value) if value == "attach" => Command::Attach,
             Some(value) if value == "auth" => {
-                let command = match args.next() {
-                    Some(value) if value == "login" => AuthCommand::Login,
-                    Some(value) if value == "check" => AuthCommand::Check,
-                    Some(value) if value == "logout" => AuthCommand::Logout,
-                    Some(value) => {
-                        return Err(ConfigError(format!(
-                            "Invalid auth command: {}",
-                            value.to_string_lossy()
-                        )));
-                    }
-                    None => return Err(ConfigError("auth requires a command".into())),
-                };
+                let value = args
+                    .next()
+                    .ok_or_else(|| ConfigError("auth requires a command".into()))?;
+                let command = value.to_str().and_then(AuthCommand::parse).ok_or_else(|| {
+                    ConfigError(format!("Invalid auth command: {}", value.to_string_lossy()))
+                })?;
                 Command::Auth(command)
             }
             Some(value)

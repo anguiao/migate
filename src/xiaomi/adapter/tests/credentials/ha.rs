@@ -545,7 +545,16 @@ fn new_ha_generation_does_not_wait_for_old_certificate_response() {
 }
 
 #[test]
-fn check_uses_the_refresh_already_running_in_the_adapter() {
+fn online_check_uses_the_refresh_already_running_in_the_adapter() {
+    use crate::{
+        config::AuthCommand,
+        terminal::{
+            auth::OnlineAuth,
+            management::{Output, Session},
+        },
+    };
+    use std::{cell::Cell, path::Path};
+
     let rig = Rig::new(true, &["one"]);
     rig.clock
         .automatic
@@ -554,11 +563,26 @@ fn check_uses_the_refresh_already_running_in_the_adapter() {
     let (release, gate) = flume::bounded(1);
     rig.cloud.lock().unwrap().token_gate = Some(gate);
     let uid = rig.uid.clone();
+    let certificate = rig
+        .store
+        .xiaomi()
+        .load()
+        .unwrap()
+        .unwrap()
+        .hub
+        .unwrap()
+        .certificate_pem
+        .unwrap();
     let (base, requests) = dynamic_mock_server(2, move |request| {
         if request.target.ends_with("/gethome") {
             MockResponse::json(
                 200,
                 &json!({"code":0,"result":{"homelist":[{"uid":uid,"dids":[]}]}}).to_string(),
+            )
+        } else if request.target.ends_with("/get_central_crt") {
+            MockResponse::json(
+                200,
+                &json!({"code":0,"result":{"cert":certificate}}).to_string(),
             )
         } else {
             MockResponse::json(503, "unexpected check request")
@@ -572,18 +596,31 @@ fn check_uses_the_refresh_already_running_in_the_adapter() {
 
     block_on(rig.run(|c| async move {
         until(|| c.cloud.lock().unwrap().tokens == 1).await;
-        let mut checking = Box::pin(auth.check());
+        let directory = c.store.path().parent().unwrap();
+        let online = OnlineAuth::new(&auth, Path::new("migate"), directory);
+        let session = Session::default();
+        let mut rendered = Vec::new();
+        let mut output = Output::terminal(&mut rendered);
+        let adopted = Cell::new(false);
+        let mut checking = Box::pin(online.execute(
+            AuthCommand::Check,
+            &session,
+            &mut output,
+            || {
+                let record = c.store.xiaomi().load().unwrap().unwrap();
+                assert_eq!(record.ha.authorization.tokens.access_token, "fresh-access");
+                adopted.set(true);
+            },
+            async || panic!("check unexpectedly logged out"),
+        ));
         assert!(poll_once(checking.as_mut()).await.is_none());
+        assert!(!adopted.get());
         release.send(()).unwrap();
-        let report = checking.await.unwrap();
-        assert!(matches!(
-            report.mijia,
-            crate::xiaomi::auth::AuthenticationState::Authenticated
-        ));
-        assert!(matches!(
-            report.ha,
-            crate::xiaomi::auth::AuthenticationState::Authenticated
-        ));
+        assert!(checking.await.unwrap());
+        assert!(adopted.get());
+        let rendered = String::from_utf8(rendered).unwrap();
+        assert!(rendered.contains("Mijia session: available."), "{rendered}");
+        assert!(rendered.contains("HA OAuth: available."), "{rendered}");
         let seen: Vec<_> = requests.try_iter().collect();
         assert!(
             seen.iter()

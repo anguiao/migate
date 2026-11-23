@@ -2,11 +2,11 @@ mod support;
 
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
-        net::{SocketAddr, UnixListener},
+        net::{SocketAddr, UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
     process::Command,
@@ -91,10 +91,11 @@ fn a_long_data_directory_supports_the_bridge_attach_and_single_commands() {
     assert!(String::from_utf8(result.stdout).unwrap().contains(WAITING));
 
     let mut attach = TestProcess::spawn(cli(relative, &["attach"]).current_dir(root.path()));
-    attach.send("status\n");
-    attach.wait_for_output(Stream::Stdout, WAITING);
+    attach.send("status\nhelp\n");
     attach.close_input();
-    assert!(attach.wait_for_exit(TIMEOUT).0.success());
+    let (exit, output, error) = attach.wait_for_exit(TIMEOUT);
+    assert!(exit.success(), "{error}");
+    assert!(output.find(WAITING).unwrap() < output.find("Available commands:").unwrap());
 
     bridge.stop("-TERM");
     assert!(!socket.exists());
@@ -266,7 +267,7 @@ fn a_conflicting_socket_path_is_reported_and_preserved() {
     for directory in [root.path(), &long] {
         let socket = directory.join(SOCKET);
         fs::write(&socket, b"belongs to the user").unwrap();
-        for args in [&[][..], &["status"][..]] {
+        for args in [&[][..], &["status"][..], &["auth", "logout"][..]] {
             let result = cli(directory, args).output().unwrap();
             assert!(!result.status.success());
             assert!(
@@ -290,13 +291,21 @@ fn inaccessible_socket_paths_report_permissions_errors() {
         fs::set_permissions(directory.path(), permissions).unwrap();
         return;
     }
-    let result = cli(directory.path(), &["status"]).output();
+    let results =
+        [&["status"][..], &["auth", "logout"]].map(|args| cli(directory.path(), args).output());
     fs::set_permissions(directory.path(), permissions).unwrap();
-    let result = result.unwrap();
-    assert!(!result.status.success());
-    let error = String::from_utf8(result.stderr).unwrap();
-    assert!(error.contains("Permission denied"), "{error}");
+    for result in results {
+        let result = result.unwrap();
+        assert!(!result.status.success());
+        let error = String::from_utf8(result.stderr).unwrap();
+        assert!(
+            error.contains("Failed to connect to the management socket")
+                && error.contains("Permission denied"),
+            "{error}"
+        );
+    }
     assert!(!directory.path().join("instance.lock").exists());
+    assert!(!directory.path().join("state.db").exists());
 }
 
 #[test]
@@ -337,4 +346,129 @@ fn loss_of_the_connection_after_submission_reports_an_unknown_result() {
     assert!(error.contains("status DID"), "{error}");
     peer.join().unwrap();
     assert!(!directory.path().join("instance.lock").exists());
+}
+
+fn read_auth_request(listener: &UnixListener, command: &str) -> UnixStream {
+    let (mut socket, _) = listener.accept().unwrap();
+    socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+    socket.write_all(b"migate/1\n").unwrap();
+    let mut request = String::new();
+    BufReader::new(&mut socket).read_line(&mut request).unwrap();
+    assert_eq!(request.trim_end(), format!(r#"["auth","{command}"]"#));
+    socket
+}
+
+#[test]
+fn auth_commands_return_the_online_result_while_the_directory_is_locked() {
+    let directory = tempfile::tempdir().unwrap();
+    let _lock = migate::storage::InstanceLock::acquire(directory.path()).unwrap();
+    let listener = UnixListener::bind(directory.path().join(SOCKET)).unwrap();
+    let commands = [("login", true), ("check", false), ("logout", true)];
+    let peer = thread::spawn(move || {
+        for (command, success) in commands {
+            let mut socket = read_auth_request(&listener, command);
+            writeln!(socket, r#"{{"output":"online {command}\n"}}"#).unwrap();
+            writeln!(socket, r#"{{"done":{success}}}"#).unwrap();
+        }
+    });
+    for (command, success) in commands {
+        let process = TestProcess::spawn(&mut cli(directory.path(), &["auth", command]));
+        let (status, output, error) = process.wait_for_exit(TIMEOUT);
+        assert_eq!(output, format!("online {command}\n"), "{error}");
+        assert_eq!(status.success(), success, "{output}{error}");
+        assert!(error.is_empty(), "{error}");
+    }
+    peer.join().unwrap();
+    assert!(!directory.path().join("state.db").exists());
+}
+
+#[test]
+fn online_login_streams_output_and_interrupt_closes_the_socket() {
+    let directory = tempfile::tempdir().unwrap();
+    let _lock = migate::storage::InstanceLock::acquire(directory.path()).unwrap();
+    let listener = UnixListener::bind(directory.path().join(SOCKET)).unwrap();
+    let peer = thread::spawn(move || {
+        let mut socket = read_auth_request(&listener, "login");
+        socket
+            .write_all(b"{\"output\":\"QR output\\n\"}\n{\"output\":\"Waiting for scan confirmation...\\n\"}\n")
+            .unwrap();
+        assert_eq!(socket.read(&mut [0]).unwrap(), 0);
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    });
+    let mut process = TestProcess::spawn(&mut cli(directory.path(), &["auth", "login"]));
+    process.wait_for_output(Stream::Stdout, "Waiting for scan confirmation...");
+    let (output, error) = process.interrupt_failure();
+    assert_eq!(output, "QR output\nWaiting for scan confirmation...\n");
+    assert!(error.contains("Ctrl-C"), "{error}");
+    peer.join().unwrap();
+    assert!(!directory.path().join("state.db").exists());
+}
+
+#[test]
+fn auth_reports_a_locked_directory_with_no_management_socket() {
+    let directory = tempfile::tempdir().unwrap();
+    let _lock = migate::storage::InstanceLock::acquire(directory.path()).unwrap();
+    let process = TestProcess::spawn(&mut cli(directory.path(), &["auth", "logout"]));
+    let (status, output, error) = process.wait_for_exit(TIMEOUT);
+    assert!(!status.success());
+    assert!(output.is_empty(), "{output}");
+    assert!(
+        error
+            .contains("Another MiGate process is using this data directory. Please retry shortly."),
+        "{error}"
+    );
+    assert!(!directory.path().join("state.db").exists());
+}
+
+#[test]
+fn auth_rejects_protocol_errors_without_opening_storage() {
+    for bad_greeting in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = UnixListener::bind(directory.path().join(SOCKET)).unwrap();
+        let peer = thread::spawn(move || {
+            if bad_greeting {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.write_all(b"unrelated protocol\n").unwrap();
+            } else {
+                let mut socket = read_auth_request(&listener, "logout");
+                socket.write_all(b"invalid frame\n").unwrap();
+            }
+        });
+        let process = TestProcess::spawn(&mut cli(directory.path(), &["auth", "logout"]));
+        let (status, output, error) = process.wait_for_exit(TIMEOUT);
+        assert!(!status.success(), "{output}{error}");
+        assert!(output.is_empty(), "{output}");
+        assert!(error.contains("Management protocol error"), "{error}");
+        peer.join().unwrap();
+        assert!(!directory.path().join("instance.lock").exists());
+        assert!(!directory.path().join("state.db").exists());
+    }
+}
+
+#[test]
+fn auth_connection_loss_after_submission_does_not_fall_back_or_retry() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(directory.path().join(SOCKET)).unwrap();
+    let peer = thread::spawn(move || {
+        drop(read_auth_request(&listener, "logout"));
+        listener
+    });
+    let process = TestProcess::spawn(&mut cli(directory.path(), &["auth", "logout"]));
+    let (status, output, error) = process.wait_for_exit(TIMEOUT);
+    assert!(!status.success(), "{output}{error}");
+    assert!(output.is_empty(), "{output}");
+    assert!(error.contains("command result is unknown"), "{error}");
+    assert!(error.contains("auth check"), "{error}");
+    let listener = peer.join().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert!(!directory.path().join("instance.lock").exists());
+    assert!(!directory.path().join("state.db").exists());
 }

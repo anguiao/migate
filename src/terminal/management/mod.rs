@@ -14,8 +14,9 @@ use futures_lite::{
 use futures_util::stream::FuturesUnordered;
 use std::{
     cell::Cell,
+    collections::VecDeque,
     fs::{self, Metadata},
-    io::{self, ErrorKind},
+    io::{self, ErrorKind, Read},
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
         net::{SocketAddr, UnixListener, UnixStream},
@@ -237,7 +238,12 @@ impl Client {
                     return Err(format!("Management protocol error: {error}").into());
                 }
                 _ => {
-                    return Err("The management connection closed before completion. The command result is unknown. Reconnect and use status DID to check the device.".into());
+                    let follow_up = if words.first() == Some(&"auth") {
+                        "Reconnect and use auth check to verify the saved credentials."
+                    } else {
+                        "Reconnect and use status DID to check the device."
+                    };
+                    return Err(format!("The management connection closed before completion. The command result is unknown. {follow_up}").into());
                 }
             }
         }
@@ -254,22 +260,146 @@ impl Client {
         })
         .await
     }
+
+    pub async fn attach_interactive(
+        &mut self,
+        input: impl AsyncBufRead + Unpin,
+        mut output: impl AsyncWrite + Unpin,
+    ) -> Result<(), RuntimeError> {
+        TerminalInput::new(input)
+            .read_commands(async |words, input| {
+                let disconnected = async {
+                    input.wait_for_end().await?;
+                    Ok(false)
+                };
+                let command = async {
+                    self.execute(words, &mut output).await?;
+                    Ok(true)
+                };
+                future::or(disconnected, command).await
+            })
+            .await
+    }
+}
+
+pub fn stdin_input(stdin: io::Stdin) -> impl AsyncBufRead + Unpin {
+    BufReader::new(blocking::Unblock::new(StdinReader {
+        input: stdin,
+        ended: false,
+    }))
+}
+
+struct StdinReader<R> {
+    input: R,
+    ended: bool,
+}
+
+impl<R: Read> Read for StdinReader<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.ended || buffer.is_empty() {
+            return Ok(0);
+        }
+        let read = self.input.read(buffer)?;
+        // A terminal sends a single zero-length read at Ctrl-D. Latch it
+        // because the blocking reader can read again while filling its buffer.
+        self.ended = read == 0;
+        Ok(read)
+    }
 }
 
 pub(crate) async fn read_terminal(
-    mut input: impl AsyncBufRead + Unpin,
+    input: impl AsyncBufRead + Unpin,
     mut execute: impl AsyncFnMut(&[&str]) -> Result<(), RuntimeError>,
 ) -> Result<(), RuntimeError> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if input.read_line(&mut line).await? == 0 {
-            return Ok(());
+    TerminalInput::new(input)
+        .read_commands(async |words, _| {
+            execute(words).await?;
+            Ok(true)
+        })
+        .await
+}
+
+pub(crate) async fn read_foreground(
+    input: impl AsyncBufRead + Unpin,
+    mut execute: impl AsyncFnMut(&[&str], &Session) -> Result<(), RuntimeError>,
+) -> Result<(), RuntimeError> {
+    TerminalInput::new(input)
+        .read_commands(async |words, input| {
+            let session = Session::default();
+            let command = execute(words, &session);
+            if words == ["auth", "login"] {
+                let disconnected = async {
+                    input.wait_for_end().await?;
+                    session.close();
+                    future::pending().await
+                };
+                let result = future::or(disconnected, command).await;
+                if !session.closed.get() {
+                    result?;
+                }
+            } else {
+                command.await?;
+            }
+            Ok(true)
+        })
+        .await
+}
+
+struct TerminalInput<R> {
+    reader: R,
+    queued: VecDeque<String>,
+    partial: Vec<u8>,
+    ended: bool,
+}
+
+impl<R: AsyncBufRead + Unpin> TerminalInput<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            queued: VecDeque::new(),
+            partial: Vec::new(),
+            ended: false,
         }
-        let words = line.split_whitespace().collect::<Vec<_>>();
-        if !words.is_empty() {
-            execute(&words).await?;
+    }
+
+    async fn read_commands(
+        &mut self,
+        mut execute: impl AsyncFnMut(&[&str], &mut Self) -> Result<bool, RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        loop {
+            let line = match self.queued.pop_front() {
+                Some(line) => line,
+                None => match self.read_line().await? {
+                    Some(line) => line,
+                    None => return Ok(()),
+                },
+            };
+            let words = line.split_whitespace().collect::<Vec<_>>();
+            if !words.is_empty() && !execute(&words, self).await? {
+                return Ok(());
+            }
         }
+    }
+
+    async fn wait_for_end(&mut self) -> io::Result<()> {
+        while let Some(line) = self.read_line().await? {
+            self.queued.push_back(line);
+        }
+        Ok(())
+    }
+
+    async fn read_line(&mut self) -> io::Result<Option<String>> {
+        if self.ended {
+            return Ok(None);
+        }
+        // Keep bytes read before the command completes and drops its input watcher.
+        self.ended = self.reader.read_until(b'\n', &mut self.partial).await? == 0;
+        if self.partial.is_empty() {
+            return Ok(None);
+        }
+        String::from_utf8(std::mem::take(&mut self.partial))
+            .map(Some)
+            .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))
     }
 }
 
@@ -350,3 +480,6 @@ async fn serve_session(stream: &Async<UnixStream>, management: &Management<'_>) 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

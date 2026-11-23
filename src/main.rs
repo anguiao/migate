@@ -1,8 +1,8 @@
 #![recursion_limit = "256"]
 
-use std::{env, path::Path, process::ExitCode};
+use std::{env, io::IsTerminal, path::Path, process::ExitCode};
 
-use futures_lite::{future, io::BufReader};
+use futures_lite::future;
 use migate::{
     RuntimeError,
     app::{BridgeOptions, BridgeTerminal, run_managed_xiaomi_bridge, shutdown_signal},
@@ -10,7 +10,7 @@ use migate::{
     storage::{Identity, InstanceLock, Store, XiaomiStore},
     terminal::{
         self, AuthStatus,
-        management::{Client, Listener},
+        management::{Client, Listener, stdin_input},
     },
     xiaomi::{auth::AuthService, cloud::CloudClient},
 };
@@ -42,21 +42,20 @@ fn run() -> Result<bool, RuntimeError> {
     let data_dir = &config.data_dir;
     match config.command {
         Command::Bridge => run_bridge(&executable, data_dir, config.matter_port).map(|()| true),
-        Command::Auth(command) => {
-            let _instance = InstanceLock::acquire(data_dir)?;
-            let (store, _identity) = open_store(data_dir)?;
-            run_auth(command, store.xiaomi(), &executable, data_dir).map(|()| true)
-        }
+        Command::Auth(command) => run_auth(command, &executable, data_dir),
         Command::Attach => future::block_on(future::or(
             async { shutdown_signal().await.map(|_| true) },
             async {
                 let mut client = connect(&executable, data_dir).await?;
-                client
-                    .attach(
-                        BufReader::new(blocking::Unblock::new(std::io::stdin())),
-                        blocking::Unblock::new(std::io::stdout()),
-                    )
-                    .await?;
+                let stdin = std::io::stdin();
+                let interactive = stdin.is_terminal();
+                let input = stdin_input(stdin);
+                let output = blocking::Unblock::new(std::io::stdout());
+                if interactive {
+                    client.attach_interactive(input, output).await?;
+                } else {
+                    client.attach(input, output).await?;
+                }
                 Ok(true)
             },
         )),
@@ -87,6 +86,37 @@ fn open_store(data_dir: &Path) -> Result<(Store, Identity), RuntimeError> {
 }
 
 fn run_auth(
+    command: AuthCommand,
+    executable: &Path,
+    data_dir: &Path,
+) -> Result<bool, RuntimeError> {
+    let interrupted = async {
+        let signal = shutdown_signal().await?;
+        Err(format!("Online authentication command interrupted by {signal}").into())
+    };
+    let online = async {
+        let Some(mut client) = Client::connect(data_dir).await? else {
+            return Ok(None);
+        };
+        client
+            .execute(
+                &["auth", command.as_str()],
+                blocking::Unblock::new(std::io::stdout()),
+            )
+            .await
+            .map(Some)
+    };
+    if let Some(success) = future::block_on(future::or(interrupted, online))? {
+        return Ok(success);
+    }
+
+    let _instance = InstanceLock::try_acquire(data_dir)?
+        .ok_or("Another MiGate process is using this data directory. Please retry shortly.")?;
+    let (store, _identity) = open_store(data_dir)?;
+    run_offline_auth(command, store.xiaomi(), executable, data_dir).map(|()| true)
+}
+
+fn run_offline_auth(
     command: AuthCommand,
     store: XiaomiStore,
     executable: &std::path::Path,
@@ -161,7 +191,7 @@ fn run_bridge(executable: &Path, data_dir: &Path, matter_port: u16) -> Result<()
             },
             cloud,
             BridgeTerminal {
-                input: BufReader::new(blocking::Unblock::new(std::io::stdin())),
+                input: stdin_input(std::io::stdin()),
                 output: blocking::Unblock::new(std::io::stdout()),
                 listener: Some(&listener),
             },
