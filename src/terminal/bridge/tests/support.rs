@@ -1,13 +1,14 @@
 //! Terminal rule fixtures use the real committed model and ordinary Functions.
 //! Application lifecycle and configuration switching are tested through App.
 
-use super::super::{View, read_commands};
+use super::super::{Context, View};
 use crate::{
     RuntimeError,
     app::EffectiveConfiguration,
     device::{DeviceKey, PhysicalDevice, PhysicalDeviceDescription},
     storage::{DeviceStore, StorageError, Store},
     terminal::AuthStatus,
+    terminal::management::{Output, Session, read_terminal},
     xiaomi::{
         adapter::{AdapterStatus, GatewayStatus, publication::SourceEntry},
         auth::{AuthReport, AuthenticationState, CertificateUpdate},
@@ -15,6 +16,13 @@ use crate::{
     },
 };
 use std::rc::Rc;
+
+impl Context<'_> {
+    pub(crate) async fn handle_line(&self, line: &str) -> Result<Option<String>, StorageError> {
+        let words = line.split_whitespace().collect::<Vec<_>>();
+        Ok(self.handle_words(&words).await?.map(|reply| reply.text))
+    }
+}
 
 pub(super) fn add_device(store: &Store, description: &PhysicalDeviceDescription) {
     let mut configuration = store.devices().load_configuration().unwrap();
@@ -128,9 +136,10 @@ pub(crate) async fn handle_line_with_diagnostics(
     line: &str,
 ) -> Result<Option<String>, StorageError> {
     let words = line.split_whitespace().collect::<Vec<_>>();
-    view(devices, store)?
+    Ok(view(devices, store)?
         .handle_words(&words, status, || diagnostics)
         .await
+        .map(|reply| reply.text))
 }
 
 pub(super) async fn run_input(
@@ -140,8 +149,16 @@ pub(super) async fn run_input(
     input: impl futures_lite::io::AsyncBufRead + Unpin,
     output: impl futures_lite::io::AsyncWrite + Unpin,
 ) -> Result<(), RuntimeError> {
-    read_commands(input, output, async |line| {
-        handle_line(devices, store, status, line).await
+    let session = Session::default();
+    let mut output = Output::terminal(output);
+    read_terminal(input, async |words| {
+        if let Some(reply) = view(devices, store)?
+            .handle_words(words, status, diagnostics)
+            .await
+        {
+            output.write(&session, format!("{}\n", reply.text)).await?;
+        }
+        Ok(())
     })
     .await
 }

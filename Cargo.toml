@@ -42,6 +42,7 @@ cbc = "0.2"
 md-5 = "0.11"
 async-lock = "3"
 if-addrs = "0.15"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "c86233d310902503995738b3137884a3a7dc1764", features = ["astro-dnssd", "groups", "persistent-subscriptions"] }
@@ -52,7 +53,6 @@ rs-matter = { git = "https://github.com/project-chip/rs-matter.git", rev = "c862
 [dev-dependencies]
 flume = { version = "0.12", default-features = false, features = ["async"] }
 rcgen = { version = "0.14", features = ["x509-parser"] }
-tempfile = "3"
 x509-parser = { version = "0.18", features = ["verify"] }
 
 [profile.dev]

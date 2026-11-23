@@ -1,8 +1,8 @@
 mod format;
 
 use format::{auth_report_lines, format_device, format_gateway, format_routing};
+pub use format::{bridge_command, format_report, login_command};
 pub(super) use format::{format_command, path, property_diagnostics, property_label, timestamp};
-pub use format::{format_report, login_command};
 
 use crate::xiaomi::{
     adapter::{AdapterStatus, GatewayStatus},
@@ -68,6 +68,19 @@ impl AuthStatus {
             report.push_str("\nStop MiGate, sign in with the same data directory, then restart.");
         }
         report
+    }
+
+    pub(super) fn preparation_reason(&self, phase: &str) -> String {
+        if let Some(problem) = self
+            .last_adapter
+            .borrow()
+            .as_ref()
+            .and_then(|status| status.catalog_problem.as_deref())
+        {
+            format!("{phase}\nDevice description: {problem}.")
+        } else {
+            phase.to_owned()
+        }
     }
 
     pub fn update_adapter(&self, status: AdapterStatus) {

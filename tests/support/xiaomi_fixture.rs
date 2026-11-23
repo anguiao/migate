@@ -1,5 +1,54 @@
-use migate::storage::{RecoveryStop, XiaomiRecord, XiaomiStore};
+use migate::{
+    storage::{
+        AccountRecovery, HaAuthorization, HaClient, RecoveryStop, TokenSet, XiaomiRecord,
+        XiaomiStore,
+    },
+    xiaomi::{
+        auth::{AccountClientIdentity, AccountCredentials},
+        mijia::MijiaSession,
+    },
+};
 use rusqlite::{Connection, params};
+
+pub fn record() -> XiaomiRecord {
+    XiaomiRecord {
+        uid: "uid".into(),
+        region: "cn".into(),
+        recovery: AccountRecovery {
+            credentials: AccountCredentials::new(
+                "uid".into(),
+                "cuser-secret".into(),
+                "pass-secret".into(),
+                AccountClientIdentity::new("device-id".into(), "agent".into()).unwrap(),
+            )
+            .unwrap(),
+            stop: Some(RecoveryStop::VerificationRequired),
+        },
+        mijia: MijiaSession::new(
+            "uid".into(),
+            "service-secret".into(),
+            "c2VjdXJpdHk=".into(),
+            "agent".into(),
+        )
+        .unwrap(),
+        ha: HaClient {
+            client_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            authorization: HaAuthorization {
+                redirect_uri:
+                    "http://homeassistant.local:8123/api/webhook/0123456789abcdef0123456789abcdef"
+                        .into(),
+                tokens: TokenSet {
+                    access_token: "access-secret".into(),
+                    refresh_token: "refresh-secret".into(),
+                    expires_at: 2_000_000_000,
+                    refresh_at: 1_900_000_000,
+                },
+            },
+            stopped: true,
+        },
+        hub: None,
+    }
+}
 
 /// Seed a fresh process-test database without exposing unconditional writes in the library.
 pub fn seed(store: &XiaomiStore, record: &XiaomiRecord) {

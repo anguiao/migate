@@ -10,7 +10,7 @@ mod settings;
 mod shutdown;
 mod startup;
 
-pub use lifecycle::run_xiaomi_bridge;
+pub use lifecycle::{BridgeTerminal, run_xiaomi_bridge, run_xiaomi_bridge_with_terminal};
 pub use shutdown::shutdown_signal;
 
 use sensor_binding::activate_temperature_bindings;

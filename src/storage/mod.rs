@@ -15,6 +15,7 @@ pub use error::StorageError;
 pub use identity::Identity;
 pub(crate) use lan::LanRecord;
 pub use lock::InstanceLock;
+pub(crate) use lock::SOCKET_FILE_NAME;
 pub use matter::MatterStore;
 pub use store::Store;
 pub use xiaomi::{

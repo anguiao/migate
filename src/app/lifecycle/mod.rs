@@ -5,7 +5,7 @@ use super::{
 use crate::{
     RuntimeError,
     matter::{Advertisement, Bridge, PairingEvent},
-    terminal,
+    terminal::{bridge::Management, management::Listener},
 };
 use futures_lite::{
     future,
@@ -28,9 +28,42 @@ pub async fn run_xiaomi_bridge(
     interrupt: impl Future<Output = Result<(), RuntimeError>>,
     pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
 ) -> Result<(), RuntimeError> {
+    run_xiaomi_bridge_with_terminal(
+        options,
+        ready,
+        source,
+        BridgeTerminal {
+            input,
+            output,
+            listener: None,
+        },
+        interrupt,
+        pairing,
+    )
+    .await
+}
+
+pub struct BridgeTerminal<'a, I, O> {
+    pub input: I,
+    pub output: O,
+    pub listener: Option<&'a Listener<'a>>,
+}
+
+/// Run the foreground session and management clients throughout bridge startup and serving.
+pub async fn run_xiaomi_bridge_with_terminal(
+    options: BridgeOptions<'_>,
+    ready: impl Future<Output = Result<crate::xiaomi::adapter::SourceHandle, RuntimeError>>,
+    source: impl Future<Output = Result<(), RuntimeError>>,
+    terminal: BridgeTerminal<'_, impl AsyncBufRead + Unpin, impl AsyncWrite + Unpin>,
+    interrupt: impl Future<Output = Result<(), RuntimeError>>,
+    pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
+) -> Result<(), RuntimeError> {
+    let management = Management::new(options.status);
+    let sessions = management.serve(terminal.input, terminal.output, terminal.listener);
     let store = options.store.clone();
     let prepare = async {
         let handle = ready.await?;
+        management.wait_for_home();
         loop {
             let changed = handle.listen();
             if handle.has_scope() {
@@ -60,7 +93,16 @@ pub async fn run_xiaomi_bridge(
         }
         Ok::<_, RuntimeError>((app, StartupGate::new(INITIAL_READ_LIMIT)))
     };
-    run_lifecycle(options, prepare, source, input, output, interrupt, pairing).await
+    run_lifecycle(
+        options,
+        prepare,
+        source,
+        &management,
+        sessions,
+        interrupt,
+        pairing,
+    )
+    .await
 }
 
 /// The one bridge lifecycle: one application configuration owner races the
@@ -69,8 +111,8 @@ async fn run_lifecycle<D: StartupDeadline>(
     options: BridgeOptions<'_>,
     prepare: impl Future<Output = Result<(Rc<App>, StartupGate<D>), RuntimeError>>,
     source: impl Future<Output = Result<(), RuntimeError>>,
-    input: impl AsyncBufRead + Unpin,
-    output: impl AsyncWrite + Unpin,
+    management: &Management<'_>,
+    sessions: impl Future<Output = Result<(), RuntimeError>>,
     interrupt: impl Future<Output = Result<(), RuntimeError>>,
     pairing: impl Fn(PairingEvent) -> std::io::Result<()>,
 ) -> Result<(), RuntimeError> {
@@ -79,6 +121,7 @@ async fn run_lifecycle<D: StartupDeadline>(
         Err::<(), RuntimeError>("Device source ended unexpectedly".into())
     });
     let mut interrupt = Box::pin(interrupt);
+    let mut sessions = Box::pin(sessions);
     let app = future::or(
         async {
             interrupt.as_mut().await?;
@@ -89,23 +132,18 @@ async fn run_lifecycle<D: StartupDeadline>(
                 source.as_mut().await?;
                 Ok(None)
             },
-            async { prepare.await.map(Some) },
+            future::or(async { prepare.await.map(Some) }, async {
+                sessions.as_mut().await?;
+                Ok(None)
+            }),
         ),
     )
     .await?;
     let Some((app, startup)) = app else {
         return Ok(());
     };
-    let terminal = terminal::bridge::Context::committed(app.clone(), options.status);
+    management.publish(app.clone());
     log::info!("MiGate bridge_id={}", options.identity.bridge_id);
-    let mut input = Box::pin(async {
-        terminal
-            .run_input(input, output)
-            .await
-            .map_err(|error| format!("Terminal I/O failed: {error}"))?;
-        log::info!("Terminal input ended; bridge is still running");
-        future::pending::<Result<(), RuntimeError>>().await
-    });
     let mut retry_at = app
         .pending()
         .then(|| Instant::now() + Duration::from_secs(1));
@@ -150,7 +188,7 @@ async fn run_lifecycle<D: StartupDeadline>(
                     },
                     future::or(
                         async {
-                            input.as_mut().await?;
+                            sessions.as_mut().await?;
                             Ok(Wake::Stop)
                         },
                         async {

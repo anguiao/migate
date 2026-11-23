@@ -243,12 +243,7 @@ fn command_diagnostics_are_sampled_only_for_reports() {
             samples.set(samples.get() + 1);
             support::diagnostics()
         };
-        assert!(
-            view.handle_words(&[], &status, diagnostics)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(view.handle_words(&[], &status, diagnostics).await.is_none());
         assert_eq!(samples.get(), 0, "empty input must not sample diagnostics");
         for verb in ["on", "off"] {
             let (result, ()) = future::zip(
@@ -258,7 +253,9 @@ fn command_diagnostics_are_sampled_only_for_reports() {
                 },
             )
             .await;
-            assert_eq!(result.unwrap().unwrap(), "one: command accepted");
+            let reply = result.unwrap();
+            assert!(reply.success);
+            assert_eq!(reply.text, "one: command accepted");
             assert_eq!(
                 samples.get(),
                 0,
@@ -276,7 +273,6 @@ fn command_diagnostics_are_sampled_only_for_reports() {
             let before = samples.get();
             view.handle_words(&words, &status, diagnostics)
                 .await
-                .unwrap()
                 .unwrap();
             assert_eq!(samples.get(), before + 1, "{words:?} must sample once");
         }
@@ -319,11 +315,12 @@ fn withdrawn_raw_description_uses_pending_or_unknown_without_visible_details() {
                         reason: "description unavailable".into(),
                     });
             }
-            let text = view
+            let reply = view
                 .handle_words(&["status", "one"], &status, || diagnostics.clone())
                 .await
-                .unwrap()
                 .unwrap();
+            let text = reply.text;
+            assert_eq!(reply.success, pending);
             if pending {
                 assert_eq!(
                     text,
@@ -338,9 +335,13 @@ fn withdrawn_raw_description_uses_pending_or_unknown_without_visible_details() {
         let unknown = view
             .handle_words(&["status", "missing"], &status, || diagnostics.clone())
             .await
-            .unwrap()
             .unwrap();
-        assert!(unknown.starts_with("Unknown device DID.\n"), "{unknown}");
+        assert!(!unknown.success);
+        assert!(
+            unknown.text.starts_with("Unknown device DID.\n"),
+            "{}",
+            unknown.text
+        );
     });
 }
 

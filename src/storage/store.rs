@@ -116,17 +116,28 @@ impl Store {
 }
 
 fn require_empty_directory(directory: &Path) -> Result<(), StorageError> {
+    use std::os::unix::fs::FileTypeExt;
+
     let entries = fs::read_dir(directory)
         .map_err(|e| StorageError::new(directory, "read data directory", e))?;
     for entry in entries {
         let entry = entry.map_err(|e| StorageError::new(directory, "read data directory", e))?;
-        if entry.file_name() != lock::FILE_NAME {
-            return Err(StorageError::new(
-                directory,
-                "initialize data directory",
-                "Data directory initialization is incomplete",
-            ));
+        if entry.file_name() == lock::FILE_NAME {
+            continue;
         }
+        if entry.file_name() == lock::SOCKET_FILE_NAME
+            && entry
+                .file_type()
+                .map_err(|e| StorageError::new(&entry.path(), "inspect management socket", e))?
+                .is_socket()
+        {
+            continue;
+        }
+        return Err(StorageError::new(
+            directory,
+            "initialize data directory",
+            "Data directory initialization is incomplete",
+        ));
     }
     Ok(())
 }

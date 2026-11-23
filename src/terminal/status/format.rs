@@ -610,20 +610,20 @@ fn format_authentication(label: &str, authentication: &AuthenticationState) -> S
     }
 }
 
-pub fn login_command(executable: &Path, data_dir: &Path) -> String {
+pub fn bridge_command(executable: &Path, data_dir: &Path) -> String {
     format!(
-        "{} --data-dir {} auth login",
+        "{} --data-dir {}",
         shell_quote(executable),
         shell_quote(data_dir)
     )
 }
 
+pub fn login_command(executable: &Path, data_dir: &Path) -> String {
+    format!("{} auth login", bridge_command(executable, data_dir))
+}
+
 fn check_command(executable: &Path, data_dir: &Path) -> String {
-    format!(
-        "{} --data-dir {} auth check",
-        shell_quote(executable),
-        shell_quote(data_dir)
-    )
+    format!("{} auth check", bridge_command(executable, data_dir))
 }
 
 fn format_certificate_with_status(

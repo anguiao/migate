@@ -2,6 +2,7 @@
 mod advertisement;
 #[cfg(target_os = "linux")]
 mod avahi;
+mod management;
 
 // This helper file is shared by the two test crates.
 #[path = "../../../../../tests/support/process.rs"]
@@ -320,9 +321,11 @@ fn bridge_helper_child() -> Result<(), String> {
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             use crate::{
-                app::{BridgeOptions, run_xiaomi_bridge, shutdown_signal},
+                app::{
+                    BridgeOptions, BridgeTerminal, run_xiaomi_bridge_with_terminal, shutdown_signal,
+                },
                 device::{Availability, DeviceRequest},
-                terminal::{self, AuthStatus},
+                terminal::{self, AuthStatus, management::Listener},
                 xiaomi::{auth::AuthService, cloud::CloudClient},
             };
             use futures_lite::{future, io::BufReader};
@@ -332,7 +335,8 @@ fn bridge_helper_child() -> Result<(), String> {
                 .init();
             let directory = std::path::PathBuf::from(directory);
             log::info!("Fake source process starting");
-            let _instance = crate::storage::InstanceLock::acquire(&directory).unwrap();
+            let instance = crate::storage::InstanceLock::acquire(&directory).unwrap();
+            let listener = Listener::bind(&instance).unwrap();
             log::info!("Fake source directory locked");
             let store = crate::storage::Store::open(&directory).unwrap();
             let identity = store.load_identity().unwrap();
@@ -348,6 +352,7 @@ fn bridge_helper_child() -> Result<(), String> {
             let mut receiver = source.receivers.remove(0);
             let gate = directory.join("source-ready");
             let remove = directory.join("source-remove");
+            let hold_command = directory.join("source-hold-command");
             let initial =
                 std::env::var("MIGATE_TEST_INITIAL_POWER").is_ok_and(|value| value == "on");
             let port = std::env::var("MIGATE_TEST_MATTER_PORT")
@@ -377,6 +382,10 @@ fn bridge_helper_child() -> Result<(), String> {
                         let DeviceRequest::Power(request) = operation else {
                             panic!("unexpected light operation")
                         };
+                        log::info!("Fake source control received: {}", request.target);
+                        while hold_command.try_exists()? {
+                            async_io::Timer::after(Duration::from_millis(10)).await;
+                        }
                         source_device.functions()[0].observe(request.target);
                         request.accept()?;
                     }
@@ -408,7 +417,7 @@ fn bridge_helper_child() -> Result<(), String> {
                 shutdown_signal().await?;
                 Ok(())
             };
-            future::block_on(run_xiaomi_bridge(
+            future::block_on(run_xiaomi_bridge_with_terminal(
                 BridgeOptions {
                     store: &store,
                     identity: &identity,
@@ -417,8 +426,11 @@ fn bridge_helper_child() -> Result<(), String> {
                 },
                 async { Ok(handle) },
                 source,
-                BufReader::new(blocking::Unblock::new(std::io::stdin())),
-                blocking::Unblock::new(std::io::stdout()),
+                BridgeTerminal {
+                    input: BufReader::new(blocking::Unblock::new(std::io::stdin())),
+                    output: blocking::Unblock::new(std::io::stdout()),
+                    listener: Some(&listener),
+                },
                 interrupt,
                 |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
             ))

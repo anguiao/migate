@@ -111,7 +111,9 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
             },
         )
         .await;
-        assert_eq!(result.unwrap().unwrap(), "bath: command accepted");
+        let reply = result.unwrap();
+        assert!(reply.success);
+        assert_eq!(reply.text, "bath: command accepted");
         assert_eq!(
             function.snapshot().heater().unwrap().temperature.value,
             Some(25)
@@ -129,7 +131,9 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
             },
         )
         .await;
-        assert_eq!(result.unwrap().unwrap(), "bath: command accepted");
+        let reply = result.unwrap();
+        assert!(reply.success);
+        assert_eq!(reply.text, "bath: command accepted");
         assert_eq!(
             function.snapshot().heater().unwrap().power.value,
             Some(false)
@@ -147,7 +151,9 @@ fn mode_and_temperature_commands_use_the_heating_command_boundary() {
             },
         )
         .await;
-        assert_eq!(result.unwrap().unwrap(), "bath: command accepted");
+        let reply = result.unwrap();
+        assert!(reply.success);
+        assert_eq!(reply.text, "bath: command accepted");
 
         for (line, power) in [("on bath heater:3", true), ("off bath heater:3", false)] {
             let (result, ()) = zip(

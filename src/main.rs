@@ -1,14 +1,17 @@
 #![recursion_limit = "256"]
 
-use std::{env, process::ExitCode};
+use std::{env, path::Path, process::ExitCode};
 
 use futures_lite::{future, io::BufReader};
 use migate::{
     RuntimeError,
-    app::{BridgeOptions, run_xiaomi_bridge, shutdown_signal},
+    app::{BridgeOptions, BridgeTerminal, run_xiaomi_bridge_with_terminal, shutdown_signal},
     config::{AuthCommand, Command, Config},
-    storage::{InstanceLock, Store, XiaomiStore},
-    terminal::{self, AuthStatus},
+    storage::{Identity, InstanceLock, Store, XiaomiStore},
+    terminal::{
+        self, AuthStatus,
+        management::{Client, Listener},
+    },
     xiaomi::{adapter::XiaomiAdapter, auth::AuthService, cloud::CloudClient, discovery::Discovery},
 };
 
@@ -18,7 +21,8 @@ fn main() -> ExitCode {
         .target(env_logger::Target::Stderr)
         .init();
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
         Err(error) => {
             eprintln!("MiGate failed: {error}");
             ExitCode::FAILURE
@@ -26,7 +30,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), RuntimeError> {
+fn run() -> Result<bool, RuntimeError> {
     let config = Config::parse(
         env::args_os().skip(1),
         env::var_os("MIGATE_DATA_DIR"),
@@ -34,21 +38,52 @@ fn run() -> Result<(), RuntimeError> {
         env::var_os("HOME"),
         &env::current_dir()?,
     )?;
-    let _instance = InstanceLock::acquire(&config.data_dir)?;
-    let store = Store::open(&config.data_dir)?;
-    let identity = store.load_identity()?;
-    log::info!("Data directory: {}", config.data_dir.display());
     let executable = env::current_exe()?;
+    let data_dir = &config.data_dir;
     match config.command {
-        Command::Auth(command) => run_auth(command, store.xiaomi(), &executable, &config.data_dir),
-        Command::Bridge => run_bridge(
-            store,
-            identity,
-            executable,
-            config.data_dir,
-            config.matter_port,
-        ),
+        Command::Bridge => run_bridge(&executable, data_dir, config.matter_port).map(|()| true),
+        Command::Auth(command) => {
+            let _instance = InstanceLock::acquire(data_dir)?;
+            let (store, _identity) = open_store(data_dir)?;
+            run_auth(command, store.xiaomi(), &executable, data_dir).map(|()| true)
+        }
+        Command::Attach => future::block_on(future::or(
+            async { shutdown_signal().await.map(|_| true) },
+            async {
+                let mut client = connect(&executable, data_dir).await?;
+                client
+                    .attach(
+                        BufReader::new(blocking::Unblock::new(std::io::stdin())),
+                        blocking::Unblock::new(std::io::stdout()),
+                    )
+                    .await?;
+                Ok(true)
+            },
+        )),
+        Command::Online(words) => future::block_on(async {
+            let mut client = connect(&executable, data_dir).await?;
+            let words = words.iter().map(String::as_str).collect::<Vec<_>>();
+            client
+                .execute(&words, blocking::Unblock::new(std::io::stdout()))
+                .await
+        }),
     }
+}
+
+async fn connect(executable: &Path, data_dir: &Path) -> Result<Client, RuntimeError> {
+    Client::connect(data_dir).await?.ok_or_else(|| {
+        format!(
+            "No MiGate bridge is running in this data directory. Run this command to start it.\n  {}",
+            terminal::bridge_command(executable, data_dir)
+        ).into()
+    })
+}
+
+fn open_store(data_dir: &Path) -> Result<(Store, Identity), RuntimeError> {
+    let store = Store::open(data_dir)?;
+    let identity = store.load_identity()?;
+    log::info!("Data directory: {}", data_dir.display());
+    Ok((store, identity))
 }
 
 fn run_auth(
@@ -97,24 +132,26 @@ fn run_auth(
     })
 }
 
-fn run_bridge(
-    store: Store,
-    identity: migate::storage::Identity,
-    executable: std::path::PathBuf,
-    data_dir: std::path::PathBuf,
-    matter_port: u16,
-) -> Result<(), RuntimeError> {
+fn run_bridge(executable: &Path, data_dir: &Path, matter_port: u16) -> Result<(), RuntimeError> {
+    let instance = InstanceLock::try_acquire(data_dir)?.ok_or_else(|| {
+        format!(
+            "Another MiGate process is using this data directory. To connect to a running bridge, run this command.\n  {} attach",
+            terminal::bridge_command(executable, data_dir)
+        )
+    })?;
+    let listener = Listener::bind(&instance)?;
+    let (store, identity) = open_store(data_dir)?;
     let cloud = CloudClient::new()?;
     let auth = AuthService::new(store.xiaomi(), cloud.clone())?;
     let report = auth.local_status()?;
     if report.account.is_none() {
         return Err(format!(
             "Xiaomi sign-in is required. Sign in with:\n  {}",
-            terminal::login_command(&executable, &data_dir)
+            terminal::login_command(executable, data_dir)
         )
         .into());
     }
-    let status = AuthStatus::new(report, executable, data_dir);
+    let status = AuthStatus::new(report, executable.to_owned(), data_dir.to_owned());
     status.log(terminal::current_time());
     let (discovery, driver) = Discovery::start()?;
     let (adapter, ready) = XiaomiAdapter::new(store.clone(), cloud, discovery)?;
@@ -135,7 +172,7 @@ fn run_bridge(
                 Err::<(), RuntimeError>("Gateway discovery ended unexpectedly".into())
             },
         );
-        run_xiaomi_bridge(
+        run_xiaomi_bridge_with_terminal(
             BridgeOptions {
                 store: &store,
                 identity: &identity,
@@ -147,8 +184,11 @@ fn run_bridge(
                 Ok(source_handle)
             },
             networking,
-            BufReader::new(blocking::Unblock::new(std::io::stdin())),
-            blocking::Unblock::new(std::io::stdout()),
+            BridgeTerminal {
+                input: BufReader::new(blocking::Unblock::new(std::io::stdin())),
+                output: blocking::Unblock::new(std::io::stdout()),
+                listener: Some(&listener),
+            },
             interrupt,
             |event| terminal::pairing::write_event(std::io::stdout().lock(), event),
         )

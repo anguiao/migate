@@ -5,11 +5,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const USAGE: &str = "Usage: migate [--data-dir <PATH>] [auth <login|check|logout>]";
+pub const USAGE: &str = "Usage: migate [--data-dir <PATH>] [attach | auth <login|check|logout> | <command> [arguments...]]";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     Bridge,
+    Attach,
+    Online(Vec<String>),
     Auth(AuthCommand),
 }
 
@@ -59,6 +61,7 @@ impl Config {
         };
         let command = match args.next() {
             None => Command::Bridge,
+            Some(value) if value == "attach" => Command::Attach,
             Some(value) if value == "auth" => {
                 let command = match args.next() {
                     Some(value) if value == "login" => AuthCommand::Login,
@@ -73,6 +76,24 @@ impl Config {
                     None => return Err(ConfigError("auth requires a command".into())),
                 };
                 Command::Auth(command)
+            }
+            Some(value)
+                if value
+                    .to_str()
+                    .is_some_and(crate::terminal::bridge::is_command) =>
+            {
+                let words = std::iter::once(value)
+                    .chain(args.by_ref())
+                    .map(|word| {
+                        if word == "--data-dir" {
+                            return Err(ConfigError("--data-dir must precede the command".into()));
+                        }
+                        word.into_string().map_err(|_| {
+                            ConfigError("Command arguments must be valid UTF-8".into())
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                Command::Online(words)
             }
             Some(value) => {
                 return Err(ConfigError(format!(
