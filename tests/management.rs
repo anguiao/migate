@@ -496,6 +496,33 @@ fn assert_losing_output_disconnects_login(
 }
 
 #[test]
+fn lost_stdout_after_control_submission_reports_an_unknown_result_on_stderr() {
+    let directory = tempfile::tempdir().unwrap();
+    let listener = UnixListener::bind(directory.path().join(SOCKET)).unwrap();
+    let mut child = cli(directory.path(), &["on", "outlet", "outlet:2"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (socket, _) = listener.accept().unwrap();
+    socket.set_read_timeout(Some(TIMEOUT)).unwrap();
+    let mut peer = BufReader::new(socket);
+    peer.get_mut().write_all(b"migate/1\n").unwrap();
+    let mut request = String::new();
+    peer.read_line(&mut request).unwrap();
+    assert_eq!(request.trim_end(), r#"["on","outlet","outlet:2"]"#);
+    drop(child.stdout.take());
+    let disconnected = peer.read(&mut [0]);
+    drop(peer);
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(disconnected.unwrap(), 0);
+    assert!(!result.status.success());
+    let error = String::from_utf8(result.stderr).unwrap();
+    assert!(error.contains("command result is unknown"), "{error}");
+    assert!(error.contains("status DID"), "{error}");
+}
+
+#[test]
 fn losing_piped_output_disconnects_single_login() {
     let (reader, writer) = io::pipe().unwrap();
     assert_losing_output_disconnects_login(&["auth", "login"], reader, writer);

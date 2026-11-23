@@ -161,6 +161,7 @@ impl SocketAddress {
 
 pub struct Client {
     stream: BufReader<Async<UnixStream>>,
+    pending_follow_up: Option<&'static str>,
 }
 
 impl Client {
@@ -212,13 +213,38 @@ impl Client {
         future::or(greeting, timeout)
             .await
             .map_err(|error| format!("Management protocol error ({}): {error}", path.display()))?;
-        Ok(Some(Self { stream }))
+        Ok(Some(Self {
+            stream,
+            pending_follow_up: None,
+        }))
+    }
+
+    pub async fn while_output_open<T>(
+        mut self,
+        closed: impl Future<Output = io::Result<()>>,
+        command: impl AsyncFnOnce(&mut Self) -> Result<T, RuntimeError>,
+    ) -> Result<T, RuntimeError> {
+        let disconnected = async {
+            closed.await?;
+            Ok(None)
+        };
+        let result = future::or(async { command(&mut self).await.map(Some) }, disconnected).await?;
+        result.ok_or_else(|| self.output_error(ErrorKind::BrokenPipe.into()))
+    }
+
+    fn output_error(&self, error: io::Error) -> RuntimeError {
+        if error.kind() == ErrorKind::BrokenPipe
+            && let Some(follow_up) = self.pending_follow_up
+        {
+            return unknown_result("The client output closed before completion.", follow_up);
+        }
+        error.into()
     }
 
     pub async fn execute(
         &mut self,
         words: &[&str],
-        mut output: impl AsyncWrite + Unpin,
+        output: impl AsyncWrite + Unpin,
     ) -> Result<bool, RuntimeError> {
         let request = protocol::encode(&words)?;
         if request.len() as u64 > REQUEST_LIMIT {
@@ -229,24 +255,44 @@ impl Client {
             .write_all(&request)
             .await
             .map_err(|error| format!("Failed to submit the management command: {error}"))?;
+        let follow_up = if words.first() == Some(&"auth") {
+            "Reconnect and use auth check to verify the saved credentials."
+        } else {
+            "Reconnect and use status DID to check the device."
+        };
+        self.pending_follow_up = Some(follow_up);
+        let result = self.receive_result(output, follow_up).await;
+        self.pending_follow_up = None;
+        result
+    }
+
+    async fn receive_result(
+        &mut self,
+        mut output: impl AsyncWrite + Unpin,
+        follow_up: &str,
+    ) -> Result<bool, RuntimeError> {
         loop {
             let frame = read_frame::<Frame>(&mut self.stream, u64::MAX).await;
             match frame {
                 Ok(Some(Frame::Output(text))) => {
-                    output.write_all(text.as_bytes()).await?;
-                    output.flush().await?;
+                    output
+                        .write_all(text.as_bytes())
+                        .await
+                        .map_err(|error| self.output_error(error))?;
+                    output
+                        .flush()
+                        .await
+                        .map_err(|error| self.output_error(error))?;
                 }
                 Ok(Some(Frame::Done(success))) => return Ok(success),
                 Err(error) if error.kind() == ErrorKind::InvalidData => {
                     return Err(format!("Management protocol error: {error}").into());
                 }
                 _ => {
-                    let follow_up = if words.first() == Some(&"auth") {
-                        "Reconnect and use auth check to verify the saved credentials."
-                    } else {
-                        "Reconnect and use status DID to check the device."
-                    };
-                    return Err(format!("The management connection closed before completion. The command result is unknown. {follow_up}").into());
+                    return Err(unknown_result(
+                        "The management connection closed before completion.",
+                        follow_up,
+                    ));
                 }
             }
         }
@@ -283,6 +329,10 @@ impl Client {
             })
             .await
     }
+}
+
+fn unknown_result(cause: &str, follow_up: &str) -> RuntimeError {
+    format!("{cause} The command result is unknown. {follow_up}").into()
 }
 
 pub fn stdin_input(stdin: io::Stdin) -> impl AsyncBufRead + Unpin {

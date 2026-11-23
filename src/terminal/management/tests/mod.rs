@@ -15,6 +15,7 @@ fn interactive_eof_detaches_after_ordered_commands_even_with_a_reply_pending() {
             let mut attached = pin!(async {
                 let mut client = Client {
                     stream: BufReader::new(Async::new(client_socket).unwrap()),
+                    pending_follow_up: None,
                 };
                 client
                     .attach_interactive(BufReader::new(Async::new(input).unwrap()), &mut rendered)
