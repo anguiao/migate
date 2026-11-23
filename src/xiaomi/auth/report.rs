@@ -129,7 +129,7 @@ impl AuthReport {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum AuthError {
     Storage(StorageError),
     Cloud(CloudError),

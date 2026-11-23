@@ -3,6 +3,7 @@ mod bridge;
 mod check;
 mod login;
 mod mijia;
+mod refresh;
 mod report;
 mod service;
 mod tokens;
@@ -13,6 +14,7 @@ pub use account::{
 };
 pub(crate) use bridge::BridgeCertificate;
 pub use login::LoginAttempt;
+pub(crate) use refresh::HaRefreshes;
 pub use report::{
     AccountIdentity, AuthError, AuthReport, AuthenticationState, CertificateUpdate, FailureReason,
     LoginFailure,

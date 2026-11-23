@@ -22,14 +22,15 @@ impl AuthService {
 
     /// Validate the saved session and make at most one independent recovery attempt.
     /// The caller can classify Account and Cloud errors for its own retry policy.
-    pub(crate) async fn maintain_mijia(
+    pub(super) async fn maintain_mijia(
         &self,
         record: &XiaomiRecord,
+        generation: u64,
     ) -> Result<MijiaSession, AuthError> {
         match self.validate_mijia(&record.uid, &record.mijia).await {
             Ok(()) => Ok(record.mijia.clone()),
             Err(AuthError::Cloud(error)) if error.is_unauthorized() => {
-                self.recover_mijia(record).await
+                self.recover_mijia(&record.uid, generation).await
             }
             Err(error) => Err(error),
         }
@@ -38,10 +39,13 @@ impl AuthService {
     /// Perform one restoration after the caller has identified a rejected session.
     pub(crate) async fn recover_mijia(
         &self,
-        record: &XiaomiRecord,
+        uid: &str,
+        generation: u64,
     ) -> Result<MijiaSession, AuthError> {
+        self.require_mijia(uid, generation)?;
         let recovery = self.current_recovery()?;
         let result = self.account.restore(&recovery.credentials).await;
+        self.require_mijia(uid, generation)?;
         let candidate = match result {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -60,14 +64,25 @@ impl AuthService {
                 return Err(AuthError::Account(error));
             }
         };
-        if candidate.credentials().user_id() != record.uid {
+        if candidate.credentials().user_id() != uid {
             return Err(AuthError::Failure(FailureReason::AccountIdentityMismatch));
         }
-        self.validate_mijia(&record.uid, candidate.session())
-            .await?;
+        let validation = self.validate_mijia(uid, candidate.session()).await;
+        self.require_mijia(uid, generation)?;
+        validation?;
         let (credentials, session) = candidate.into_parts();
         self.store.update_recovery(&credentials, &session)?;
         Ok(session)
+    }
+
+    fn require_mijia(&self, uid: &str, generation: u64) -> Result<(), AuthError> {
+        if self.store.current_mijia(uid, generation) {
+            Ok(())
+        } else {
+            Err(AuthError::Missing(
+                "Mijia credentials changed during recovery",
+            ))
+        }
     }
 
     fn current_recovery(&self) -> Result<AccountRecovery, AuthError> {

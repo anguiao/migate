@@ -1,6 +1,6 @@
 use super::{StorageError, Store};
 use crate::xiaomi::{
-    auth::{AccountClientIdentity, AccountCredentials},
+    auth::{AccountClientIdentity, AccountCredentials, HaRefreshes},
     cloud::validate_saved_redirect_uri,
     mijia::MijiaSession,
 };
@@ -183,6 +183,10 @@ impl XiaomiStore {
             .as_ref()
             .expect("credentials initialized")
             .clone()
+    }
+
+    pub(crate) fn ha_refreshes(&self) -> &HaRefreshes {
+        self.store.ha_refreshes()
     }
 
     pub(crate) fn current_mijia(&self, uid: &str, generation: u64) -> bool {

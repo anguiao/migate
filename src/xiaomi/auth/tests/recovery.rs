@@ -130,9 +130,14 @@ fn known_rejected_session_is_restored_without_probing_it_again() {
     let store = Store::open(dir.path()).unwrap();
     let record = recovery_record();
     store.xiaomi().fixture_replace(&record).unwrap();
-    store.xiaomi().snapshot().unwrap();
+    let generation = store
+        .xiaomi()
+        .snapshot()
+        .unwrap()
+        .mijia_generation()
+        .unwrap();
     let (auth, account, mijia, _) = recovery_service(&store, RecoveryResponse::Success);
-    let session = block_on(auth.recover_mijia(&record)).unwrap();
+    let session = block_on(auth.recover_mijia(&record.uid, generation)).unwrap();
     assert_eq!(session.service_token(), "restored-service");
     assert_eq!(account.try_iter().count(), 2);
     let requests: Vec<_> = mijia.try_iter().collect();
@@ -146,14 +151,19 @@ fn stopped_recovery_is_not_retried_from_an_older_snapshot() {
     let store = Store::open(dir.path()).unwrap();
     let record = recovery_record();
     store.xiaomi().fixture_replace(&record).unwrap();
-    store.xiaomi().snapshot().unwrap();
+    let generation = store
+        .xiaomi()
+        .snapshot()
+        .unwrap()
+        .mijia_generation()
+        .unwrap();
     store
         .xiaomi()
         .stop_recovery(RecoveryStop::VerificationRequired)
         .unwrap();
     let (auth, account, mijia, _) = recovery_service(&store, RecoveryResponse::Success);
     assert!(matches!(
-        block_on(auth.recover_mijia(&record)),
+        block_on(auth.recover_mijia(&record.uid, generation)),
         Err(AuthError::Failure(FailureReason::RecoveryStopped(
             RecoveryStop::VerificationRequired
         )))

@@ -543,3 +543,117 @@ fn new_ha_generation_does_not_wait_for_old_certificate_response() {
         release.send(()).unwrap();
     }));
 }
+
+#[test]
+fn check_uses_the_refresh_already_running_in_the_adapter() {
+    let rig = Rig::new(true, &["one"]);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    token_deadlines(&rig, 0, 100);
+    let (release, gate) = flume::bounded(1);
+    rig.cloud.lock().unwrap().token_gate = Some(gate);
+    let uid = rig.uid.clone();
+    let (base, requests) = dynamic_mock_server(2, move |request| {
+        if request.target.ends_with("/gethome") {
+            MockResponse::json(
+                200,
+                &json!({"code":0,"result":{"homelist":[{"uid":uid,"dids":[]}]}}).to_string(),
+            )
+        } else {
+            MockResponse::json(503, "unexpected check request")
+        }
+    });
+    let auth = crate::xiaomi::auth::AuthService::for_adapter_test(
+        rig.store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        rig.source.cloud.test_base_url(),
+    );
+
+    block_on(rig.run(|c| async move {
+        until(|| c.cloud.lock().unwrap().tokens == 1).await;
+        let mut checking = Box::pin(auth.check());
+        assert!(poll_once(checking.as_mut()).await.is_none());
+        release.send(()).unwrap();
+        let report = checking.await.unwrap();
+        assert!(matches!(
+            report.mijia,
+            crate::xiaomi::auth::AuthenticationState::Authenticated
+        ));
+        assert!(matches!(
+            report.ha,
+            crate::xiaomi::auth::AuthenticationState::Authenticated
+        ));
+        let seen: Vec<_> = requests.try_iter().collect();
+        assert!(
+            seen.iter()
+                .all(|request| !request.target.contains("get_token"))
+        );
+        let home = seen
+            .iter()
+            .find(|request| request.target.ends_with("/gethome"))
+            .unwrap();
+        assert!(
+            home.headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearerfresh-access")
+        );
+        assert_eq!(c.cloud.lock().unwrap().tokens, 1);
+    }));
+}
+
+#[test]
+fn the_adapter_does_not_apply_an_old_refresh_result_after_login() {
+    for status in [200, 401, 503] {
+        let rig = Rig::new(true, &["one"]);
+        rig.clock
+            .automatic
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        token_deadlines(&rig, 0, 100);
+        let (release, gate) = flume::bounded(1);
+        {
+            let mut cloud = rig.cloud.lock().unwrap();
+            cloud.token_status = status;
+            cloud.token_gate = Some(gate);
+        }
+        block_on(rig.run(|c| async move {
+            until(|| c.cloud.lock().unwrap().tokens == 1).await;
+            let mut record = c.store.xiaomi().load().unwrap().unwrap();
+            let authorization = &mut record.ha.authorization;
+            authorization.tokens.access_token = "new-login-access".into();
+            authorization.tokens.refresh_token = "new-login-refresh".into();
+            authorization.tokens.refresh_at = c.clock.wall() + 73;
+            c.store
+                .xiaomi()
+                .commit_login(
+                    &record.recovery.credentials,
+                    &record.mijia,
+                    &record.ha.client_uuid,
+                    authorization,
+                )
+                .unwrap();
+            c.context.reload_credentials();
+            release.send(()).unwrap();
+            until(|| {
+                c.clock
+                    .deadlines
+                    .lock()
+                    .unwrap()
+                    .contains(&Duration::from_secs(73))
+            })
+            .await;
+            assert!(matches!(
+                c.context.diagnostics().auth.ha,
+                crate::xiaomi::auth::AuthenticationState::Checking
+                    | crate::xiaomi::auth::AuthenticationState::Authenticated
+            ));
+            let saved = c.store.xiaomi().load().unwrap().unwrap();
+            assert_eq!(saved.ha, record.ha);
+            assert_eq!(
+                c.context.credentials.borrow().record().unwrap().ha,
+                record.ha
+            );
+            assert_eq!(c.cloud.lock().unwrap().tokens, 1);
+        }));
+    }
+}

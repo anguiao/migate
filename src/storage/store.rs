@@ -9,6 +9,7 @@ use super::{
     schema,
     xiaomi::XiaomiStore,
 };
+use crate::xiaomi::auth::HaRefreshes;
 use rusqlite::Connection;
 use std::{
     cell::RefCell,
@@ -27,6 +28,7 @@ struct Inner {
     path: PathBuf,
     connection: Connection,
     xiaomi: RefCell<Option<super::xiaomi::CredentialSnapshot>>,
+    ha_refreshes: HaRefreshes,
 }
 
 impl Store {
@@ -70,6 +72,7 @@ impl Store {
                 path,
                 connection,
                 xiaomi: RefCell::new(None),
+                ha_refreshes: HaRefreshes::default(),
             }),
         })
     }
@@ -104,6 +107,10 @@ impl Store {
 
     pub(super) fn xiaomi_state(&self) -> &RefCell<Option<super::xiaomi::CredentialSnapshot>> {
         &self.inner.xiaomi
+    }
+
+    pub(super) fn ha_refreshes(&self) -> &HaRefreshes {
+        &self.inner.ha_refreshes
     }
 
     pub(super) fn database_error(

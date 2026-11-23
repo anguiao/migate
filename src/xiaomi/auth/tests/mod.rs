@@ -28,5 +28,6 @@ mod certificate;
 mod check;
 mod lifecycle;
 mod login;
+mod maintenance;
 mod recovery;
 mod support;

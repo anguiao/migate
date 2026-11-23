@@ -1,9 +1,9 @@
 use super::{
     AccountClient, AccountIdentity, AuthError, AuthReport, AuthenticationState, CertificateUpdate,
-    FailureReason, tokens,
+    FailureReason, refresh::require_ha,
 };
 use crate::{
-    storage::{HubIdentity, StorageError, TokenSet, XiaomiRecord, XiaomiStore},
+    storage::{HubIdentity, StorageError, XiaomiRecord, XiaomiStore},
     xiaomi::{
         certificate::{CertificateValidity, ClientIdentity, validate_certificate},
         cloud::{CloudClient, CloudError},
@@ -79,52 +79,33 @@ impl AuthService {
         Ok(self.store.snapshot()?.record)
     }
 
-    pub(super) async fn refresh_tokens_once(
-        &self,
-        redirect_uri: &str,
-        tokens: &TokenSet,
-        now: impl Fn() -> i64,
-    ) -> Result<TokenSet, AuthError> {
-        let response = self
-            .cloud
-            .refresh_token(redirect_uri, &tokens.refresh_token)
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                if error.is_unauthorized() {
-                    self.store.stop_ha_refresh()?;
-                }
-                return Err(AuthError::Cloud(error));
-            }
-        };
-        let replacement = tokens::from_response(response, now()).map_err(AuthError::Cloud)?;
-        self.store.update_tokens(&replacement)?;
-        Ok(replacement)
-    }
-
     pub(super) fn prepare_client_identity(
         &self,
-        record: &mut XiaomiRecord,
-    ) -> Result<ClientIdentity, AuthError> {
-        if let Some(hub) = &record.hub {
-            return ClientIdentity::from_private_key(
-                &record.uid,
-                &hub.virtual_did,
-                &hub.private_key_pem,
-            )
-            .map_err(|error| self.corrupt_record(error).into());
-        }
-        let identity = ClientIdentity::generate(&record.uid)
-            .map_err(|_| AuthError::Failure(FailureReason::InvalidClientIdentity))?;
-        let hub = HubIdentity {
-            virtual_did: identity.virtual_did.clone(),
-            private_key_pem: identity.private_key_pem.clone(),
-            certificate_pem: None,
+        uid: &str,
+        generation: u64,
+    ) -> Result<(XiaomiRecord, ClientIdentity), AuthError> {
+        require_ha(&self.store, uid, generation)?;
+        let mut record = self
+            .store
+            .current_snapshot()
+            .record
+            .expect("current HA authorization");
+        let identity = if let Some(hub) = &record.hub {
+            ClientIdentity::from_private_key(&record.uid, &hub.virtual_did, &hub.private_key_pem)
+                .map_err(|error| AuthError::Storage(self.corrupt_record(error)))?
+        } else {
+            let identity = ClientIdentity::generate(&record.uid)
+                .map_err(|_| AuthError::Failure(FailureReason::InvalidClientIdentity))?;
+            let hub = HubIdentity {
+                virtual_did: identity.virtual_did.clone(),
+                private_key_pem: identity.private_key_pem.clone(),
+                certificate_pem: None,
+            };
+            self.store.create_hub(&hub)?;
+            record.hub = Some(hub);
+            identity
         };
-        self.store.create_hub(&hub)?;
-        record.hub = Some(hub);
-        Ok(identity)
+        Ok((record, identity))
     }
 
     pub(super) fn save_certificate_response(
@@ -154,13 +135,13 @@ impl AuthService {
     }
 
     pub(super) fn reload_credentials(&self) -> Result<StoredRecord, AuthError> {
-        Ok(self
-            .load_validated()?
-            .expect("credentials saved before reload"))
+        self.load_validated()?
+            .ok_or(AuthError::Missing("Xiaomi account is unavailable"))
     }
 
     pub(super) fn load_validated(&self) -> Result<Option<StoredRecord>, AuthError> {
-        let Some(record) = self.store.snapshot().map_err(AuthError::Storage)?.record else {
+        let snapshot = self.store.snapshot()?;
+        let Some(record) = snapshot.record else {
             return Ok(None);
         };
         let (validity, certificate_update) = if let Some(hub) = &record.hub {
@@ -193,6 +174,8 @@ impl AuthService {
         };
         Ok(Some(StoredRecord {
             record,
+            mijia_generation: snapshot.mijia_generation,
+            ha_generation: snapshot.ha_generation,
             validity,
             certificate_update,
         }))
@@ -224,6 +207,8 @@ fn current_time() -> i64 {
 
 pub(super) struct StoredRecord {
     pub(super) record: XiaomiRecord,
+    pub(super) mijia_generation: u64,
+    pub(super) ha_generation: u64,
     pub(super) validity: Option<CertificateValidity>,
     pub(super) certificate_update: CertificateUpdate,
 }

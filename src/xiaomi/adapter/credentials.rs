@@ -152,33 +152,46 @@ impl Credentials {
     }
     fn adopt(
         &mut self,
-        record: XiaomiRecord,
+        record: Option<XiaomiRecord>,
         mijia_generation: Option<u64>,
         ha_generation: Option<u64>,
     ) -> Adopted {
         let mijia_changed = self.mijia_generation != mijia_generation;
-        let ha_changed = self.ha_generation != ha_generation;
-        let changed = self.record.as_ref() != Some(&record) || mijia_changed || ha_changed;
-        let report_changed = self.report.recovery_stop != record.recovery.stop || mijia_changed;
-        self.report.recovery_stop = record.recovery.stop;
+        let ha_changed =
+            self.ha_generation != ha_generation || (self.record.is_some() && record.is_none());
+        let changed = self.record != record || mijia_changed || ha_changed;
+        let recovery_stop = record.as_ref().and_then(|record| record.recovery.stop);
+        let report_changed = self.report.recovery_stop != recovery_stop || mijia_changed;
+        self.report.recovery_stop = recovery_stop;
         if mijia_changed {
-            self.report.mijia = AuthenticationState::Checking;
+            self.report.mijia = if record.is_some() {
+                AuthenticationState::Checking
+            } else {
+                AuthenticationState::NotSignedIn
+            };
             self.mijia_rejected = None;
             self.http_paused = false;
         }
         if ha_changed {
-            self.ha_sync = if record.ha.stopped {
+            self.ha_sync = if record.as_ref().is_some_and(|record| record.ha.stopped) {
                 HaSync::Paused
             } else {
                 HaSync::Idle
             };
-            self.report.ha = if ha_generation.is_some() {
+            self.report.ha = if record.is_none() {
+                AuthenticationState::NotSignedIn
+            } else if ha_generation.is_some() {
                 AuthenticationState::Checking
             } else {
                 AuthenticationState::SignInRequired(FailureReason::HaAuthorizationStopped)
             };
         }
-        self.record = Some(record);
+        if record.is_none() {
+            self.report.account = None;
+            self.report.certificate = None;
+            self.report.certificate_update = CertificateUpdate::NotNeeded;
+        }
+        self.record = record;
         self.mijia_generation = mijia_generation;
         self.ha_generation = ha_generation;
         Adopted {
@@ -252,11 +265,22 @@ impl Credentials {
 impl Context {
     pub(super) fn adopt_credentials(&self, credentials: XiaomiRecord) {
         let snapshot = self.store.xiaomi().current_snapshot();
-        let adopted = self.credentials.borrow_mut().adopt(
-            credentials,
+        self.update_credentials(
+            Some(credentials),
             snapshot.mijia_generation(),
             snapshot.ha_generation(),
         );
+    }
+    fn update_credentials(
+        &self,
+        record: Option<XiaomiRecord>,
+        mijia_generation: Option<u64>,
+        ha_generation: Option<u64>,
+    ) {
+        let adopted = self
+            .credentials
+            .borrow_mut()
+            .adopt(record, mijia_generation, ha_generation);
         if adopted.report_changed || adopted.ha_changed {
             self.status_changed.notify(usize::MAX);
         }
@@ -277,13 +301,10 @@ impl Context {
         }
     }
     pub(super) fn reload_credentials(&self) {
-        let record = self
-            .store
-            .xiaomi()
-            .current_snapshot()
-            .record
-            .expect("active account");
-        self.adopt_credentials(record);
+        let snapshot = self.store.xiaomi().current_snapshot();
+        let mijia_generation = snapshot.mijia_generation();
+        let ha_generation = snapshot.ha_generation();
+        self.update_credentials(snapshot.record, mijia_generation, ha_generation);
     }
     pub(super) fn mijia_authentication(&self, authentication: AuthenticationState) {
         self.credentials
@@ -367,9 +388,12 @@ fn deadline(context: &Context, unix: i64) -> Duration {
 }
 
 fn saved(auth: &AuthService, context: &Context) -> Result<XiaomiRecord, AdapterError> {
-    let record = auth
-        .saved_bridge_credentials()?
-        .ok_or_else(|| AdapterError::Unavailable("Xiaomi sign-in is required".into()))?;
+    let Some(record) = auth.saved_bridge_credentials()? else {
+        context.reload_credentials();
+        return Err(AdapterError::Unavailable(
+            "Xiaomi sign-in is required".into(),
+        ));
+    };
     context.adopt_credentials(record.clone());
     Ok(record)
 }
@@ -410,6 +434,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
     let mut backoff = Backoff::new(1, 30);
     let mut retry = None;
     let mut observed_expiry = None;
+    let mut maintained = None;
     loop {
         let changed = context.ha_changed.listen();
         let record = saved(auth, &context)?;
@@ -425,6 +450,12 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
             changed.await;
             continue;
         };
+        if maintained.as_ref() != Some(&key) {
+            maintained = Some(key.clone());
+            backoff = Backoff::new(1, 30);
+            retry = None;
+            observed_expiry = None;
+        }
         let tokens = &record.ha_authorization().unwrap().tokens;
         let is_expired = tokens.expires_at <= context.clock.unix_now();
         if is_expired && observed_expiry != Some(tokens.expires_at) {
@@ -452,7 +483,9 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                 .borrow_mut()
                 .begin_refresh(key.generation, context.clock.unix_now());
             context.status_changed.notify(usize::MAX);
-            let refreshing = auth.refresh_bridge_tokens(&record, || context.clock.unix_now());
+            let clock = context.clock.clone();
+            let refreshing =
+                auth.refresh_bridge_tokens(&record, key.generation, move || clock.unix_now());
             let mut refreshing = std::pin::pin!(refreshing);
             let result = if !is_expired {
                 let expiry = deadline(&context, tokens.expires_at);
@@ -464,8 +497,10 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                 {
                     Some(result) => result,
                     None => {
-                        observed_expiry = Some(tokens.expires_at);
-                        token_expired(&context);
+                        if context.current_ha(&key) {
+                            observed_expiry = Some(tokens.expires_at);
+                            token_expired(&context);
+                        }
                         refreshing.await
                     }
                 }
@@ -478,6 +513,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                         .ha_authorization()
                         .is_some_and(|ha| ha.tokens.refresh_at <= context.clock.unix_now());
                     context.adopt_credentials(replacement);
+                    maintained = context.ha_key();
                     context
                         .credentials
                         .borrow_mut()
@@ -507,6 +543,7 @@ async fn tokens(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterE
                     }
                     eligibility_changed(&context, "cloud token maintenance failed");
                 }
+                Err(AuthError::Missing(_)) => continue,
                 Err(error) => return Err(error.into()),
             }
             continue;
@@ -721,6 +758,7 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
     let mut backoff = Backoff::new(1, 30);
     let mut retry_due = None;
     let mut blocked = false;
+    let mut maintained = None;
     loop {
         let record = saved(auth, &context)?;
         let generation = context
@@ -728,6 +766,12 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
             .borrow()
             .mijia_generation
             .expect("active account");
+        if maintained != Some(generation) {
+            maintained = Some(generation);
+            backoff = Backoff::new(1, 30);
+            retry_due = None;
+            blocked = false;
+        }
         let changed = context.mijia_changed.listen();
         let credentials_changed = context.credentials_changed.listen();
         let rejected = context.credentials.borrow().mijia_rejected() == Some(generation);
@@ -758,14 +802,14 @@ async fn mijia(auth: &AuthService, context: Rc<Context>) -> Result<(), AdapterEr
         }
         retry_due = None;
         context.mijia_authentication(AuthenticationState::Restoring);
-        match auth.recover_mijia(&record).await {
+        match auth.recover_mijia(&record.uid, generation).await {
             Ok(_) => {
                 saved(auth, &context)?;
                 context.mijia_authentication(AuthenticationState::Authenticated);
                 context.request_sync();
                 context.refresh_changed.notify(usize::MAX);
-                backoff = Backoff::new(1, 30);
             }
+            Err(AuthError::Missing(_)) => continue,
             Err(AuthError::Storage(error)) => return Err(error.into()),
             Err(error) => {
                 let current = saved(auth, &context)?;

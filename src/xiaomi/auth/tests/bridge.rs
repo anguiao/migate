@@ -7,7 +7,7 @@ fn bridge_refresh_saves_tokens_using_the_network_completion_clock_without_other_
     let store = Store::open(dir.path()).unwrap();
     let original = valid_record("uid", "old-access", NOW, NOW + 1_000_000);
     store.xiaomi().fixture_replace(&original).unwrap();
-    store.xiaomi().snapshot().unwrap();
+    let generation = store.xiaomi().snapshot().unwrap().ha_generation().unwrap();
     let clock = Arc::new(AtomicI64::new(NOW));
     let completed = clock.clone();
     let (base, requests) = dynamic_mock_server(4, move |_| {
@@ -19,8 +19,10 @@ fn bridge_refresh_saves_tokens_using_the_network_completion_clock_without_other_
         CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
     )
     .unwrap();
-    let refreshed =
-        block_on(auth.refresh_bridge_tokens(&original, || clock.load(Ordering::SeqCst))).unwrap();
+    let refreshed = block_on(
+        auth.refresh_bridge_tokens(&original, generation, move || clock.load(Ordering::SeqCst)),
+    )
+    .unwrap();
     assert_eq!(
         refreshed.ha.authorization.tokens.access_token,
         "fresh-access"
@@ -62,7 +64,7 @@ fn bridge_helpers_return_a_single_unauthorized_response_without_refresh_or_retry
         let error = if certificate {
             block_on(auth.renew_bridge_certificate(&original, generation, || NOW)).unwrap_err()
         } else {
-            block_on(auth.refresh_bridge_tokens(&original, || NOW)).unwrap_err()
+            block_on(auth.refresh_bridge_tokens(&original, generation, || NOW)).unwrap_err()
         };
         assert!(matches!(error, AuthError::Cloud(error) if error.is_unauthorized()));
         let mut expected = original.clone();
@@ -71,7 +73,7 @@ fn bridge_helpers_return_a_single_unauthorized_response_without_refresh_or_retry
         if !certificate {
             let stopped = store.xiaomi().current_snapshot().record.unwrap();
             assert!(matches!(
-                block_on(auth.refresh_bridge_tokens(&stopped, || NOW)),
+                block_on(auth.refresh_bridge_tokens(&stopped, generation, || NOW)),
                 Err(AuthError::Missing(_))
             ));
         }

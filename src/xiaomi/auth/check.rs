@@ -1,50 +1,72 @@
 use super::{
     AccountErrorKind, AccountStage, AuthError, AuthReport, AuthService, AuthenticationState,
     CertificateUpdate, FailureReason,
+    refresh::require_ha,
     service::{StoredRecord, verify_account_uid},
 };
 use crate::{
-    storage::{TokenSet, XiaomiRecord},
+    storage::HaAuthorization,
     xiaomi::{certificate::CertificateValidity, cloud::CloudError},
 };
 
 impl AuthService {
     pub async fn check(&self) -> Result<AuthReport, AuthError> {
-        let stored = self.load_validated()?;
-        let mut report = self.report_for(stored.as_ref());
-        let Some(stored) = stored else {
-            return Ok(report);
+        let Some(initial) = self.load_validated()? else {
+            return Ok(self.report_for(None));
         };
-        report.mijia = match self.maintain_mijia(&stored.record).await {
+        let refreshes = self.store.ha_refreshes();
+        // Retain the attempt even if it finishes during the independent Mijia check.
+        let pending = refreshes.in_flight(initial.ha_generation);
+        let mijia = match self
+            .maintain_mijia(&initial.record, initial.mijia_generation)
+            .await
+        {
             Ok(_) => AuthenticationState::Authenticated,
             Err(error) => state_for_error(error)?,
         };
-        report.recovery_stop = self
-            .store
-            .current_snapshot()
-            .record
-            .and_then(|record| record.recovery.stop);
-        self.check_ha_and_certificate(stored, &mut report).await?;
+        let pending = pending.or_else(|| {
+            self.store
+                .current_snapshot()
+                .ha_generation()
+                .and_then(|generation| refreshes.in_flight(generation))
+        });
+        let joined = match pending {
+            Some(refresh) => Some(refresh.await),
+            None => None,
+        };
+        let stored = self.reload_credentials()?;
+        let mut report = self.report_for(Some(&stored));
+        report.mijia = mijia;
+        if let Some(Err(error)) = joined {
+            report.ha = state_for_error(error)?;
+        } else {
+            let refreshed = joined.is_some() || stored.ha_generation != initial.ha_generation;
+            self.check_ha_and_certificate(stored, refreshed, &mut report)
+                .await?;
+        }
         report.set_completed_at((self.now)());
         Ok(report)
     }
 
-    pub(super) async fn check_ha_and_certificate(
+    async fn check_ha_and_certificate(
         &self,
         stored: StoredRecord,
+        refreshed: bool,
         report: &mut AuthReport,
     ) -> Result<(), AuthError> {
         let record = stored.record;
         let Some(authorization) = record.ha_authorization() else {
             return Ok(());
         };
-        let mut session = CheckSession {
-            auth: self,
-            redirect_uri: &authorization.redirect_uri,
-            tokens: authorization.tokens.clone(),
-            refreshed: false,
-        };
-        if (self.now)() >= session.tokens.refresh_at
+        let mut session = CheckSession::new(
+            self,
+            &record.uid,
+            authorization.clone(),
+            stored.ha_generation,
+            refreshed,
+        );
+        if !session.refreshed
+            && (self.now)() >= session.authorization.tokens.refresh_at
             && let Err(error) = session.refresh().await
         {
             report.ha = state_for_error(error)?;
@@ -65,14 +87,13 @@ impl AuthService {
             return Ok(());
         }
         report.ha = AuthenticationState::Authenticated;
-        self.maintain_certificate(&record, stored.validity, &mut session, report)
+        self.maintain_certificate(stored.validity, &mut session, report)
             .await?;
         Ok(())
     }
 
     pub(super) async fn maintain_certificate(
         &self,
-        record: &XiaomiRecord,
         validity: Option<CertificateValidity>,
         session: &mut CheckSession<'_>,
         report: &mut AuthReport,
@@ -83,8 +104,8 @@ impl AuthService {
             report.certificate_update = CertificateUpdate::NotNeeded;
             return Ok(());
         }
-        let mut record = record.clone();
-        let identity = match self.prepare_client_identity(&mut record) {
+        let (record, identity) = match self.prepare_client_identity(session.uid, session.generation)
+        {
             Ok(identity) => identity,
             Err(AuthError::Failure(reason)) => {
                 report.certificate_update = CertificateUpdate::Failed(reason);
@@ -150,21 +171,40 @@ pub(super) fn state_for_error(error: AuthError) -> Result<AuthenticationState, A
 
 /// A check or login shares one refresh allowance across all HA requests.
 pub(super) struct CheckSession<'a> {
-    pub(super) auth: &'a AuthService,
-    pub(super) redirect_uri: &'a str,
-    pub(super) tokens: TokenSet,
-    pub(super) refreshed: bool,
+    auth: &'a AuthService,
+    uid: &'a str,
+    authorization: HaAuthorization,
+    generation: u64,
+    refreshed: bool,
 }
-impl CheckSession<'_> {
+impl<'a> CheckSession<'a> {
+    pub(super) fn new(
+        auth: &'a AuthService,
+        uid: &'a str,
+        authorization: HaAuthorization,
+        generation: u64,
+        refreshed: bool,
+    ) -> Self {
+        Self {
+            auth,
+            uid,
+            authorization,
+            generation,
+            refreshed,
+        }
+    }
+
     async fn request<T>(
         &mut self,
         mut request: impl AsyncFnMut(&str) -> Result<T, CloudError>,
     ) -> Result<T, RequestFailure> {
-        let mut result = request(&self.tokens.access_token).await;
+        require_ha(&self.auth.store, self.uid, self.generation).map_err(RequestFailure::Other)?;
+        let mut result = request(&self.authorization.tokens.access_token).await;
         if result.as_ref().is_err_and(|error| error.is_unauthorized()) && !self.refreshed {
             self.refresh().await.map_err(RequestFailure::Refresh)?;
-            result = request(&self.tokens.access_token).await;
+            result = request(&self.authorization.tokens.access_token).await;
         }
+        require_ha(&self.auth.store, self.uid, self.generation).map_err(RequestFailure::Other)?;
         if result.as_ref().is_err_and(|error| error.is_unauthorized()) {
             self.auth
                 .store
@@ -173,11 +213,19 @@ impl CheckSession<'_> {
         }
         result.map_err(|error| RequestFailure::Other(AuthError::Cloud(error)))
     }
+
     async fn refresh(&mut self) -> Result<(), AuthError> {
-        self.tokens = self
+        let refreshed = self
             .auth
-            .refresh_tokens_once(self.redirect_uri, &self.tokens, self.auth.now)
+            .refresh_tokens_once(
+                self.uid,
+                self.generation,
+                &self.authorization,
+                self.auth.now,
+            )
             .await?;
+        self.authorization.tokens = refreshed.tokens;
+        self.generation = refreshed.generation;
         self.refreshed = true;
         Ok(())
     }

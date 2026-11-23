@@ -116,13 +116,14 @@ impl AuthService {
         let mut report = self.report_for(Some(&stored));
         report.mijia = AuthenticationState::Authenticated;
         report.ha = AuthenticationState::Authenticated;
-        let mut session = CheckSession {
-            auth: self,
-            redirect_uri: &authorization.redirect_uri,
-            tokens: authorization.tokens,
-            refreshed: false,
-        };
-        self.maintain_certificate(&stored.record, stored.validity, &mut session, &mut report)
+        let mut session = CheckSession::new(
+            self,
+            &stored.record.uid,
+            authorization,
+            stored.ha_generation,
+            false,
+        );
+        self.maintain_certificate(stored.validity, &mut session, &mut report)
             .await
             .map_err(|error| login_step("certificate preparation", error))?;
         report.set_completed_at((self.now)());
