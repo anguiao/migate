@@ -39,9 +39,7 @@ impl XiaomiTestFixture for XiaomiStore {
                 .database_error("replace Xiaomi credentials", error)
         })?;
         if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
-            state.record = Some(record.clone());
-            state.mijia_generation = state.mijia_generation.wrapping_add(1);
-            state.ha_generation = state.ha_generation.wrapping_add(1);
+            state.replace_login(Some(record.clone()));
         }
         Ok(())
     }

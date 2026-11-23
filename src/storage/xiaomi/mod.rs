@@ -121,11 +121,19 @@ impl XiaomiRecord {
 #[derive(Clone)]
 pub(crate) struct CredentialSnapshot {
     pub(crate) record: Option<XiaomiRecord>,
+    pub(crate) login_generation: u64,
     pub(crate) mijia_generation: u64,
     pub(crate) ha_generation: u64,
 }
 
 impl CredentialSnapshot {
+    fn replace_login(&mut self, record: Option<XiaomiRecord>) {
+        self.record = record;
+        self.login_generation = self.login_generation.wrapping_add(1);
+        self.mijia_generation = self.mijia_generation.wrapping_add(1);
+        self.ha_generation = self.ha_generation.wrapping_add(1);
+    }
+
     pub(crate) fn mijia_generation(&self) -> Option<u64> {
         self.record.as_ref().map(|_| self.mijia_generation)
     }
@@ -169,6 +177,7 @@ impl XiaomiStore {
             let record = self.load()?;
             *self.store.xiaomi_state().borrow_mut() = Some(CredentialSnapshot {
                 record,
+                login_generation: 0,
                 mijia_generation: 0,
                 ha_generation: 0,
             });
@@ -354,9 +363,7 @@ impl XiaomiStore {
         if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
             let mut candidate = candidate;
             candidate.hub = state.record.as_ref().and_then(|record| record.hub.clone());
-            state.record = Some(candidate);
-            state.mijia_generation = state.mijia_generation.wrapping_add(1);
-            state.ha_generation = state.ha_generation.wrapping_add(1);
+            state.replace_login(Some(candidate));
         }
         Ok(())
     }
@@ -518,9 +525,7 @@ impl XiaomiStore {
                 .database_error("delete Xiaomi credentials", error)
         })?;
         if let Some(state) = self.store.xiaomi_state().borrow_mut().as_mut() {
-            state.record = None;
-            state.mijia_generation = state.mijia_generation.wrapping_add(1);
-            state.ha_generation = state.ha_generation.wrapping_add(1);
+            state.replace_login(None);
         }
         Ok(())
     }

@@ -158,6 +158,73 @@ fn check_shares_background_refresh_even_when_it_finishes_during_mijia_check() {
 }
 
 #[test]
+fn a_check_uses_rotated_tokens_during_a_home_request_but_never_adopts_a_new_login() {
+    for new_login in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let original = valid_record("uid", "old-access", NOW + 500, NOW + 1_000_000);
+        store.xiaomi().fixture_replace(&original).unwrap();
+        let generation = store.xiaomi().snapshot().unwrap().ha_generation().unwrap();
+        let (release, gate) = flume::bounded(1);
+        let (base, requests) = dynamic_mock_server(4, move |request| {
+            if request.target.contains("get_token") {
+                return MockResponse::json(200, &token_body("fresh-access", "fresh-refresh"));
+            }
+            assert!(request.target.ends_with("gethome"));
+            let home = MockResponse::json(200, &home_body(Some("uid"), &[]));
+            if request
+                .headers
+                .to_ascii_lowercase()
+                .contains("bearerold-access")
+            {
+                home.gated(gate.clone())
+            } else {
+                home
+            }
+        });
+        let auth = AuthService::with_clock(
+            store.xiaomi(),
+            CloudClient::for_test(&base, Duration::from_secs(2)).unwrap(),
+            now,
+        );
+        let (result, ()) = block_on(future::zip(auth.check(), async {
+            let home = received(&requests).await;
+            assert!(home.target.ends_with("gethome"));
+            assert!(
+                home.headers
+                    .to_ascii_lowercase()
+                    .contains("bearerold-access")
+            );
+            if new_login {
+                commit_replacement(&store, &original);
+            } else {
+                auth.refresh_bridge_tokens(&original, generation, || NOW)
+                    .await
+                    .unwrap();
+            }
+            release.send(()).unwrap();
+        }));
+        let rest: Vec<_> = requests.try_iter().collect();
+        if new_login {
+            assert!(matches!(result, Err(AuthError::Missing(_))), "{result:?}");
+            assert!(rest.is_empty());
+        } else {
+            let report = result.unwrap();
+            assert!(report.is_success(), "{report:?}");
+            assert_eq!(rest.len(), 2);
+            assert!(rest[0].target.contains("get_token"));
+            assert!(rest[1].target.ends_with("gethome"));
+            assert!(
+                rest[1]
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("bearerfresh-access")
+            );
+        }
+    }
+}
+
+#[test]
 fn late_bridge_refresh_cannot_update_the_next_login_or_restore_logged_out_credentials() {
     for (status, relogin) in [(200, true), (401, true), (200, false), (401, false)] {
         let dir = tempfile::tempdir().unwrap();

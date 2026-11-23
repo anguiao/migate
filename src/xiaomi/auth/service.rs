@@ -170,6 +170,7 @@ impl AuthService {
         };
         Ok(Some(StoredRecord {
             record,
+            login_generation: snapshot.login_generation,
             mijia_generation: snapshot.mijia_generation,
             ha_generation: snapshot.ha_generation,
             validity,
@@ -203,6 +204,7 @@ fn current_time() -> i64 {
 
 pub(super) struct StoredRecord {
     pub(super) record: XiaomiRecord,
+    pub(super) login_generation: u64,
     pub(super) mijia_generation: u64,
     pub(super) ha_generation: u64,
     pub(super) validity: Option<CertificateValidity>,

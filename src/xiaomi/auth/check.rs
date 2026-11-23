@@ -1,7 +1,7 @@
 use super::{
     AccountErrorKind, AccountStage, AuthError, AuthReport, AuthService, AuthenticationState,
     CertificateUpdate, FailureReason,
-    refresh::require_ha,
+    refresh::HA_CHANGED,
     service::{StoredRecord, verify_account_uid},
 };
 use crate::{
@@ -54,17 +54,9 @@ impl AuthService {
         refreshed: bool,
         report: &mut AuthReport,
     ) -> Result<(), AuthError> {
-        let record = stored.record;
-        let Some(authorization) = record.ha_authorization() else {
+        let Some(mut session) = CheckSession::new(self, &stored, refreshed) else {
             return Ok(());
         };
-        let mut session = CheckSession::new(
-            self,
-            &record.uid,
-            authorization.clone(),
-            stored.ha_generation,
-            refreshed,
-        );
         if !session.refreshed
             && (self.now)() >= session.authorization.tokens.refresh_at
             && let Err(error) = session.refresh().await
@@ -82,7 +74,7 @@ impl AuthService {
                 return Ok(());
             }
         };
-        if let Err(reason) = verify_account_uid(&record.uid, home.uid.as_deref()) {
+        if let Err(reason) = verify_account_uid(session.uid, home.uid.as_deref()) {
             report.ha = AuthenticationState::Unavailable(reason);
             return Ok(());
         }
@@ -157,7 +149,10 @@ pub(super) fn state_for_error(error: AuthError) -> Result<AuthenticationState, A
             (FailureReason::Account(error), rejected)
         }
         AuthError::Failure(reason) => {
-            let rejected = matches!(reason, FailureReason::RecoveryStopped(_));
+            let rejected = matches!(
+                reason,
+                FailureReason::RecoveryStopped(_) | FailureReason::HaAuthorizationStopped
+            );
             (reason, rejected)
         }
         error => return Err(error),
@@ -174,44 +169,68 @@ pub(super) struct CheckSession<'a> {
     auth: &'a AuthService,
     uid: &'a str,
     authorization: HaAuthorization,
+    login_generation: u64,
     generation: u64,
     refreshed: bool,
 }
 impl<'a> CheckSession<'a> {
     pub(super) fn new(
         auth: &'a AuthService,
-        uid: &'a str,
-        authorization: HaAuthorization,
-        generation: u64,
+        stored: &'a StoredRecord,
         refreshed: bool,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             auth,
-            uid,
-            authorization,
-            generation,
+            uid: &stored.record.uid,
+            authorization: stored.record.ha_authorization()?.clone(),
+            login_generation: stored.login_generation,
+            generation: stored.ha_generation,
             refreshed,
+        })
+    }
+
+    fn adopt_rotation(&mut self) -> Result<bool, AuthError> {
+        if self.auth.store.current_ha(self.uid, self.generation) {
+            return Ok(false);
         }
+        let snapshot = self.auth.store.current_snapshot();
+        let record = snapshot
+            .record
+            .filter(|record| {
+                record.uid == self.uid && snapshot.login_generation == self.login_generation
+            })
+            .ok_or(HA_CHANGED)?;
+        if record.ha.stopped {
+            return Err(AuthError::Failure(FailureReason::HaAuthorizationStopped));
+        }
+        self.authorization = record.ha.authorization;
+        self.generation = snapshot.ha_generation;
+        self.refreshed = true;
+        Ok(true)
     }
 
     async fn request<T>(
         &mut self,
         mut request: impl AsyncFnMut(&str) -> Result<T, CloudError>,
     ) -> Result<T, RequestFailure> {
-        require_ha(&self.auth.store, self.uid, self.generation).map_err(RequestFailure::Other)?;
-        let mut result = request(&self.authorization.tokens.access_token).await;
-        if result.as_ref().is_err_and(|error| error.is_unauthorized()) && !self.refreshed {
-            self.refresh().await.map_err(RequestFailure::Refresh)?;
-            result = request(&self.authorization.tokens.access_token).await;
+        self.adopt_rotation().map_err(RequestFailure::Other)?;
+        loop {
+            let result = request(&self.authorization.tokens.access_token).await;
+            if self.adopt_rotation().map_err(RequestFailure::Other)? {
+                continue;
+            }
+            if result.as_ref().is_err_and(|error| error.is_unauthorized()) {
+                if !self.refreshed {
+                    self.refresh().await.map_err(RequestFailure::Refresh)?;
+                    continue;
+                }
+                self.auth
+                    .store
+                    .stop_ha_refresh()
+                    .map_err(|error| RequestFailure::Other(error.into()))?;
+            }
+            return result.map_err(|error| RequestFailure::Other(AuthError::Cloud(error)));
         }
-        require_ha(&self.auth.store, self.uid, self.generation).map_err(RequestFailure::Other)?;
-        if result.as_ref().is_err_and(|error| error.is_unauthorized()) {
-            self.auth
-                .store
-                .stop_ha_refresh()
-                .map_err(|error| RequestFailure::Other(error.into()))?;
-        }
-        result.map_err(|error| RequestFailure::Other(AuthError::Cloud(error)))
     }
 
     async fn refresh(&mut self) -> Result<(), AuthError> {

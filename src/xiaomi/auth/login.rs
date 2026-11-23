@@ -125,13 +125,8 @@ impl AuthService {
         let mut report = self.report_for(Some(&stored));
         report.mijia = AuthenticationState::Authenticated;
         report.ha = AuthenticationState::Authenticated;
-        let mut session = CheckSession::new(
-            self,
-            &stored.record.uid,
-            authorization,
-            stored.ha_generation,
-            false,
-        );
+        let mut session =
+            CheckSession::new(self, &stored, false).expect("just committed HA authorization");
         self.maintain_certificate(stored.validity, &mut session, &mut report)
             .await
             .map_err(|error| login_step("certificate preparation", error))?;

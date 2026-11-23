@@ -6,7 +6,8 @@ use futures_util::{
 };
 use std::{cell::RefCell, future::Future};
 
-const HA_CHANGED: AuthError = AuthError::Missing("HA OAuth credentials changed during maintenance");
+pub(super) const HA_CHANGED: AuthError =
+    AuthError::Missing("HA OAuth credentials changed during maintenance");
 
 #[derive(Clone)]
 pub(super) struct RefreshedTokens {
