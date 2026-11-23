@@ -42,10 +42,19 @@ impl AuthService {
             .get_certificate(&authorization.tokens.access_token, &identity.csr_pem)
             .await;
         require_ha(&self.store, &record.uid, generation)?;
-        let certificate = certificate.map_err(AuthError::Cloud)?;
-        let update = match self.save_certificate_response(&record, &certificate, now())? {
-            Ok(_) => CertificateUpdate::Updated,
-            Err(reason) => CertificateUpdate::Failed(reason),
+        let current = self
+            .store
+            .current_snapshot()
+            .record
+            .expect("current HA authorization");
+        let update = if current.hub != record.hub {
+            // An online operation has already updated this identity while the request was pending.
+            CertificateUpdate::NotNeeded
+        } else {
+            match self.save_certificate_response(&record, &certificate?, now())? {
+                Ok(_) => CertificateUpdate::Updated,
+                Err(reason) => CertificateUpdate::Failed(reason),
+            }
         };
         let stored = self.reload_credentials()?;
         Ok(BridgeCertificate {

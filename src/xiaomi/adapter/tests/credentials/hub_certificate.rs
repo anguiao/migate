@@ -163,6 +163,60 @@ fn temporary_certificate_renewal_failures_retry_without_interrupting_local_contr
 }
 
 #[test]
+fn a_late_background_failure_preserves_the_certificate_saved_by_an_online_check() {
+    let rig = Rig::new(true, &["one"]);
+    let mut record = rig.store.xiaomi().load().unwrap().unwrap();
+    let certificate = record.hub.as_mut().unwrap().certificate_pem.take().unwrap();
+    rig.store.xiaomi().fixture_replace(&record).unwrap();
+    rig.source.context.adopt_credentials(record);
+    rig.clock
+        .automatic
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let (release, gate) = flume::bounded(1);
+    {
+        let mut cloud = rig.cloud.lock().unwrap();
+        cloud.cert_gate = Some(gate);
+        cloud.cert_status = 400;
+    }
+    let uid = rig.uid.clone();
+    let (base, _requests) = dynamic_mock_server(2, move |request| {
+        let result = if request.target.ends_with("/gethome") {
+            json!({"homelist":[{"uid":uid,"dids":[]}]})
+        } else {
+            assert!(request.target.ends_with("/get_central_crt"));
+            json!({"cert":certificate})
+        };
+        MockResponse::json(200, &json!({"code":0,"result":result}).to_string())
+    });
+    let auth = crate::xiaomi::auth::AuthService::for_adapter_test(
+        rig.store.xiaomi(),
+        CloudClient::for_test(&base, Duration::from_secs(1)).unwrap(),
+        rig.source.cloud.test_base_url(),
+    );
+    block_on(rig.run(|c| async move {
+        until(|| c.cloud.lock().unwrap().certs == 1).await;
+        let report = auth.check().await.unwrap();
+        assert!(report.is_success(), "{report:?}");
+        assert!(report.certificate.is_some());
+        c.context.reload_credentials();
+        release.send(()).unwrap();
+        until(|| {
+            let live = c.context.diagnostics().auth;
+            live.certificate.is_some()
+                || matches!(
+                    live.certificate_update,
+                    crate::xiaomi::auth::CertificateUpdate::Failed(
+                        crate::xiaomi::auth::FailureReason::Cloud(_)
+                    )
+                )
+        })
+        .await;
+        assert_eq!(c.context.diagnostics().auth.certificate, report.certificate);
+        assert_eq!(auth.local_status().unwrap().certificate, report.certificate);
+    }));
+}
+
+#[test]
 fn background_prepares_missing_hub_identity_before_certificate_request() {
     let rig = Rig::new(true, &["one"]);
     let mut record = rig.store.xiaomi().load().unwrap().unwrap();
