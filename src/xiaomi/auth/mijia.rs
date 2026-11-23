@@ -42,10 +42,9 @@ impl AuthService {
         uid: &str,
         generation: u64,
     ) -> Result<MijiaSession, AuthError> {
-        self.require_mijia(uid, generation)?;
-        let recovery = self.current_recovery()?;
+        let recovery = self.current_recovery(uid, generation)?;
         let result = self.account.restore(&recovery.credentials).await;
-        self.require_mijia(uid, generation)?;
+        self.current_recovery(uid, generation)?;
         let candidate = match result {
             Ok(candidate) => candidate,
             Err(error) => {
@@ -68,29 +67,24 @@ impl AuthService {
             return Err(AuthError::Failure(FailureReason::AccountIdentityMismatch));
         }
         let validation = self.validate_mijia(uid, candidate.session()).await;
-        self.require_mijia(uid, generation)?;
+        self.current_recovery(uid, generation)?;
         validation?;
         let (credentials, session) = candidate.into_parts();
         self.store.update_recovery(&credentials, &session)?;
         Ok(session)
     }
 
-    fn require_mijia(&self, uid: &str, generation: u64) -> Result<(), AuthError> {
-        if self.store.current_mijia(uid, generation) {
-            Ok(())
-        } else {
-            Err(AuthError::Missing(
+    fn current_recovery(&self, uid: &str, generation: u64) -> Result<AccountRecovery, AuthError> {
+        if !self.store.current_mijia(uid, generation) {
+            return Err(AuthError::Missing(
                 "Mijia credentials changed during recovery",
-            ))
+            ));
         }
-    }
-
-    fn current_recovery(&self) -> Result<AccountRecovery, AuthError> {
         let recovery = self
             .store
             .current_snapshot()
             .record
-            .ok_or(AuthError::Missing("Xiaomi account is unavailable"))?
+            .expect("current Mijia session")
             .recovery;
         if let Some(stop) = recovery.stop {
             return Err(AuthError::Failure(FailureReason::RecoveryStopped(stop)));

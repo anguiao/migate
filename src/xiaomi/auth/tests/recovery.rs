@@ -173,6 +173,39 @@ fn stopped_recovery_is_not_retried_from_an_older_snapshot() {
 }
 
 #[test]
+fn a_late_recovery_cannot_clear_verification_required_by_an_online_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut expected = recovery_record();
+    store.xiaomi().fixture_replace(&expected).unwrap();
+    let generation = store
+        .xiaomi()
+        .snapshot()
+        .unwrap()
+        .mijia_generation()
+        .unwrap();
+    let (background, ..) = recovery_service(&store, RecoveryResponse::Success);
+    let (check, ..) = recovery_service(&store, RecoveryResponse::Verification);
+    block_on(async {
+        let mut pending = std::pin::pin!(background.recover_mijia(&expected.uid, generation));
+        assert!(future::poll_once(pending.as_mut()).await.is_none());
+        let report = check.check().await.unwrap();
+        assert_eq!(
+            report.recovery_stop,
+            Some(RecoveryStop::VerificationRequired)
+        );
+        assert!(matches!(
+            pending.await,
+            Err(AuthError::Failure(FailureReason::RecoveryStopped(
+                RecoveryStop::VerificationRequired
+            )))
+        ));
+    });
+    expected.recovery.stop = Some(RecoveryStop::VerificationRequired);
+    assert_eq!(store.xiaomi().load().unwrap(), Some(expected));
+}
+
+#[test]
 fn rejected_or_verification_recovery_stops_across_reopen_but_not_ha_or_certificate() {
     for (scenario, stop) in [
         (RecoveryResponse::Rejected, RecoveryStop::Rejected),
