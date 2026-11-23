@@ -1,5 +1,8 @@
 use super::*;
 
+// The watchdog covers all ACK batches for the eighty-device scenarios on slow runners.
+const LARGE_STARTUP_STALL_TIMEOUT: Duration = Duration::from_secs(15);
+
 #[test]
 fn many_devices_share_sixteen_cloud_startup_handshakes_without_queue_full_retries() {
     let members = (0..80)
@@ -8,6 +11,7 @@ fn many_devices_share_sixteen_cloud_startup_handshakes_without_queue_full_retrie
     let members = members.iter().map(String::as_str).collect::<Vec<_>>();
     let paths = startup_paths(&members);
     let (rig, listener, peer) = with_cloud_peer(&members);
+    let rig = rig.with_stall_timeout(LARGE_STARTUP_STALL_TIMEOUT);
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -38,6 +42,7 @@ fn waiting_cloud_startup_subscriptions_are_revoked_and_replaced_before_sending()
     let members = members.iter().map(String::as_str).collect::<Vec<_>>();
     let paths = startup_paths(&members);
     let (rig, listener, peer) = with_cloud_peer(&members);
+    let rig = rig.with_stall_timeout(LARGE_STARTUP_STALL_TIMEOUT);
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
@@ -72,6 +77,7 @@ fn reconnect_discards_inflight_and_waiting_startup_subscription_budget() {
     let members = members.iter().map(String::as_str).collect::<Vec<_>>();
     let paths = startup_paths(&members);
     let (rig, listener, peer) = with_cloud_peer(&members);
+    let rig = rig.with_stall_timeout(LARGE_STARTUP_STALL_TIMEOUT);
     rig.clock
         .automatic
         .store(false, std::sync::atomic::Ordering::Relaxed);
