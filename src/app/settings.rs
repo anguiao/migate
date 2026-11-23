@@ -15,6 +15,13 @@ impl App {
         configuration: CommittedConfiguration,
         install: impl FnOnce(&mut EffectiveConfiguration),
     ) -> Result<(), StorageError> {
+        if self.is_stopped() {
+            return Err(StorageError::new(
+                self.store.path(),
+                "update device settings",
+                "Xiaomi account is no longer active",
+            ));
+        }
         self.store
             .devices()
             .commit_configuration(&configuration, &[])?;

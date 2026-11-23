@@ -12,7 +12,7 @@ use crate::{
     storage::StorageError,
     xiaomi::adapter::AdapterStatus,
 };
-pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, map-type DID FUNCTION switch|light, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, help\nUse list to find stable function keys.";
+pub const COMMAND_HELP: &str = "Available commands: list, status [DID], on DID FUNCTION, off DID FUNCTION, map-type DID FUNCTION switch|light, mode DID FUNCTION off|heat, temperature DID FUNCTION VALUE, bind-sensor TARGET_DID TARGET_FUNCTION SENSOR_DID SENSOR_FUNCTION, unbind-sensor TARGET_DID TARGET_FUNCTION, auth login|check|logout, pairing [open], help\nUse list to find stable function keys.";
 
 pub(crate) fn is_command(verb: &str) -> bool {
     matches!(
@@ -26,6 +26,7 @@ pub(crate) fn is_command(verb: &str) -> bool {
             | "temperature"
             | "bind-sensor"
             | "unbind-sensor"
+            | "pairing"
             | "help"
     )
 }
@@ -172,6 +173,9 @@ impl View {
 
 impl Context<'_> {
     async fn handle_words(&self, words: &[&str]) -> Result<Option<Reply>, StorageError> {
+        if self.app.is_stopped() {
+            return Ok(Some(Reply::failure(management::WAITING_FOR_LOGIN)));
+        }
         match words {
             ["map-type", did, id, kind] => {
                 let device_type = match *kind {

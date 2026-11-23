@@ -103,3 +103,55 @@ fn management_query_and_accepted_control_have_independent_lifetimes() {
         "{log}"
     );
 }
+
+#[test]
+fn pairing_on_the_same_management_socket_uses_the_current_matter_window() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut bridge = TestProcess::start_gated(directory.path(), 0, false);
+    let mut session = Session::connect(directory.path());
+    for command in [&["pairing"][..], &["pairing", "open"][..]] {
+        session.send(command);
+        assert_eq!(
+            session.result(),
+            (false, "Waiting for initial Xiaomi device reads.\n".into())
+        );
+    }
+
+    fs::write(directory.path().join("source-ready"), b"ready").unwrap();
+    for run in 1..=2 {
+        bridge.wait_for_output_matching(
+            Stream::Stdout,
+            "a newly opened Matter window",
+            TIMEOUT,
+            |output| output.matches("open for 15 minutes.").count() == run,
+        );
+        let (output, _) = bridge.output();
+        let current_code = output
+            .lines()
+            .rfind(|line| line.starts_with("Manual pairing code: "))
+            .unwrap();
+        let current_payload = output
+            .lines()
+            .rfind(|line| line.starts_with("MT:"))
+            .unwrap();
+        for command in [&["pairing"][..], &["pairing", "open"][..]] {
+            session.send(command);
+            let (ok, pairing) = session.result();
+            assert!(ok, "{pairing}");
+            assert!(pairing.contains(current_code), "{pairing}");
+            assert!(pairing.contains(current_payload), "{pairing}");
+            assert!(pairing.contains("remaining."), "{pairing}");
+        }
+        if run == 1 {
+            bridge.send("pairing\npairing open\n");
+            bridge.wait_for_output_matching(
+                Stream::Stdout,
+                "both pairing replies",
+                TIMEOUT,
+                |output| output.matches(current_payload).count() == 3,
+            );
+            fs::write(directory.path().join("source-remove"), b"remove").unwrap();
+        }
+    }
+    bridge.stop("-TERM");
+}

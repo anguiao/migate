@@ -10,7 +10,9 @@ mod settings;
 mod shutdown;
 mod startup;
 
-pub use lifecycle::{BridgeTerminal, run_xiaomi_bridge, run_xiaomi_bridge_with_terminal};
+pub use lifecycle::{
+    BridgeTerminal, run_managed_xiaomi_bridge, run_xiaomi_bridge, run_xiaomi_bridge_with_terminal,
+};
 pub use shutdown::shutdown_signal;
 
 use sensor_binding::activate_temperature_bindings;
@@ -29,6 +31,7 @@ use std::{
     rc::Rc,
 };
 
+#[derive(Clone, Copy)]
 pub struct BridgeOptions<'a> {
     pub store: &'a Store,
     pub identity: &'a Identity,
@@ -177,6 +180,10 @@ impl App {
 
     pub(crate) fn stop_actions(&self) {
         self.source.stop_actions();
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.source.is_stopped()
     }
 
     /// Assemble one Matter instance from the same committed configuration.

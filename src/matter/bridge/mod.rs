@@ -53,6 +53,15 @@ impl Advertisement {
         self.port = socket.get_ref().local_addr()?.port();
         Ok(socket)
     }
+
+    pub(crate) async fn stop(&mut self) {
+        #[cfg(target_os = "macos")]
+        self.publisher.stop().await;
+        #[cfg(target_os = "linux")]
+        {
+            self.publisher = mdns::Publisher::default();
+        }
+    }
 }
 
 /// The one application configuration entry used by Matter label writes.

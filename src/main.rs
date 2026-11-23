@@ -5,14 +5,14 @@ use std::{env, path::Path, process::ExitCode};
 use futures_lite::{future, io::BufReader};
 use migate::{
     RuntimeError,
-    app::{BridgeOptions, BridgeTerminal, run_xiaomi_bridge_with_terminal, shutdown_signal},
+    app::{BridgeOptions, BridgeTerminal, run_managed_xiaomi_bridge, shutdown_signal},
     config::{AuthCommand, Command, Config},
     storage::{Identity, InstanceLock, Store, XiaomiStore},
     terminal::{
         self, AuthStatus,
         management::{Client, Listener},
     },
-    xiaomi::{adapter::XiaomiAdapter, auth::AuthService, cloud::CloudClient, discovery::Discovery},
+    xiaomi::{auth::AuthService, cloud::CloudClient},
 };
 
 fn main() -> ExitCode {
@@ -144,46 +144,22 @@ fn run_bridge(executable: &Path, data_dir: &Path, matter_port: u16) -> Result<()
     let cloud = CloudClient::new()?;
     let auth = AuthService::new(store.xiaomi(), cloud.clone())?;
     let report = auth.local_status()?;
-    if report.account.is_none() {
-        return Err(format!(
-            "Xiaomi sign-in is required. Sign in with:\n  {}",
-            terminal::login_command(executable, data_dir)
-        )
-        .into());
-    }
     let status = AuthStatus::new(report, executable.to_owned(), data_dir.to_owned());
     status.log(terminal::current_time());
-    let (discovery, driver) = Discovery::start()?;
-    let (adapter, ready) = XiaomiAdapter::new(store.clone(), cloud, discovery)?;
-    let source_handle = adapter.source_handle();
     future::block_on(async {
         let interrupt = async {
             let signal = shutdown_signal().await?;
             log::info!("Received {signal}; stopping MiGate");
             Ok(())
         };
-        let networking = future::or(
-            async {
-                adapter.run(|report| status.update_adapter(report)).await?;
-                Err::<(), RuntimeError>("Xiaomi adapter ended unexpectedly".into())
-            },
-            async {
-                driver.run().await?;
-                Err::<(), RuntimeError>("Gateway discovery ended unexpectedly".into())
-            },
-        );
-        run_xiaomi_bridge_with_terminal(
+        run_managed_xiaomi_bridge(
             BridgeOptions {
                 store: &store,
                 identity: &identity,
                 status: &status,
                 port: matter_port,
             },
-            async {
-                ready.wait().await?;
-                Ok(source_handle)
-            },
-            networking,
+            cloud,
             BridgeTerminal {
                 input: BufReader::new(blocking::Unblock::new(std::io::stdin())),
                 output: blocking::Unblock::new(std::io::stdout()),

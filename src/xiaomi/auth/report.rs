@@ -111,6 +111,19 @@ pub struct AuthReport {
 }
 
 impl AuthReport {
+    pub(crate) fn not_signed_in(now: i64) -> Self {
+        Self {
+            account: None,
+            recovery_stop: None,
+            mijia: AuthenticationState::NotSignedIn,
+            ha: AuthenticationState::NotSignedIn,
+            certificate: None,
+            certificate_update: CertificateUpdate::NotNeeded,
+            login_failure: None,
+            completed_at: now,
+        }
+    }
+
     pub fn is_success(&self) -> bool {
         self.login_failure.is_none()
             && matches!(self.mijia, AuthenticationState::Authenticated)

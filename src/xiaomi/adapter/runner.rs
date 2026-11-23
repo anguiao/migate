@@ -107,11 +107,6 @@ impl XiaomiAdapter {
 impl Drop for XiaomiAdapter {
     fn drop(&mut self) {
         self.context.stop();
-        for slot in self.context.directory.borrow().devices.values() {
-            if let Some(loading) = &slot.loading {
-                loading.life.close();
-            }
-        }
         self.context.tasks.clear();
         self.context.ready.finish(Err(AdapterError::Cancelled));
     }

@@ -60,16 +60,7 @@ impl AuthService {
                 login_failure: None,
                 completed_at: (self.now)(),
             },
-            None => AuthReport {
-                account: None,
-                recovery_stop: None,
-                mijia: AuthenticationState::NotSignedIn,
-                ha: AuthenticationState::NotSignedIn,
-                certificate: None,
-                certificate_update: CertificateUpdate::NotNeeded,
-                login_failure: None,
-                completed_at: (self.now)(),
-            },
+            None => AuthReport::not_signed_in((self.now)()),
         }
     }
 

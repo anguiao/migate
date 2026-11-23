@@ -37,13 +37,13 @@ impl AppSource {
 
     fn power_binding(
         &self,
+        did: &str,
     ) -> (
         Rc<DeviceWork>,
         String,
         crate::xiaomi::capability::PropertyBinding,
     ) {
-        let physical = self.physical.as_ref().expect("test source has a device");
-        let work = self.handle.0.directory.borrow().devices[&physical.key().id]
+        let work = self.handle.0.directory.borrow().devices[did]
             .work
             .clone()
             .expect("test device has a source");
@@ -61,27 +61,46 @@ impl AppSource {
 
     /// Deliver a source read through the real observation ordering boundary.
     pub(crate) fn read_power(&self, value: bool) {
-        let (work, id, binding) = self.power_binding();
+        let did = &self
+            .physical
+            .as_ref()
+            .expect("test source has a device")
+            .key()
+            .id;
+        self.power_read(did, value)();
+    }
+
+    /// Take the read stamp now and deliver the result separately.
+    pub(crate) fn power_read(&self, did: &str, value: bool) -> impl FnOnce() + use<> {
+        let (work, id, binding) = self.power_binding(did);
         let stamp = work
             .observations
             .read_stamp_input(&id, crate::xiaomi::capability::ReadInput::Property(binding));
-        work.observe_read_at(
-            &id,
-            binding,
-            &stamp,
-            &serde_json::json!(value),
-            super::super::observations::Observation {
-                source: super::super::model::PathKind::Cloud,
-                source_time: None,
-                received_at: 1,
-            },
-        )
-        .expect("test power is a valid source value");
+        move || {
+            work.observe_read_at(
+                &id,
+                binding,
+                &stamp,
+                &serde_json::json!(value),
+                super::super::observations::Observation {
+                    source: super::super::model::PathKind::Cloud,
+                    source_time: None,
+                    received_at: 1,
+                },
+            )
+            .expect("test power is a valid source value");
+        }
     }
 
     /// Settle the first power read through the refresh failure path.
     pub(crate) fn fail_initial_read(&self) {
-        let (work, id, binding) = self.power_binding();
+        let did = &self
+            .physical
+            .as_ref()
+            .expect("test source has a device")
+            .key()
+            .id;
+        let (work, id, binding) = self.power_binding(did);
         work.refresh
             .borrow_mut()
             .fail_initial_for_test(&id, binding);
@@ -103,14 +122,7 @@ impl AppSource {
             }
             fixtures::save(store, &configuration);
         }
-        let (_, events) = flume::unbounded();
-        let (discovery, _driver) = Discovery::with_events(events);
-        let (adapter, _) = XiaomiAdapter::new(
-            store.clone(),
-            CloudClient::for_test("http://127.0.0.1:9", std::time::Duration::from_secs(1)).unwrap(),
-            discovery,
-        )
-        .unwrap();
+        let adapter = adapter(store);
         let derived = configuration.derive();
         let revocations = store.devices().load_revocations().unwrap();
         let mut recovery = configuration.clone();
@@ -188,6 +200,18 @@ impl AppSource {
         }
     }
 
+    /// Use the production account scope check against an existing database.
+    pub(crate) fn from_account(store: &Store) -> Self {
+        let adapter = adapter(store);
+        let handle = adapter.source_handle();
+        Self {
+            adapter,
+            handle,
+            physical: None,
+            receivers: Vec::new(),
+        }
+    }
+
     pub(crate) fn confirm_all(&self) {
         for (did, slot) in &mut self.handle.0.directory.borrow_mut().devices {
             slot.confirmed = true;
@@ -251,4 +275,16 @@ impl AppSource {
         slot.latest_description.as_mut().unwrap().native = Some(native);
         slot.latest_description.as_mut().unwrap().raw.name = Some(name.to_owned());
     }
+}
+
+fn adapter(store: &Store) -> XiaomiAdapter {
+    let (_, events) = flume::unbounded();
+    let (discovery, _driver) = Discovery::with_events(events);
+    let (adapter, _) = XiaomiAdapter::new(
+        store.clone(),
+        CloudClient::for_test("http://127.0.0.1:9", std::time::Duration::from_secs(1)).unwrap(),
+        discovery,
+    )
+    .unwrap();
+    adapter
 }

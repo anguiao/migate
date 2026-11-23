@@ -1,6 +1,6 @@
 mod process;
 
-use super::{BridgeOptions, StartupGate, run_xiaomi_bridge};
+use super::{Advertisement, BridgeOptions, StartupGate, run_xiaomi_bridge};
 use crate::app::tests::support::{outlet, status};
 use crate::{
     storage::Store, terminal::bridge::Management, xiaomi::adapter::tests::app_source::AppSource,
@@ -452,6 +452,7 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                 let listening = started.listen();
                 let published_at_start = Cell::new(0);
                 let management = Management::new(&status);
+                let mut advertisement = Advertisement::new(0);
                 let bridge = super::run_lifecycle(
                     BridgeOptions {
                         store: &store,
@@ -462,11 +463,14 @@ fn frequent_configuration_changes_cannot_postpone_the_startup_deadline() {
                     async { Ok((app, gate)) },
                     source,
                     &management,
-                    management.serve(Cursor::new([]), Vec::new(), None),
-                    async {
-                        listening.await;
-                        Ok(())
-                    },
+                    &mut advertisement,
+                    future::or(
+                        async {
+                            listening.await;
+                            Ok(())
+                        },
+                        management.serve(Cursor::new([]), Vec::new(), None),
+                    ),
                     |_| {
                         assert!(updates.get() >= 4);
                         assert!(
@@ -526,12 +530,14 @@ fn terminal_mapping_restarts_the_running_matter_instance_once() {
             let done = event_listener::Event::new();
             let stopping = done.listen();
             let management = Management::new(&status);
+            let mut advertisement = Advertisement::new(0);
             let bridge = super::run_lifecycle(
                 BridgeOptions { store: &store, identity: &identity, status: &status, port: 0 },
                 async { Ok((app.clone(), StartupGate::new(std::time::Duration::ZERO))) },
                 async move { let _source = source; future::pending().await },
-                &management, management.serve(input, output, None),
-                async { stopping.await; Ok(()) },
+                &management,
+                &mut advertisement,
+                future::or(async { stopping.await; Ok(()) }, management.serve(input, output, None)),
                 |_| { starts.set(starts.get() + 1); started.notify(usize::MAX); Ok(()) },
             );
             let controller = async {
@@ -645,6 +651,7 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                 let stop = event_listener::Event::new();
                 let stopping = stop.listen();
                 let management = Management::new(&status);
+                let mut advertisement = Advertisement::new(0);
                 let bridge = super::run_lifecycle(
                     BridgeOptions {
                         store: &store,
@@ -662,11 +669,14 @@ fn withdrawal_while_startup_waits_is_excluded_when_configuration_save_fails() {
                         future::pending().await
                     },
                     &management,
-                    management.serve(Cursor::new([]), Vec::new(), None),
-                    async {
-                        stopping.await;
-                        Ok(())
-                    },
+                    &mut advertisement,
+                    future::or(
+                        async {
+                            stopping.await;
+                            Ok(())
+                        },
+                        management.serve(Cursor::new([]), Vec::new(), None),
+                    ),
                     |_| {
                         started.notify(usize::MAX);
                         Ok(())

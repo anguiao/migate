@@ -8,7 +8,7 @@ mod logging;
 
 use super::*;
 
-use crate::xiaomi::auth::{AuthReport, CertificateUpdate};
+use crate::xiaomi::auth::{AuthReport, AuthenticationState, CertificateUpdate};
 
 #[test]
 fn restoring_mijia_and_refreshing_ha_are_reported_independently() {

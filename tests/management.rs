@@ -188,6 +188,15 @@ fn two_cli_clients_share_the_preparing_bridge_and_keep_sessions_independent() {
     assert!(result.status.success(), "{:?}", result.stderr);
     assert!(String::from_utf8(result.stdout).unwrap().contains(WAITING));
 
+    for words in [&["pairing"][..], &["pairing", "open"][..]] {
+        let result = cli(directory.path(), words).output().unwrap();
+        assert!(!result.status.success());
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            format!("{WAITING}\n")
+        );
+    }
+
     let result = cli(directory.path(), &[]).output().unwrap();
     assert!(!result.status.success());
     assert!(
@@ -276,7 +285,7 @@ fn inaccessible_socket_paths_report_permissions_errors() {
     let path = directory.path().join(SOCKET);
     let _socket = UnixListener::bind(&path).unwrap();
     let permissions = fs::metadata(directory.path()).unwrap().permissions();
-    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o000)).unwrap();
     if path.exists() {
         fs::set_permissions(directory.path(), permissions).unwrap();
         return;

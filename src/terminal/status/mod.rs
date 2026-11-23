@@ -6,7 +6,7 @@ pub(super) use format::{format_command, path, property_diagnostics, property_lab
 
 use crate::xiaomi::{
     adapter::{AdapterStatus, GatewayStatus},
-    auth::{AuthReport, AuthenticationState},
+    auth::AuthReport,
 };
 use std::{cell::RefCell, fmt::Write as _, path::PathBuf};
 use time::OffsetDateTime;
@@ -50,6 +50,14 @@ impl AuthStatus {
         format_report(&self.report.borrow(), now, &self.executable, &self.data_dir)
     }
 
+    pub(crate) fn signed_out(&self) {
+        self.last_adapter.borrow_mut().take();
+        let now = current_time();
+        if self.replace(AuthReport::not_signed_in(now)) {
+            self.log(now);
+        }
+    }
+
     pub(super) fn render_adapter(&self, adapter: &AdapterStatus) -> String {
         let mut report = format::format_report_with_certificate(
             &adapter.auth,
@@ -62,11 +70,6 @@ impl AuthStatus {
             let _ = write!(report, "\nDevice description: {problem}.");
         }
         let _ = write!(report, "\n{}", format_routing(&adapter.routing));
-        if matches!(adapter.auth.ha, AuthenticationState::SignInRequired(_))
-            || matches!(adapter.auth.mijia, AuthenticationState::SignInRequired(_))
-        {
-            report.push_str("\nStop MiGate, sign in with the same data directory, then restart.");
-        }
         report
     }
 

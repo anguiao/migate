@@ -1,4 +1,5 @@
 //! Isolated processes exercise the ordinary application lifecycle and real Matter sockets.
+mod account;
 mod advertisement;
 #[cfg(target_os = "linux")]
 mod avahi;

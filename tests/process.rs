@@ -326,19 +326,57 @@ fn log_filter_controls_diagnostics_without_changing_command_output() {
 }
 
 #[test]
-fn production_without_credentials_fails_without_pairing_or_fake_device() {
+fn production_without_credentials_keeps_its_management_sessions_available() {
     let directory = tempfile::tempdir().unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_migate"))
-        .env("RUST_LOG", "off")
-        .arg("--data-dir")
-        .arg(directory.path())
-        .output()
-        .unwrap();
-    assert!(!result.status.success());
-    let stdout = String::from_utf8(result.stdout).unwrap();
-    let stderr = String::from_utf8(result.stderr).unwrap();
-    assert!(!stdout.contains("pairing code"), "{stdout}");
-    assert!(stderr.contains("Xiaomi sign-in is required"), "{stderr}");
-    assert!(stderr.contains("auth login"), "{stderr}");
+    let cli = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_migate"));
+        command
+            .env("RUST_LOG", "info")
+            .arg("--data-dir")
+            .arg(directory.path())
+            .args(args);
+        command
+    };
+    let mut bridge = TestProcess::spawn(&mut cli(&[]));
+    bridge.send("help\nstatus\npairing\npairing open\n");
+    let waiting = "Waiting for Xiaomi sign-in.";
+    let stdout = bridge.wait_for_output_matching(Stream::Stdout, waiting, TIMEOUT, |output| {
+        output.matches(waiting).count() == 4
+    });
+    assert!(stdout.contains("auth login"), "{stdout}");
+    assert!(stdout.contains("pairing [open]"), "{stdout}");
+
+    for (words, success) in [
+        (&["help"][..], true),
+        (&["status"][..], true),
+        (&["status", "old-outlet"][..], true),
+        (&["list"][..], false),
+        (&["on", "old-outlet", "outlet:2"][..], false),
+        (&["pairing"][..], false),
+        (&["pairing", "open"][..], false),
+    ] {
+        let result = cli(words).output().unwrap();
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        assert_eq!(result.status.success(), success, "{words:?}: {stdout}");
+        assert!(stdout.contains(waiting), "{words:?}: {stdout}");
+        assert!(!stdout.contains("Manual pairing code"), "{stdout}");
+    }
+
+    let mut attached = TestProcess::spawn(&mut cli(&["attach"]));
+    attached.send("pairing\npairing open\nstatus\n");
+    attached.wait_for_output_matching(Stream::Stdout, waiting, TIMEOUT, |output| {
+        output.matches(waiting).count() == 3
+    });
+    attached.interrupt();
+
+    bridge.close_input();
+    bridge.wait_for_output(
+        Stream::Stderr,
+        "Terminal input ended; bridge is still running",
+    );
+    assert!(cli(&["status"]).output().unwrap().status.success());
+    let (_, stderr) = bridge.stop("-TERM");
+    assert!(!stderr.contains("Gateway: discovering hub"), "{stderr}");
     assert!(!stderr.contains("Matter UDP listening"), "{stderr}");
+    assert!(!directory.path().join("migate.sock").exists());
 }

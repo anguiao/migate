@@ -36,6 +36,7 @@ impl Lifetime {
 }
 pub(super) use super::work::LogicalSink;
 pub(super) struct Context {
+    pub(super) lifetime: Lifetime,
     pub(super) commands: Rc<super::commands::Commands>,
     pub(super) write_gates: super::commands::DeviceWriteGates,
     pub(super) notifications: RefCell<Option<Rc<super::notifications::CloudSession>>>,

@@ -77,6 +77,23 @@ impl SourceHandle {
         self.0.configuration.borrow().clone()
     }
 
+    /// Apply the latest saved credentials to the active source in place.
+    pub(crate) fn reload_credentials(&self) {
+        self.0.reload_credentials();
+    }
+
+    pub(crate) fn stop(&self) {
+        self.0.stop();
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.0.lifetime.is_closed()
+    }
+
+    pub(crate) async fn stopped(&self) {
+        self.0.lifetime.ended().await;
+    }
+
     /// Share the application's committed configuration and derived descriptions.
     pub(crate) fn set_configuration(
         &self,

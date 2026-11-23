@@ -128,26 +128,33 @@ impl Context {
         self.changed.notify(usize::MAX);
     }
     pub(in crate::xiaomi::adapter) fn stop(&self) {
+        if self.lifetime.is_closed() {
+            return;
+        }
+        self.lifetime.close();
         let notifications = self.notifications.borrow_mut().take();
         if let Some(session) = notifications {
             session.handle.close();
         }
         self.disconnect("Xiaomi adapter stopped".into());
-        let works = self
+        let retired = self
             .directory
-            .borrow_mut()
-            .devices
-            .values_mut()
-            .filter_map(|slot| {
-                slot.routing_history = None;
-                slot.work.clone()
-            })
-            .collect::<Vec<_>>();
-        for work in works {
-            work.physical()
-                .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
-            work.retire();
+            .replace(super::super::directory::Directory::restored(
+                None,
+                Default::default(),
+                Vec::new(),
+            ));
+        for slot in retired.devices.into_values() {
+            if let Some(loading) = slot.loading {
+                loading.life.close();
+            }
+            if let Some(work) = slot.work {
+                work.physical()
+                    .set_availability(Availability::Unavailable("Xiaomi adapter stopped".into()));
+                work.retire();
+            }
         }
+        self.configuration_changed.notify(usize::MAX);
         self.changed.notify(usize::MAX);
     }
 }

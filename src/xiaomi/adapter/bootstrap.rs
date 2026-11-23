@@ -146,6 +146,7 @@ impl XiaomiAdapter {
         }
         let report = auth.local_status()?;
         let context = Rc::new(Context {
+            lifetime: Default::default(),
             commands: Rc::new(super::commands::Commands::default()),
             write_gates: super::commands::DeviceWriteGates::default(),
             notifications: RefCell::new(None),
