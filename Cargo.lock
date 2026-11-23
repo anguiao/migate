@@ -1840,6 +1840,7 @@ dependencies = [
  "log",
  "md-5",
  "mdns-sd",
+ "mio",
  "mqttbytes",
  "qrcodegen-no-heap",
  "rand",

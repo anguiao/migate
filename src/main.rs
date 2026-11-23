@@ -1,7 +1,19 @@
 #![recursion_limit = "256"]
 
-use std::{env, io::IsTerminal, path::Path, process::ExitCode};
+use std::{
+    env,
+    fs::File,
+    io::{self, IsTerminal},
+    os::{
+        fd::{AsFd, AsRawFd},
+        unix::fs::FileTypeExt,
+    },
+    path::Path,
+    process::ExitCode,
+    time::Duration,
+};
 
+use async_io::Async;
 use futures_lite::future;
 use migate::{
     RuntimeError,
@@ -14,6 +26,7 @@ use migate::{
     },
     xiaomi::{auth::AuthService, cloud::CloudClient},
 };
+use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 
 fn main() -> ExitCode {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -43,7 +56,7 @@ fn run() -> Result<bool, RuntimeError> {
     match config.command {
         Command::Bridge => run_bridge(&executable, data_dir, config.matter_port).map(|()| true),
         Command::Auth(command) => run_auth(command, &executable, data_dir),
-        Command::Attach => future::block_on(future::or(
+        Command::Attach => run_client(future::or(
             async { shutdown_signal().await.map(|_| true) },
             async {
                 let mut client = connect(&executable, data_dir).await?;
@@ -59,7 +72,7 @@ fn run() -> Result<bool, RuntimeError> {
                 Ok(true)
             },
         )),
-        Command::Online(words) => future::block_on(async {
+        Command::Online(words) => run_client(async {
             let mut client = connect(&executable, data_dir).await?;
             let words = words.iter().map(String::as_str).collect::<Vec<_>>();
             client
@@ -67,6 +80,43 @@ fn run() -> Result<bool, RuntimeError> {
                 .await
         }),
     }
+}
+
+fn run_client<T>(
+    command: impl Future<Output = Result<T, RuntimeError>>,
+) -> Result<T, RuntimeError> {
+    let output_closed = async {
+        let output = File::from(io::stdout().as_fd().try_clone_to_owned()?);
+        let kind = output.metadata()?.file_type();
+        if !kind.is_fifo() && !kind.is_socket() {
+            return future::pending().await;
+        }
+
+        // Without a PTY, SSH can close its output reader while the client is
+        // waiting for the bridge. Only a write-side failure ends the session.
+        let mut poll = Poll::new()?;
+        poll.registry().register(
+            &mut SourceFd(&output.as_raw_fd()),
+            Token(0),
+            Interest::WRITABLE,
+        )?;
+        let ready = Async::new_nonblocking(poll.registry().try_clone()?)?;
+        let mut events = Events::with_capacity(1);
+        loop {
+            ready.readable().await?;
+            match poll.poll(&mut events, Some(Duration::ZERO)) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                result => result?,
+            }
+            if events
+                .iter()
+                .any(|event| event.is_write_closed() || event.is_error())
+            {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+            }
+        }
+    };
+    future::block_on(future::or(command, output_closed))
 }
 
 async fn connect(executable: &Path, data_dir: &Path) -> Result<Client, RuntimeError> {
@@ -106,7 +156,7 @@ fn run_auth(
             .await
             .map(Some)
     };
-    if let Some(success) = future::block_on(future::or(interrupted, online))? {
+    if let Some(success) = run_client(future::or(interrupted, online))? {
         return Ok(success);
     }
 

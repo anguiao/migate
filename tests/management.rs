@@ -2,14 +2,15 @@ mod support;
 
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
-    net::TcpListener,
+    io::{self, BufRead, BufReader, Read, Write},
+    net::{Shutdown, TcpListener},
+    os::fd::OwnedFd,
     os::unix::{
         fs::{FileTypeExt, MetadataExt, PermissionsExt, symlink},
         net::{SocketAddr, UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, Command, Stdio},
     thread,
 };
 use support::process::{Stream, TIMEOUT, TestProcess};
@@ -445,6 +446,90 @@ fn online_login_streams_output_and_interrupt_closes_the_socket() {
     assert!(error.contains("Ctrl-C"), "{error}");
     peer.join().unwrap();
     assert!(!directory.path().join("state.db").exists());
+}
+
+fn login_waiting_for_scan<R: Read>(
+    directory: &Path,
+    args: &[&str],
+    reader: R,
+    writer: impl Into<Stdio>,
+) -> (Child, BufReader<R>, UnixStream) {
+    let listener = UnixListener::bind(directory.join(SOCKET)).unwrap();
+    let mut child = cli(directory, args)
+        .stdin(Stdio::piped())
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    if args == ["attach"] {
+        writeln!(input, "auth login").unwrap();
+    }
+    drop(input);
+
+    let mut socket = read_auth_request(&listener, "login");
+    writeln!(socket, r#"{{"output":"Scan the QR code.\n"}}"#).unwrap();
+    let mut output = BufReader::new(reader);
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "Scan the QR code.\n");
+    (child, output, socket)
+}
+
+fn assert_losing_output_disconnects_login(
+    args: &[&str],
+    reader: impl Read,
+    writer: impl Into<Stdio>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let (child, output, mut socket) =
+        login_waiting_for_scan(directory.path(), args, reader, writer);
+    drop(output);
+    let disconnected = socket.read(&mut [0]);
+    drop(socket);
+    let result = child.wait_with_output().unwrap();
+    assert_eq!(
+        disconnected.expect("client kept the management socket open"),
+        0
+    );
+    assert!(!result.status.success());
+}
+
+#[test]
+fn losing_piped_output_disconnects_single_login() {
+    let (reader, writer) = io::pipe().unwrap();
+    assert_losing_output_disconnects_login(&["auth", "login"], reader, writer);
+}
+
+#[test]
+fn losing_piped_output_disconnects_attach_login() {
+    let (reader, writer) = io::pipe().unwrap();
+    assert_losing_output_disconnects_login(&["attach"], reader, writer);
+}
+
+#[test]
+fn piped_logins_deliver_the_final_result_after_input_ends() {
+    for args in [&["auth", "login"][..], &["attach"]] {
+        let directory = tempfile::tempdir().unwrap();
+        let (reader, writer) = io::pipe().unwrap();
+        let (child, mut output, mut socket) =
+            login_waiting_for_scan(directory.path(), args, reader, writer);
+        socket
+            .write_all(b"{\"output\":\"Signed in.\\n\"}\n{\"done\":true}\n")
+            .unwrap();
+        let mut rest = String::new();
+        output.read_to_string(&mut rest).unwrap();
+        let result = child.wait_with_output().unwrap();
+        assert!(result.status.success(), "{:?}", result.stderr);
+        assert_eq!(rest, "Signed in.\n");
+    }
+}
+
+#[test]
+fn socket_output_survives_a_write_half_close_and_detaches_on_close() {
+    let (reader, writer) = UnixStream::pair().unwrap();
+    reader.shutdown(Shutdown::Write).unwrap();
+    assert_losing_output_disconnects_login(&["attach"], reader, OwnedFd::from(writer));
 }
 
 #[test]
