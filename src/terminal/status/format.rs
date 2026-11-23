@@ -6,7 +6,7 @@ use crate::xiaomi::{
     auth::{AuthReport, AuthenticationState, CertificateUpdate},
     certificate::{CertificateStatus, CertificateValidity},
 };
-use std::{fmt::Write as _, path::Path};
+use std::{fmt::Write as _, os::unix::ffi::OsStrExt, path::Path};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 pub fn format_report(report: &AuthReport, now: i64, executable: &Path, data_dir: &Path) -> String {
@@ -661,5 +661,18 @@ pub(in crate::terminal) fn timestamp(value: i64) -> String {
 }
 
 fn shell_quote(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+    let mut quoted = String::from("'");
+    for chunk in path.as_os_str().as_bytes().utf8_chunks() {
+        quoted.push_str(&chunk.valid().replace('\'', "'\"'\"'"));
+        if !chunk.invalid().is_empty() {
+            // Only non-UTF-8 bytes need printf. Literal newlines stay inside single quotes.
+            quoted.push_str("'\"$(printf '");
+            for byte in chunk.invalid() {
+                write!(quoted, "\\{byte:03o}").expect("writing to a string");
+            }
+            quoted.push_str("')\"'");
+        }
+    }
+    quoted.push('\'');
+    quoted
 }

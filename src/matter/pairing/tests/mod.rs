@@ -77,6 +77,46 @@ fn closed_and_expired_windows_point_to_the_current_session_and_shell_instance() 
 }
 
 #[test]
+fn the_shell_pairing_hint_preserves_the_exact_unix_instance_paths() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt, process::Command};
+
+    let executable = OsStr::from_bytes(b"/opt/mi\xffgate");
+    let data_dir = OsStr::from_bytes(b"/tmp/bridge'\xfe$(printf changed)\\\x80\n\n");
+    let mut output = Vec::new();
+    crate::terminal::pairing::write_event(
+        &mut output,
+        PairingEvent::Expired,
+        Path::new(executable),
+        Path::new(data_dir),
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    let (_, shell_command) = output.split_once("From the shell, run\n  ").unwrap();
+
+    let parsed = Command::new("/bin/sh")
+        .args(["-c", &format!("printf '%s\\000' {shell_command}")])
+        .output()
+        .unwrap();
+    assert!(
+        parsed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&parsed.stderr)
+    );
+    let words: Vec<_> = parsed.stdout.split(|byte| *byte == 0).collect();
+    assert_eq!(
+        words,
+        [
+            executable.as_bytes(),
+            b"--data-dir",
+            data_dir.as_bytes(),
+            b"pairing",
+            b"open",
+            b""
+        ]
+    );
+}
+
+#[test]
 fn status_output_uses_the_current_deadline_and_only_shows_codes_while_open() {
     use crate::terminal::pairing::write_status;
 
