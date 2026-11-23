@@ -5,8 +5,8 @@ use super::{
     service::{StoredRecord, verify_account_uid},
 };
 use crate::{
-    storage::HaAuthorization,
-    xiaomi::{certificate::CertificateValidity, cloud::CloudError},
+    storage::{HaAuthorization, XiaomiRecord},
+    xiaomi::cloud::CloudError,
 };
 
 impl AuthService {
@@ -79,18 +79,21 @@ impl AuthService {
             return Ok(());
         }
         report.ha = AuthenticationState::Authenticated;
-        self.maintain_certificate(stored.validity, &mut session, report)
+        self.maintain_certificate(&stored.record, &mut session, report)
             .await?;
         Ok(())
     }
 
     pub(super) async fn maintain_certificate(
         &self,
-        validity: Option<CertificateValidity>,
+        checked: &XiaomiRecord,
         session: &mut CheckSession<'_>,
         report: &mut AuthReport,
     ) -> Result<(), AuthError> {
-        if validity.is_some_and(|validity| {
+        if !self.current_hub(checked) {
+            self.adopt_saved_certificate(report)?;
+        }
+        if report.certificate.is_some_and(|validity| {
             validity.currently_valid((self.now)()) && !validity.renewal_due((self.now)())
         }) {
             report.certificate_update = CertificateUpdate::NotNeeded;
@@ -106,10 +109,14 @@ impl AuthService {
             Err(error) => return Err(error),
         };
         let response = session
-            .request(async |token| self.cloud.get_certificate(token, &identity.csr_pem).await)
+            .request(async |token| {
+                self.request_certificate(&record, token, &identity.csr_pem)
+                    .await
+            })
             .await;
         let certificate = match response {
-            Ok(certificate) => certificate,
+            Ok(Some(certificate)) => certificate,
+            Ok(None) => return self.adopt_saved_certificate(report),
             Err(error) => {
                 let refresh_failed = matches!(error, RequestFailure::Refresh(_));
                 let state = state_for_error(error.into_error())?;
@@ -132,6 +139,13 @@ impl AuthService {
             }
             Err(reason) => report.certificate_update = CertificateUpdate::Failed(reason),
         }
+        Ok(())
+    }
+
+    fn adopt_saved_certificate(&self, report: &mut AuthReport) -> Result<(), AuthError> {
+        let current = self.reload_credentials()?;
+        report.certificate = current.validity;
+        report.certificate_update = current.certificate_update;
         Ok(())
     }
 }

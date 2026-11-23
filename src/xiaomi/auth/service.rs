@@ -130,6 +130,32 @@ impl AuthService {
         Ok(Ok(validity))
     }
 
+    pub(super) fn current_hub(&self, requested: &XiaomiRecord) -> bool {
+        self.store
+            .current_snapshot()
+            .record
+            .is_some_and(|record| record.hub == requested.hub)
+    }
+
+    /// A concurrent renewal can finish before a token retry or during the request.
+    /// In either case the caller adopts the saved certificate.
+    pub(super) async fn request_certificate(
+        &self,
+        record: &XiaomiRecord,
+        token: &str,
+        csr: &str,
+    ) -> Result<Option<String>, CloudError> {
+        if !self.current_hub(record) {
+            return Ok(None);
+        }
+        let result = self.cloud.get_certificate(token, csr).await;
+        if self.current_hub(record) {
+            result.map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
     pub(super) fn reload_credentials(&self) -> Result<StoredRecord, AuthError> {
         self.load_validated()?
             .ok_or(AuthError::Missing("Xiaomi account is unavailable"))

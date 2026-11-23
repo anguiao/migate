@@ -335,6 +335,80 @@ fn late_mijia_recovery_cannot_update_the_next_login_or_restore_logged_out_creden
 }
 
 #[test]
+fn an_online_check_adopts_background_certificates_saved_before_or_during_renewal() {
+    for (hold_home, status) in [(false, 503), (false, 200), (false, 401), (true, 200)] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut original = valid_record("uid", "access", NOW + 500, NOW + 60);
+        let short = original
+            .hub
+            .as_mut()
+            .unwrap()
+            .certificate_pem
+            .take()
+            .unwrap();
+        store.xiaomi().fixture_replace(&original).unwrap();
+        let generation = store.xiaomi().snapshot().unwrap().ha_generation().unwrap();
+        let (release, gate) = flume::bounded(1);
+        let mut delayed = Some(if status == 200 {
+            MockResponse::json(200, &json!({"code":0,"result":{"cert":short}}).to_string())
+        } else {
+            MockResponse::json(status, "certificate request failed")
+        });
+        let (base, requests) = dynamic_mock_server(3, move |request| {
+            if request.target.ends_with("gethome") {
+                let response = MockResponse::json(200, &home_body(Some("uid"), &[]));
+                return if hold_home {
+                    response.gated(gate.clone())
+                } else {
+                    response
+                };
+            }
+            assert!(request.target.ends_with("get_central_crt"));
+            if !hold_home && let Some(response) = delayed.take() {
+                return response.gated(gate.clone());
+            }
+            certificate_response(request)
+        });
+        let auth = AuthService::with_clock(
+            store.xiaomi(),
+            CloudClient::for_test(&base, Duration::from_secs(2)).unwrap(),
+            now,
+        );
+        let (result, renewed) = block_on(future::zip(auth.check(), async {
+            assert!(received(&requests).await.target.ends_with("gethome"));
+            if !hold_home {
+                assert!(
+                    received(&requests)
+                        .await
+                        .target
+                        .ends_with("get_central_crt")
+                );
+            }
+            let renewed = auth
+                .renew_bridge_certificate(&original, generation, || NOW)
+                .await
+                .unwrap();
+            release.send(()).unwrap();
+            renewed
+        }));
+        let report = result.unwrap();
+        assert!(report.is_success(), "HTTP {status}: {report:?}");
+        assert_eq!(report.certificate, renewed.validity);
+        assert_eq!(report.certificate_update, CertificateUpdate::NotNeeded);
+        assert_eq!(
+            auth.saved_bridge_credentials().unwrap(),
+            Some(renewed.credentials)
+        );
+        assert_eq!(
+            requests.try_iter().count(),
+            1,
+            "only the background request remains"
+        );
+    }
+}
+
+#[test]
 fn late_certificate_renewal_cannot_change_the_next_login_or_recreate_a_hub_after_logout() {
     for relogin in [true, false] {
         let dir = tempfile::tempdir().unwrap();

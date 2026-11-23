@@ -38,22 +38,20 @@ impl AuthService {
             .ha_authorization()
             .ok_or(AuthError::Missing("HA OAuth credentials are unavailable"))?;
         let certificate = self
-            .cloud
-            .get_certificate(&authorization.tokens.access_token, &identity.csr_pem)
+            .request_certificate(
+                &record,
+                &authorization.tokens.access_token,
+                &identity.csr_pem,
+            )
             .await;
         require_ha(&self.store, &record.uid, generation)?;
-        let current = self
-            .store
-            .current_snapshot()
-            .record
-            .expect("current HA authorization");
-        let update = if current.hub != record.hub {
-            // An online operation has already updated this identity while the request was pending.
-            CertificateUpdate::NotNeeded
-        } else {
-            match self.save_certificate_response(&record, &certificate?, now())? {
-                Ok(_) => CertificateUpdate::Updated,
-                Err(reason) => CertificateUpdate::Failed(reason),
+        let update = match certificate? {
+            None => CertificateUpdate::NotNeeded,
+            Some(certificate) => {
+                match self.save_certificate_response(&record, &certificate, now())? {
+                    Ok(_) => CertificateUpdate::Updated,
+                    Err(reason) => CertificateUpdate::Failed(reason),
+                }
             }
         };
         let stored = self.reload_credentials()?;
