@@ -28,15 +28,18 @@ MiGate 在数据目录保存型号、实例 URN 与完整原始 MIoT 描述，�
 
 在目标主机安装 Rust 1.96 和平台依赖，再在仓库根目录以运行网桥的普通用户执行下列命令。[构建依赖](docs/running.md#构建)
 
-已有配对时，从原网桥日志的 `Data directory` 确认原目录，用其绝对路径替换示例中的 `"$HOME/.migate"`，构建后直接执行最后一条启动命令。使用仓库 Cargo 配置时，`cargo run` 的默认目录是仓库下的 `.migate/`。
+已有配对时，从原网桥日志的 `Data directory` 确认原目录，用其绝对路径替换示例中的 `"$HOME/.migate"`。使用仓库 Cargo 配置时，`cargo run` 的默认目录是仓库下的 `.migate/`。
 
 ```sh
 cargo build --locked --release
-./target/release/migate --data-dir "$HOME/.migate" auth login
 ./target/release/migate --data-dir "$HOME/.migate"
 ```
 
-首次部署时，用米家 App 扫码授权，再按终端显示的配对码添加到 Apple Home。启用系统服务前先停止前台网桥，服务继续使用同一普通用户和数据目录。[Linux 安装与启停](docs/running.md#linux-开机自启) · [macOS 安装与启停](docs/running.md#macos-开机自启)
+首次部署时，在网桥终端输入 `auth login` 并用米家 App 扫码授权，Matter 就绪后用 `pairing` 查看配对码。[添加到 Apple Home](docs/running.md#添加到-apple-home)
+
+在同一主机的其他终端或 SSH 会话中，用 `migate attach` 连接网桥，也可用 `migate status DID` 执行单次查询。认证、设备控制和配对可直接在运行中的网桥上完成。[连接运行中的网桥](docs/running.md#连接运行中的网桥)
+
+从前台切换到系统服务前先停止前台网桥，服务继续使用同一普通用户和数据目录。[Linux 安装与启停](docs/running.md#linux-开机自启) · [macOS 安装与启停](docs/running.md#macos-开机自启)
 
 - [运行与 Apple Home 配对指南](docs/running.md)
 - [已知限制与恢复经验](docs/known-limitations.md)
